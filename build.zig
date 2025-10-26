@@ -283,4 +283,22 @@ pub fn build(b: *std.Build) void {
     const benchmark_run = b.addRunArtifact(benchmark);
     const benchmark_step = b.step("bench", "Run benchmarks");
     benchmark_step.dependOn(&benchmark_run.step);
+
+    // Add prefix optimization benchmark executable
+    const prefix_bench = b.addExecutable(.{
+        .name = "prefix_benchmarks",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/prefix_optimization.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(prefix_bench);
+
+    const prefix_bench_run = b.addRunArtifact(prefix_bench);
+    const prefix_bench_step = b.step("bench-prefix", "Run prefix optimization benchmarks");
+    prefix_bench_step.dependOn(&prefix_bench_run.step);
 }

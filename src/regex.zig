@@ -5,6 +5,7 @@ const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
+const optimizer = @import("optimizer.zig");
 
 /// Represents a match result from a regex operation
 pub const Match = struct {
@@ -37,6 +38,7 @@ pub const Regex = struct {
     nfa: compiler.NFA,
     capture_count: usize,
     flags: common.CompileFlags,
+    opt_info: optimizer.OptimizationInfo,
 
     /// Compile a regex pattern with default flags
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
@@ -54,6 +56,11 @@ pub const Regex = struct {
         var tree = try p.parse();
         defer tree.deinit();
 
+        // Analyze AST for optimizations
+        var opt = optimizer.Optimizer.init(allocator);
+        var opt_info = try opt.analyze(tree.root);
+        errdefer opt_info.deinit(allocator);
+
         // Compile AST to NFA
         var comp = compiler.Compiler.init(allocator);
         errdefer comp.deinit();
@@ -70,6 +77,7 @@ pub const Regex = struct {
             .nfa = comp.nfa,
             .capture_count = tree.capture_count,
             .flags = flags,
+            .opt_info = opt_info,
         };
     }
 
@@ -77,6 +85,8 @@ pub const Regex = struct {
     pub fn deinit(self: *Regex) void {
         self.allocator.free(self.pattern);
         self.nfa.deinit();
+        var mut_opt_info = self.opt_info;
+        mut_opt_info.deinit(self.allocator);
     }
 
     /// Check if the pattern matches the entire input string
@@ -86,34 +96,55 @@ pub const Regex = struct {
         return try virtual_machine.isMatch(input);
     }
 
+    /// Helper to build a Match from a VM MatchResult
+    fn buildMatch(self: *const Regex, input: []const u8, result: vm.MatchResult) !Match {
+        // Convert VM result to Match
+        var captures_list = try std.ArrayList([]const u8).initCapacity(self.allocator, result.captures.len);
+        errdefer captures_list.deinit(self.allocator);
+
+        for (result.captures) |cap| {
+            try captures_list.append(self.allocator, cap.text);
+        }
+
+        const captures = try captures_list.toOwnedSlice(self.allocator);
+
+        const match_result = Match{
+            .slice = input[result.start..result.end],
+            .start = result.start,
+            .end = result.end,
+            .captures = captures,
+        };
+
+        // Free the VM result (but not the capture text which is from input)
+        self.allocator.free(result.captures);
+
+        return match_result;
+    }
+
     /// Find the first match in the input string
     pub fn find(self: *const Regex, input: []const u8) !?Match {
         const nfa_mut = @constCast(&self.nfa);
         var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
 
-        if (try virtual_machine.find(input)) |result| {
-            // Convert VM result to Match
-            // Use a list first to avoid potential allocation issues
-            var captures_list = try std.ArrayList([]const u8).initCapacity(self.allocator, result.captures.len);
-            errdefer captures_list.deinit(self.allocator);
-
-            for (result.captures) |cap| {
-                try captures_list.append(self.allocator, cap.text);
+        // Use literal prefix optimization if available (but not in case-insensitive mode)
+        if (self.opt_info.literal_prefix) |prefix| {
+            if (!self.flags.case_insensitive) {
+                // Quick check: if input doesn't contain the prefix, no match possible
+                if (std.mem.indexOf(u8, input, prefix)) |prefix_pos| {
+                    // Try matching from the prefix position
+                    if (try virtual_machine.matchAt(input, prefix_pos)) |result| {
+                        return try self.buildMatch(input, result);
+                    }
+                    // If that didn't work, fall through to regular search
+                } else {
+                    // Prefix not found, no match possible
+                    return null;
+                }
             }
+        }
 
-            const captures = try captures_list.toOwnedSlice(self.allocator);
-
-            const match_result = Match{
-                .slice = input[result.start..result.end],
-                .start = result.start,
-                .end = result.end,
-                .captures = captures,
-            };
-
-            // Free the VM result (but not the capture text which is from input)
-            self.allocator.free(result.captures);
-
-            return match_result;
+        if (try virtual_machine.find(input)) |result| {
+            return try self.buildMatch(input, result);
         }
 
         return null;
