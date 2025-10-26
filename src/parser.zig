@@ -1,0 +1,458 @@
+const std = @import("std");
+const ast = @import("ast.zig");
+const common = @import("common.zig");
+const RegexError = @import("errors.zig").RegexError;
+const ErrorContext = @import("errors.zig").ErrorContext;
+
+/// Token types for lexical analysis
+pub const TokenType = enum {
+    literal,
+    dot, // .
+    star, // *
+    plus, // +
+    question, // ?
+    pipe, // |
+    lparen, // (
+    rparen, // )
+    lbracket, // [
+    rbracket, // ]
+    lbrace, // {
+    rbrace, // }
+    caret, // ^
+    dollar, // $
+    backslash, // \
+    escape_d, // \d
+    escape_D, // \D
+    escape_w, // \w
+    escape_W, // \W
+    escape_s, // \s
+    escape_S, // \S
+    escape_b, // \b
+    escape_B, // \B
+    escape_char, // \n, \t, etc.
+    eof,
+};
+
+pub const Token = struct {
+    token_type: TokenType,
+    value: u8 = 0,
+    span: common.Span,
+};
+
+/// Lexer for tokenizing regex patterns
+pub const Lexer = struct {
+    input: []const u8,
+    pos: usize,
+    start_pos: usize,
+
+    pub fn init(input: []const u8) Lexer {
+        return .{
+            .input = input,
+            .pos = 0,
+            .start_pos = 0,
+        };
+    }
+
+    fn peek(self: *Lexer) ?u8 {
+        if (self.pos >= self.input.len) return null;
+        return self.input[self.pos];
+    }
+
+    fn advance(self: *Lexer) ?u8 {
+        if (self.pos >= self.input.len) return null;
+        const c = self.input[self.pos];
+        self.pos += 1;
+        return c;
+    }
+
+    fn makeToken(self: *Lexer, token_type: TokenType, value: u8) Token {
+        return .{
+            .token_type = token_type,
+            .value = value,
+            .span = common.Span.init(self.start_pos, self.pos),
+        };
+    }
+
+    fn parseEscape(self: *Lexer) !Token {
+        // We've already consumed the backslash
+        const c = self.advance() orelse return RegexError.UnexpectedEndOfPattern;
+
+        return switch (c) {
+            'd' => self.makeToken(.escape_d, 0),
+            'D' => self.makeToken(.escape_D, 0),
+            'w' => self.makeToken(.escape_w, 0),
+            'W' => self.makeToken(.escape_W, 0),
+            's' => self.makeToken(.escape_s, 0),
+            'S' => self.makeToken(.escape_S, 0),
+            'b' => self.makeToken(.escape_b, 0),
+            'B' => self.makeToken(.escape_B, 0),
+            'n' => self.makeToken(.escape_char, '\n'),
+            't' => self.makeToken(.escape_char, '\t'),
+            'r' => self.makeToken(.escape_char, '\r'),
+            '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => {
+                // Literal escape of special characters
+                return self.makeToken(.literal, c);
+            },
+            else => RegexError.InvalidEscapeSequence,
+        };
+    }
+
+    pub fn next(self: *Lexer) !Token {
+        self.start_pos = self.pos;
+
+        const c = self.advance() orelse {
+            return self.makeToken(.eof, 0);
+        };
+
+        return switch (c) {
+            '.' => self.makeToken(.dot, 0),
+            '*' => self.makeToken(.star, 0),
+            '+' => self.makeToken(.plus, 0),
+            '?' => self.makeToken(.question, 0),
+            '|' => self.makeToken(.pipe, 0),
+            '(' => self.makeToken(.lparen, 0),
+            ')' => self.makeToken(.rparen, 0),
+            '[' => self.makeToken(.lbracket, 0),
+            ']' => self.makeToken(.rbracket, 0),
+            '{' => self.makeToken(.lbrace, 0),
+            '}' => self.makeToken(.rbrace, 0),
+            '^' => self.makeToken(.caret, 0),
+            '$' => self.makeToken(.dollar, 0),
+            '\\' => try self.parseEscape(),
+            else => self.makeToken(.literal, c),
+        };
+    }
+
+    pub fn reset(self: *Lexer) void {
+        self.pos = 0;
+        self.start_pos = 0;
+    }
+};
+
+/// Parser for regex patterns
+pub const Parser = struct {
+    lexer: Lexer,
+    allocator: std.mem.Allocator,
+    current_token: Token,
+    capture_count: usize,
+
+    pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !Parser {
+        var lexer = Lexer.init(pattern);
+        const first_token = try lexer.next();
+        return .{
+            .lexer = lexer,
+            .allocator = allocator,
+            .current_token = first_token,
+            .capture_count = 0,
+        };
+    }
+
+    fn advance(self: *Parser) !void {
+        self.current_token = try self.lexer.next();
+    }
+
+    fn peek(self: *Parser) TokenType {
+        return self.current_token.token_type;
+    }
+
+    fn expect(self: *Parser, expected: TokenType) !void {
+        if (self.current_token.token_type != expected) {
+            return RegexError.UnexpectedCharacter;
+        }
+        try self.advance();
+    }
+
+    /// Parse the entire regex pattern
+    pub fn parse(self: *Parser) !ast.AST {
+        const root = try self.parseAlternation();
+        return ast.AST.init(self.allocator, root, self.capture_count);
+    }
+
+    /// Parse alternation (lowest precedence)
+    fn parseAlternation(self: *Parser) !*ast.Node {
+        var left = try self.parseConcat();
+
+        while (self.peek() == .pipe) {
+            const start = self.current_token.span.start;
+            try self.advance(); // consume |
+            const right = try self.parseConcat();
+            const span = common.Span.init(start, self.current_token.span.end);
+            left = try ast.Node.createAlternation(self.allocator, left, right, span);
+        }
+
+        return left;
+    }
+
+    /// Parse concatenation
+    fn parseConcat(self: *Parser) !*ast.Node {
+        var nodes = std.ArrayList(*ast.Node).initCapacity(self.allocator, 0) catch unreachable;
+        defer nodes.deinit(self.allocator);
+
+        while (true) {
+            const token_type = self.peek();
+            if (token_type == .pipe or token_type == .rparen or token_type == .eof) {
+                break;
+            }
+
+            const node = try self.parseRepeat();
+            try nodes.append(self.allocator, node);
+        }
+
+        if (nodes.items.len == 0) {
+            return ast.Node.createEmpty(self.allocator, common.Span.init(self.lexer.pos, self.lexer.pos));
+        }
+
+        if (nodes.items.len == 1) {
+            return nodes.items[0];
+        }
+
+        // Build right-associative concatenation tree
+        var result = nodes.items[nodes.items.len - 1];
+        var i = nodes.items.len - 1;
+        while (i > 0) {
+            i -= 1;
+            const left = nodes.items[i];
+            const span = common.Span.init(left.span.start, result.span.end);
+            result = try ast.Node.createConcat(self.allocator, left, result, span);
+        }
+
+        return result;
+    }
+
+    /// Parse repetition operators (*, +, ?, {m,n})
+    fn parseRepeat(self: *Parser) !*ast.Node {
+        var node = try self.parsePrimary();
+        const start = node.span.start;
+
+        while (true) {
+            const token_type = self.peek();
+            const span = common.Span.init(start, self.current_token.span.end);
+
+            switch (token_type) {
+                .star => {
+                    try self.advance();
+                    node = try ast.Node.createStar(self.allocator, node, span);
+                },
+                .plus => {
+                    try self.advance();
+                    node = try ast.Node.createPlus(self.allocator, node, span);
+                },
+                .question => {
+                    try self.advance();
+                    node = try ast.Node.createOptional(self.allocator, node, span);
+                },
+                .lbrace => {
+                    // TODO: Parse {m,n} syntax
+                    return RegexError.InvalidQuantifier;
+                },
+                else => break,
+            }
+        }
+
+        return node;
+    }
+
+    /// Parse primary expressions (literals, groups, character classes)
+    fn parsePrimary(self: *Parser) RegexError!*ast.Node {
+        const token = self.current_token;
+        const span = token.span;
+
+        switch (token.token_type) {
+            .literal => {
+                try self.advance();
+                return ast.Node.createLiteral(self.allocator, token.value, span);
+            },
+            .dot => {
+                try self.advance();
+                return ast.Node.createAny(self.allocator, span);
+            },
+            .caret => {
+                try self.advance();
+                return ast.Node.createAnchor(self.allocator, .start_line, span);
+            },
+            .dollar => {
+                try self.advance();
+                return ast.Node.createAnchor(self.allocator, .end_line, span);
+            },
+            .escape_d => {
+                try self.advance();
+                return ast.Node.createCharClass(self.allocator, common.CharClasses.digit, span);
+            },
+            .escape_D => {
+                try self.advance();
+                return ast.Node.createCharClass(self.allocator, common.CharClasses.non_digit, span);
+            },
+            .escape_w => {
+                try self.advance();
+                return ast.Node.createCharClass(self.allocator, common.CharClasses.word, span);
+            },
+            .escape_W => {
+                try self.advance();
+                return ast.Node.createCharClass(self.allocator, common.CharClasses.non_word, span);
+            },
+            .escape_s => {
+                try self.advance();
+                return ast.Node.createCharClass(self.allocator, common.CharClasses.whitespace, span);
+            },
+            .escape_S => {
+                try self.advance();
+                return ast.Node.createCharClass(self.allocator, common.CharClasses.non_whitespace, span);
+            },
+            .escape_b => {
+                try self.advance();
+                return ast.Node.createAnchor(self.allocator, .word_boundary, span);
+            },
+            .escape_B => {
+                try self.advance();
+                return ast.Node.createAnchor(self.allocator, .non_word_boundary, span);
+            },
+            .escape_char => {
+                try self.advance();
+                return ast.Node.createLiteral(self.allocator, token.value, span);
+            },
+            .lparen => {
+                try self.advance(); // consume (
+                const child = try self.parseAlternation();
+                try self.expect(.rparen);
+                self.capture_count += 1;
+                const capture_index = self.capture_count;
+                return ast.Node.createGroup(self.allocator, child, capture_index, span);
+            },
+            .lbracket => {
+                return try self.parseCharClass();
+            },
+            else => {
+                return RegexError.UnexpectedCharacter;
+            },
+        }
+    }
+
+    /// Parse character class [...]
+    fn parseCharClass(self: *Parser) !*ast.Node {
+        const start = self.current_token.span.start;
+        try self.advance(); // consume [
+
+        var negated = false;
+        if (self.peek() == .caret) {
+            negated = true;
+            try self.advance();
+        }
+
+        var ranges = std.ArrayList(common.CharRange).initCapacity(self.allocator, 0) catch unreachable;
+        defer ranges.deinit(self.allocator);
+
+        while (self.peek() != .rbracket and self.peek() != .eof) {
+            const first = self.current_token;
+            if (first.token_type != .literal and first.token_type != .escape_char) {
+                return RegexError.InvalidCharacterClass;
+            }
+            const first_char = first.value;
+            try self.advance();
+
+            // Check for range (a-z)
+            if (self.peek() == .literal and self.current_token.value == '-') {
+                try self.advance(); // consume -
+
+                const second = self.current_token;
+                if (second.token_type != .literal and second.token_type != .escape_char) {
+                    return RegexError.InvalidCharacterClass;
+                }
+                const second_char = second.value;
+                try self.advance();
+
+                try ranges.append(self.allocator, common.CharRange.init(first_char, second_char));
+            } else {
+                // Single character
+                try ranges.append(self.allocator, common.CharRange.init(first_char, first_char));
+            }
+        }
+
+        try self.expect(.rbracket);
+
+        const char_class = common.CharClass{
+            .ranges = try ranges.toOwnedSlice(self.allocator),
+            .negated = negated,
+        };
+
+        const span = common.Span.init(start, self.current_token.span.end);
+        return ast.Node.createCharClass(self.allocator, char_class, span);
+    }
+};
+
+test "lexer basic tokens" {
+    var lexer = Lexer.init("a*b+c?");
+
+    const t1 = try lexer.next();
+    try std.testing.expectEqual(TokenType.literal, t1.token_type);
+    try std.testing.expectEqual(@as(u8, 'a'), t1.value);
+
+    const t2 = try lexer.next();
+    try std.testing.expectEqual(TokenType.star, t2.token_type);
+
+    const t3 = try lexer.next();
+    try std.testing.expectEqual(TokenType.literal, t3.token_type);
+    try std.testing.expectEqual(@as(u8, 'b'), t3.value);
+
+    const t4 = try lexer.next();
+    try std.testing.expectEqual(TokenType.plus, t4.token_type);
+
+    const t5 = try lexer.next();
+    try std.testing.expectEqual(TokenType.literal, t5.token_type);
+
+    const t6 = try lexer.next();
+    try std.testing.expectEqual(TokenType.question, t6.token_type);
+}
+
+test "lexer escape sequences" {
+    var lexer = Lexer.init("\\d\\w\\s\\n");
+
+    const t1 = try lexer.next();
+    try std.testing.expectEqual(TokenType.escape_d, t1.token_type);
+
+    const t2 = try lexer.next();
+    try std.testing.expectEqual(TokenType.escape_w, t2.token_type);
+
+    const t3 = try lexer.next();
+    try std.testing.expectEqual(TokenType.escape_s, t3.token_type);
+
+    const t4 = try lexer.next();
+    try std.testing.expectEqual(TokenType.escape_char, t4.token_type);
+    try std.testing.expectEqual(@as(u8, '\n'), t4.value);
+}
+
+test "parser simple literal" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "abc");
+    var result = try parser.parse();
+    defer result.deinit();
+
+    try std.testing.expectEqual(ast.NodeType.concat, result.root.node_type);
+}
+
+test "parser alternation" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "a|b");
+    var result = try parser.parse();
+    defer result.deinit();
+
+    try std.testing.expectEqual(ast.NodeType.alternation, result.root.node_type);
+}
+
+test "parser star" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "a*");
+    var result = try parser.parse();
+    defer result.deinit();
+
+    try std.testing.expectEqual(ast.NodeType.star, result.root.node_type);
+}
+
+test "parser group" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "(ab)");
+    var result = try parser.parse();
+    defer result.deinit();
+
+    try std.testing.expectEqual(ast.NodeType.group, result.root.node_type);
+    try std.testing.expectEqual(@as(usize, 1), result.capture_count);
+}

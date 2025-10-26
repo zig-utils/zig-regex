@@ -153,4 +153,22 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
+    // Add example executable
+    const example = b.addExecutable(.{
+        .name = "basic_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/basic.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(example);
+
+    const example_run = b.addRunArtifact(example);
+    const example_step = b.step("example", "Run the basic example");
+    example_step.dependOn(&example_run.step);
 }
