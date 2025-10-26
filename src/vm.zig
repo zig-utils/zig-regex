@@ -223,14 +223,14 @@ pub const VM = struct {
         return null;
     }
 
-    /// Check if the pattern matches the entire input
+    /// Check if the pattern matches anywhere in the input
     pub fn isMatch(self: *VM, input: []const u8) !bool {
-        if (try self.matchAt(input, 0)) |result| {
+        if (try self.find(input)) |result| {
             defer {
                 var mut_result = result;
                 mut_result.deinit(self.allocator);
             }
-            return result.end == input.len;
+            return true;
         }
         return false;
     }

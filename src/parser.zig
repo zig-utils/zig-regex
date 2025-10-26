@@ -357,6 +357,29 @@ pub const Parser = struct {
         }
     }
 
+    /// Get literal character from token (special chars are literal inside [...])
+    fn getCharClassChar(self: *Parser) ?u8 {
+        return switch (self.current_token.token_type) {
+            .literal => self.current_token.value,
+            .escape_char => self.current_token.value,
+            // Inside character class, special chars are treated as literals
+            .dot => '.',
+            .star => '*',
+            .plus => '+',
+            .question => '?',
+            .pipe => '|',
+            .lparen => '(',
+            .rparen => ')',
+            .lbrace => '{',
+            .rbrace => '}',
+            .dollar => '$',
+            // These should not appear here
+            .lbracket, .rbracket, .caret, .backslash,
+            .escape_d, .escape_D, .escape_w, .escape_W,
+            .escape_s, .escape_S, .escape_b, .escape_B, .eof => null,
+        };
+    }
+
     /// Parse character class [...]
     fn parseCharClass(self: *Parser) !*ast.Node {
         const start = self.current_token.span.start;
@@ -372,25 +395,34 @@ pub const Parser = struct {
         defer ranges.deinit(self.allocator);
 
         while (self.peek() != .rbracket and self.peek() != .eof) {
-            const first = self.current_token;
-            if (first.token_type != .literal and first.token_type != .escape_char) {
+            const first_char = self.getCharClassChar() orelse {
                 return RegexError.InvalidCharacterClass;
-            }
-            const first_char = first.value;
+            };
             try self.advance();
 
             // Check for range (a-z)
+            // '-' is only a range operator if there's a character after it
             if (self.peek() == .literal and self.current_token.value == '-') {
+                // Look ahead to see if there's another character (not ])
+                const saved_pos = self.lexer.pos;
                 try self.advance(); // consume -
 
-                const second = self.current_token;
-                if (second.token_type != .literal and second.token_type != .escape_char) {
-                    return RegexError.InvalidCharacterClass;
-                }
-                const second_char = second.value;
-                try self.advance();
+                if (self.peek() == .rbracket or self.peek() == .eof) {
+                    // '-' at end of class, treat both first_char and '-' as literals
+                    try ranges.append(self.allocator, common.CharRange.init(first_char, first_char));
+                    try ranges.append(self.allocator, common.CharRange.init('-', '-'));
+                } else {
+                    // It's a range
+                    const second_char = self.getCharClassChar() orelse {
+                        // Not a valid char, backtrack and treat '-' as literal
+                        self.lexer.pos = saved_pos;
+                        try ranges.append(self.allocator, common.CharRange.init(first_char, first_char));
+                        continue;
+                    };
+                    try self.advance();
 
-                try ranges.append(self.allocator, common.CharRange.init(first_char, second_char));
+                    try ranges.append(self.allocator, common.CharRange.init(first_char, second_char));
+                }
             } else {
                 // Single character
                 try ranges.append(self.allocator, common.CharRange.init(first_char, first_char));
