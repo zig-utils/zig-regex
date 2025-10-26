@@ -109,7 +109,21 @@ pub const VM = struct {
         }
 
         // Start with initial thread at start state
-        const initial_thread = try Thread.init(self.allocator, self.nfa.start_state, self.num_captures);
+        var initial_thread = try Thread.init(self.allocator, self.nfa.start_state, self.num_captures);
+
+        // Check if initial state has capture markers
+        const initial_state = self.nfa.getState(self.nfa.start_state);
+        if (initial_state.capture_start) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                initial_thread.capture_starts[cap_idx - 1] = start_pos;
+            }
+        }
+        if (initial_state.capture_end) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                initial_thread.capture_ends[cap_idx - 1] = start_pos;
+            }
+        }
+
         try current_threads.append(self.allocator, initial_thread);
 
         // Process epsilon closures for initial state
@@ -263,10 +277,27 @@ pub const VM = struct {
         for (state.transitions.items) |transition| {
             switch (transition.transition_type) {
                 .epsilon => {
+                    // Check if we've already visited this state
+                    if (visited.contains(transition.to)) continue;
+
                     var new_thread = try thread.clone(self.allocator);
                     new_thread.state = transition.to;
+
+                    // Update captures if this state marks a capture boundary
+                    const next_state = self.nfa.getState(transition.to);
+                    if (next_state.capture_start) |cap_idx| {
+                        if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                            new_thread.capture_starts[cap_idx - 1] = pos;
+                        }
+                    }
+                    if (next_state.capture_end) |cap_idx| {
+                        if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                            new_thread.capture_ends[cap_idx - 1] = pos;
+                        }
+                    }
+
                     try threads.append(self.allocator, new_thread);
-                    try self.followEpsilons(&threads.items[threads.items.len - 1], threads, visited, pos, input);
+                    // Don't recurse immediately - let addEpsilonClosure handle it iteratively
                 },
                 .anchor => {
                     const anchor_type = transition.data.anchor;
@@ -281,10 +312,27 @@ pub const VM = struct {
                     };
 
                     if (anchor_matches) {
+                        // Check if we've already visited this state
+                        if (visited.contains(transition.to)) continue;
+
                         var new_thread = try thread.clone(self.allocator);
                         new_thread.state = transition.to;
+
+                        // Update captures if this state marks a capture boundary
+                        const next_state = self.nfa.getState(transition.to);
+                        if (next_state.capture_start) |cap_idx| {
+                            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                                new_thread.capture_starts[cap_idx - 1] = pos;
+                            }
+                        }
+                        if (next_state.capture_end) |cap_idx| {
+                            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                                new_thread.capture_ends[cap_idx - 1] = pos;
+                            }
+                        }
+
                         try threads.append(self.allocator, new_thread);
-                        try self.followEpsilons(&threads.items[threads.items.len - 1], threads, visited, pos, input);
+                        // Don't recurse immediately - let addEpsilonClosure handle it iteratively
                     }
                 },
                 else => {},

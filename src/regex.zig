@@ -93,10 +93,15 @@ pub const Regex = struct {
 
         if (try virtual_machine.find(input)) |result| {
             // Convert VM result to Match
-            var captures = try self.allocator.alloc([]const u8, result.captures.len);
-            for (result.captures, 0..) |cap, i| {
-                captures[i] = cap.text;
+            // Use a list first to avoid potential allocation issues
+            var captures_list = try std.ArrayList([]const u8).initCapacity(self.allocator, result.captures.len);
+            errdefer captures_list.deinit(self.allocator);
+
+            for (result.captures) |cap| {
+                try captures_list.append(self.allocator, cap.text);
             }
+
+            const captures = try captures_list.toOwnedSlice(self.allocator);
 
             const match_result = Match{
                 .slice = input[result.start..result.end],
@@ -129,10 +134,14 @@ pub const Regex = struct {
                 const adjusted_start = pos + result.start;
                 const adjusted_end = pos + result.end;
 
-                var captures = try allocator.alloc([]const u8, result.captures.len);
-                for (result.captures, 0..) |cap, i| {
-                    captures[i] = cap.text;
+                var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
+                errdefer captures_list.deinit(allocator);
+
+                for (result.captures) |cap| {
+                    try captures_list.append(allocator, cap.text);
                 }
+
+                const captures = try captures_list.toOwnedSlice(allocator);
 
                 try matches.append(allocator, Match{
                     .slice = input[adjusted_start..adjusted_end],
@@ -321,10 +330,14 @@ pub const Regex = struct {
                     const adjusted_end = result.end;
 
                     // Convert vm.Capture to []const u8
-                    const captures = try allocator.alloc([]const u8, result.captures.len);
-                    for (result.captures, 0..) |cap, i| {
-                        captures[i] = cap.text;
+                    var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
+                    errdefer captures_list.deinit(allocator);
+
+                    for (result.captures) |cap| {
+                        try captures_list.append(allocator, cap.text);
                     }
+
+                    const captures = try captures_list.toOwnedSlice(allocator);
 
                     // Free the VM result
                     allocator.free(result.captures);

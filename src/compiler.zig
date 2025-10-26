@@ -383,12 +383,24 @@ pub const Compiler = struct {
         const child_frag = try self.compileNode(group.child);
 
         if (group.capture_index) |capture_idx| {
-            // Mark capture boundaries
-            const start_state = self.nfa.getState(child_frag.start);
-            start_state.capture_start = capture_idx;
+            // Create new states to mark capture boundaries
+            // This is needed for nested groups to work correctly
+            const start = try self.nfa.addState();
+            const accept = try self.nfa.addState();
 
-            const accept_state = self.nfa.getState(child_frag.accept);
+            // Mark the new states with capture markers
+            const start_state = self.nfa.getState(start);
+            start_state.capture_start = capture_idx;
+            try start_state.addTransition(Transition.epsilon(child_frag.start));
+
+            // Connect child accept to our accept state
+            const child_accept = self.nfa.getState(child_frag.accept);
+            try child_accept.addTransition(Transition.epsilon(accept));
+
+            const accept_state = self.nfa.getState(accept);
             accept_state.capture_end = capture_idx;
+
+            return Fragment{ .start = start, .accept = accept };
         }
 
         return child_frag;

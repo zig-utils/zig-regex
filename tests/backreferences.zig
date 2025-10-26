@@ -52,7 +52,7 @@ test "backreference: escaped dollar sign" {
     var regex = try Regex.compile(allocator, "(\\d+)");
     defer regex.deinit();
 
-    const result = try regex.replace(allocator, "100", "$$$ 1");
+    const result = try regex.replace(allocator, "100", "$$$1");
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("$100", result);

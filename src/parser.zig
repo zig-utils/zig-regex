@@ -367,10 +367,11 @@ pub const Parser = struct {
             },
             .lparen => {
                 try self.advance(); // consume (
-                const child = try self.parseAlternation();
-                try self.expect(.rparen);
+                // Assign capture index BEFORE parsing child (for correct nesting order)
                 self.capture_count += 1;
                 const capture_index = self.capture_count;
+                const child = try self.parseAlternation();
+                try self.expect(.rparen);
                 return ast.Node.createGroup(self.allocator, child, capture_index, span);
             },
             .lbracket => {
