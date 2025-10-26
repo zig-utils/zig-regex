@@ -1,0 +1,22 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+
+# Local configuration
+.zig-cache/
+.build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.test
+*.log
