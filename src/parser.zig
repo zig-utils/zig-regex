@@ -306,27 +306,52 @@ pub const Parser = struct {
             },
             .escape_d => {
                 try self.advance();
-                return ast.Node.createCharClass(self.allocator, common.CharClasses.digit, span);
+                // Duplicate ranges from static predefined class so AST can own them
+                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.digit.ranges);
+                return ast.Node.createCharClass(self.allocator, .{
+                    .ranges = ranges,
+                    .negated = common.CharClasses.digit.negated,
+                }, span);
             },
             .escape_D => {
                 try self.advance();
-                return ast.Node.createCharClass(self.allocator, common.CharClasses.non_digit, span);
+                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_digit.ranges);
+                return ast.Node.createCharClass(self.allocator, .{
+                    .ranges = ranges,
+                    .negated = common.CharClasses.non_digit.negated,
+                }, span);
             },
             .escape_w => {
                 try self.advance();
-                return ast.Node.createCharClass(self.allocator, common.CharClasses.word, span);
+                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.word.ranges);
+                return ast.Node.createCharClass(self.allocator, .{
+                    .ranges = ranges,
+                    .negated = common.CharClasses.word.negated,
+                }, span);
             },
             .escape_W => {
                 try self.advance();
-                return ast.Node.createCharClass(self.allocator, common.CharClasses.non_word, span);
+                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_word.ranges);
+                return ast.Node.createCharClass(self.allocator, .{
+                    .ranges = ranges,
+                    .negated = common.CharClasses.non_word.negated,
+                }, span);
             },
             .escape_s => {
                 try self.advance();
-                return ast.Node.createCharClass(self.allocator, common.CharClasses.whitespace, span);
+                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.whitespace.ranges);
+                return ast.Node.createCharClass(self.allocator, .{
+                    .ranges = ranges,
+                    .negated = common.CharClasses.whitespace.negated,
+                }, span);
             },
             .escape_S => {
                 try self.advance();
-                return ast.Node.createCharClass(self.allocator, common.CharClasses.non_whitespace, span);
+                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_whitespace.ranges);
+                return ast.Node.createCharClass(self.allocator, .{
+                    .ranges = ranges,
+                    .negated = common.CharClasses.non_whitespace.negated,
+                }, span);
             },
             .escape_b => {
                 try self.advance();
@@ -357,6 +382,24 @@ pub const Parser = struct {
         }
     }
 
+    /// Get POSIX character class by name
+    fn getPosixClass(self: *Parser, name: []const u8) !common.CharClass {
+        _ = self;
+        if (std.mem.eql(u8, name, "alnum")) return common.CharClasses.posix_alnum;
+        if (std.mem.eql(u8, name, "alpha")) return common.CharClasses.posix_alpha;
+        if (std.mem.eql(u8, name, "blank")) return common.CharClasses.posix_blank;
+        if (std.mem.eql(u8, name, "cntrl")) return common.CharClasses.posix_cntrl;
+        if (std.mem.eql(u8, name, "digit")) return common.CharClasses.posix_digit;
+        if (std.mem.eql(u8, name, "graph")) return common.CharClasses.posix_graph;
+        if (std.mem.eql(u8, name, "lower")) return common.CharClasses.posix_lower;
+        if (std.mem.eql(u8, name, "print")) return common.CharClasses.posix_print;
+        if (std.mem.eql(u8, name, "punct")) return common.CharClasses.posix_punct;
+        if (std.mem.eql(u8, name, "space")) return common.CharClasses.posix_space;
+        if (std.mem.eql(u8, name, "upper")) return common.CharClasses.posix_upper;
+        if (std.mem.eql(u8, name, "xdigit")) return common.CharClasses.posix_xdigit;
+        return RegexError.InvalidCharacterClass;
+    }
+
     /// Get literal character from token (special chars are literal inside [...])
     fn getCharClassChar(self: *Parser) ?u8 {
         return switch (self.current_token.token_type) {
@@ -373,8 +416,9 @@ pub const Parser = struct {
             .lbrace => '{',
             .rbrace => '}',
             .dollar => '$',
+            .lbracket => '[', // Allow [ as literal (for non-POSIX cases)
             // These should not appear here
-            .lbracket, .rbracket, .caret, .backslash,
+            .rbracket, .caret, .backslash,
             .escape_d, .escape_D, .escape_w, .escape_W,
             .escape_s, .escape_S, .escape_b, .escape_B, .eof => null,
         };
@@ -395,6 +439,43 @@ pub const Parser = struct {
         defer ranges.deinit(self.allocator);
 
         while (self.peek() != .rbracket and self.peek() != .eof) {
+            // Check for POSIX character class [:name:]
+            // We need to look ahead in the raw input, not the tokenized stream
+            const current_pos = self.lexer.pos;
+
+            if (current_pos + 1 < self.lexer.input.len and
+                self.lexer.input[current_pos] == '[' and
+                self.lexer.input[current_pos + 1] == ':') {
+
+                // Find the closing :]
+                var found_posix = false;
+                var i = current_pos + 2;
+                while (i + 1 < self.lexer.input.len) : (i += 1) {
+                    if (self.lexer.input[i] == ':' and self.lexer.input[i + 1] == ']') {
+                        // Found [:name:]
+                        const class_name = self.lexer.input[current_pos + 2..i];
+
+                        // Advance lexer past [:name:]
+                        self.lexer.pos = i + 2;
+                        self.current_token = try self.lexer.next();
+
+                        // Add the POSIX class ranges
+                        const posix_class = try self.getPosixClass(class_name);
+                        for (posix_class.ranges) |range| {
+                            try ranges.append(self.allocator, range);
+                        }
+                        found_posix = true;
+                        break;
+                    }
+                }
+
+                if (found_posix) {
+                    continue; // Successfully parsed POSIX class, continue to next iteration
+                }
+
+                // Not a complete POSIX class, fall through to treat [ as literal
+            }
+
             const first_char = self.getCharClassChar() orelse {
                 return RegexError.InvalidCharacterClass;
             };
@@ -517,4 +598,13 @@ test "parser group" {
 
     try std.testing.expectEqual(ast.NodeType.group, result.root.node_type);
     try std.testing.expectEqual(@as(usize, 1), result.capture_count);
+}
+
+test "POSIX character class parsing" {
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "[[:alpha:]]");
+    var tree = try parser.parse();
+    defer tree.deinit();
+
+    try std.testing.expectEqual(ast.NodeType.char_class, tree.root.node_type);
 }

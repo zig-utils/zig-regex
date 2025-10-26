@@ -125,6 +125,120 @@ pub const CharClasses = struct {
         },
         .negated = true,
     };
+
+    // POSIX Character Classes
+    // These follow the POSIX standard for character class names
+
+    /// POSIX [:alnum:] - Alphanumeric characters [a-zA-Z0-9]
+    pub const posix_alnum = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('a', 'z'),
+            CharRange.init('A', 'Z'),
+            CharRange.init('0', '9'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:alpha:] - Alphabetic characters [a-zA-Z]
+    pub const posix_alpha = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('a', 'z'),
+            CharRange.init('A', 'Z'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:blank:] - Space and tab [ \t]
+    pub const posix_blank = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init(' ', ' '),
+            CharRange.init('\t', '\t'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:cntrl:] - Control characters [\x00-\x1F\x7F]
+    pub const posix_cntrl = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init(0x00, 0x1F),
+            CharRange.init(0x7F, 0x7F),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:digit:] - Digits [0-9]
+    pub const posix_digit = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('0', '9'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:graph:] - Visible characters [\x21-\x7E]
+    pub const posix_graph = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init(0x21, 0x7E),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:lower:] - Lowercase letters [a-z]
+    pub const posix_lower = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('a', 'z'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:print:] - Printable characters [\x20-\x7E]
+    pub const posix_print = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init(0x20, 0x7E),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:punct:] - Punctuation characters [!-/:-@\[-`{-~]
+    pub const posix_punct = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('!', '/'),
+            CharRange.init(':', '@'),
+            CharRange.init('[', '`'),
+            CharRange.init('{', '~'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:space:] - Whitespace characters [ \t\n\r\f\v]
+    pub const posix_space = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init(' ', ' '),
+            CharRange.init('\t', '\t'),
+            CharRange.init('\n', '\n'),
+            CharRange.init('\r', '\r'),
+            CharRange.init(0x0C, 0x0C), // \f
+            CharRange.init(0x0B, 0x0B), // \v
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:upper:] - Uppercase letters [A-Z]
+    pub const posix_upper = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('A', 'Z'),
+        },
+        .negated = false,
+    };
+
+    /// POSIX [:xdigit:] - Hexadecimal digits [0-9A-Fa-f]
+    pub const posix_xdigit = CharClass{
+        .ranges = &[_]CharRange{
+            CharRange.init('0', '9'),
+            CharRange.init('A', 'F'),
+            CharRange.init('a', 'f'),
+        },
+        .negated = false,
+    };
 };
 
 test "char range contains" {

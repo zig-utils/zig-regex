@@ -160,6 +160,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
+    const posix_classes_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/posix_classes.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_posix_classes_tests = b.addRunArtifact(posix_classes_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -168,6 +180,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_case_insensitive_tests.step);
     test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_posix_classes_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

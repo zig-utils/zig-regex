@@ -47,11 +47,16 @@ pub const Transition = struct {
         };
     }
 
-    pub fn charClass(class: common.CharClass, to: StateId) Transition {
+    pub fn charClass(allocator: std.mem.Allocator, class: common.CharClass, to: StateId) !Transition {
+        // Duplicate the ranges so we own them and can free them later
+        const ranges_copy = try allocator.dupe(common.CharRange, class.ranges);
         return .{
             .transition_type = .char_class,
             .to = to,
-            .data = .{ .char_class = class },
+            .data = .{ .char_class = .{
+                .ranges = ranges_copy,
+                .negated = class.negated,
+            }},
         };
     }
 
@@ -91,6 +96,12 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        // Free char_class ranges in transitions
+        for (self.transitions.items) |transition| {
+            if (transition.transition_type == .char_class) {
+                self.allocator.free(transition.data.char_class.ranges);
+            }
+        }
         self.transitions.deinit(self.allocator);
     }
 
@@ -362,7 +373,7 @@ pub const Compiler = struct {
         const accept = try self.nfa.addState();
 
         const start_state = self.nfa.getState(start);
-        try start_state.addTransition(Transition.charClass(char_class, accept));
+        try start_state.addTransition(try Transition.charClass(self.nfa.allocator, char_class, accept));
 
         return Fragment{ .start = start, .accept = accept };
     }

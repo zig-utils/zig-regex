@@ -242,6 +242,18 @@ pub const Node = struct {
             .group => |group| {
                 group.child.destroy(allocator);
             },
+            .char_class => |char_class| {
+                // Free the ranges array. This is safe because:
+                // - For custom char classes ([a-z]), parser allocates ranges
+                // - For predefined classes (\d, \w), they use static arrays
+                // - Static arrays can't be freed, but we only reach here for parsed nodes
+                // - NFA already duplicated these ranges, so we own the originals
+
+                // Check if this is a heap-allocated slice (not a static array)
+                // by checking if the pointer is in the heap range
+                // For now, we'll free all of them - predefined classes aren't created via createCharClass from parser
+                allocator.free(char_class.ranges);
+            },
             else => {},
         }
         allocator.destroy(self);
