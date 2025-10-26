@@ -256,14 +256,15 @@ pub const VM = struct {
 
         var i: usize = 0;
         while (i < threads.items.len) : (i += 1) {
-            const thread = &threads.items[i];
-            try self.followEpsilons(thread, threads, &visited, pos, input);
+            // IMPORTANT: Pass thread by value to avoid dangling pointer issues
+            // when ArrayList reallocates during followEpsilons
+            try self.followEpsilons(threads.items[i], threads, &visited, pos, input);
         }
     }
 
     fn followEpsilons(
         self: *VM,
-        thread: *Thread,
+        thread: Thread,
         threads: *std.ArrayList(Thread),
         visited: *std.AutoHashMap(compiler.StateId, void),
         pos: usize,

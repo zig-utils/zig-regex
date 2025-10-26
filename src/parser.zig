@@ -367,9 +367,25 @@ pub const Parser = struct {
             },
             .lparen => {
                 try self.advance(); // consume (
-                // Assign capture index BEFORE parsing child (for correct nesting order)
-                self.capture_count += 1;
-                const capture_index = self.capture_count;
+
+                // Check for non-capturing group (?:...)
+                var capture_index: ?usize = null;
+                if (self.current_token.token_type == .question) {
+                    try self.advance(); // consume ?
+                    // Check for : to confirm non-capturing group
+                    if (self.current_token.token_type == .literal and self.current_token.value == ':') {
+                        try self.advance(); // consume :
+                        // capture_index remains null for non-capturing group
+                    } else {
+                        // Invalid syntax - ? must be followed by : for group extensions
+                        return RegexError.UnexpectedCharacter;
+                    }
+                } else {
+                    // Regular capturing group - assign capture index BEFORE parsing child (for correct nesting order)
+                    self.capture_count += 1;
+                    capture_index = self.capture_count;
+                }
+
                 const child = try self.parseAlternation();
                 try self.expect(.rparen);
                 return ast.Node.createGroup(self.allocator, child, capture_index, span);

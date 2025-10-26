@@ -197,6 +197,30 @@ pub fn build(b: *std.Build) void {
     });
     const run_iterator_tests = b.addRunArtifact(iterator_tests);
 
+    const non_capturing_groups_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/non_capturing_groups.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_non_capturing_groups_tests = b.addRunArtifact(non_capturing_groups_tests);
+
+    const utf8_unicode_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/utf8_unicode.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_utf8_unicode_tests = b.addRunArtifact(utf8_unicode_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -209,6 +233,8 @@ pub fn build(b: *std.Build) void {
     // test_step.dependOn(&run_posix_classes_tests.step);
     test_step.dependOn(&run_backreferences_tests.step);
     test_step.dependOn(&run_iterator_tests.step);
+    test_step.dependOn(&run_non_capturing_groups_tests.step);
+    test_step.dependOn(&run_utf8_unicode_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
