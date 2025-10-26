@@ -59,13 +59,35 @@ pub const VM = struct {
     nfa: *compiler.NFA,
     allocator: std.mem.Allocator,
     num_captures: usize,
+    flags: common.CompileFlags,
 
-    pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, num_captures: usize) VM {
+    pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, num_captures: usize, flags: common.CompileFlags) VM {
         return .{
             .nfa = nfa,
             .allocator = allocator,
             .num_captures = num_captures,
+            .flags = flags,
         };
+    }
+
+    /// Helper to compare characters with case-insensitive support
+    fn charsMatch(self: *const VM, pattern_char: u8, input_char: u8) bool {
+        if (!self.flags.case_insensitive) {
+            return pattern_char == input_char;
+        }
+
+        // Convert both to lowercase for comparison
+        const p_lower = if (pattern_char >= 'A' and pattern_char <= 'Z')
+            pattern_char + ('a' - 'A')
+        else
+            pattern_char;
+
+        const i_lower = if (input_char >= 'A' and input_char <= 'Z')
+            input_char + ('a' - 'A')
+        else
+            input_char;
+
+        return p_lower == i_lower;
     }
 
     /// Check if the pattern matches at a specific position in the input
@@ -139,7 +161,7 @@ pub const VM = struct {
 
                 for (state.transitions.items) |transition| {
                     const matches = switch (transition.transition_type) {
-                        .char => transition.data.char == c,
+                        .char => self.charsMatch(transition.data.char, c),
                         .any => true,
                         .char_class => transition.data.char_class.matches(c),
                         .anchor => false, // Anchors don't consume input
@@ -296,7 +318,7 @@ test "vm match literal" {
     var state0 = nfa.getState(s0);
     try state0.addTransition(compiler.Transition.char('a', s1));
 
-    var vm = VM.init(allocator, &nfa, 0);
+    var vm = VM.init(allocator, &nfa, 0, .{});
     const result = try vm.matchAt("a", 0);
     try std.testing.expect(result != null);
     if (result) |res| {
@@ -323,7 +345,7 @@ test "vm find in string" {
     var state0 = nfa.getState(s0);
     try state0.addTransition(compiler.Transition.char('b', s1));
 
-    var vm = VM.init(allocator, &nfa, 0);
+    var vm = VM.init(allocator, &nfa, 0, .{});
     const result = try vm.find("abc");
     try std.testing.expect(result != null);
     if (result) |res| {

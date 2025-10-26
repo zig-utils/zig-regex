@@ -4,6 +4,7 @@ const parser = @import("parser.zig");
 const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
 const ast = @import("ast.zig");
+const common = @import("common.zig");
 
 /// Represents a match result from a regex operation
 pub const Match = struct {
@@ -35,9 +36,15 @@ pub const Regex = struct {
     pattern: []const u8,
     nfa: compiler.NFA,
     capture_count: usize,
+    flags: common.CompileFlags,
 
-    /// Compile a regex pattern
+    /// Compile a regex pattern with default flags
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
+        return compileWithFlags(allocator, pattern, .{});
+    }
+
+    /// Compile a regex pattern with custom flags
+    pub fn compileWithFlags(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
         if (pattern.len == 0) {
             return RegexError.EmptyPattern;
         }
@@ -62,6 +69,7 @@ pub const Regex = struct {
             .pattern = owned_pattern,
             .nfa = comp.nfa,
             .capture_count = tree.capture_count,
+            .flags = flags,
         };
     }
 
@@ -74,14 +82,14 @@ pub const Regex = struct {
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
         const nfa_mut = @constCast(&self.nfa);
-        var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count);
+        var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
         return try virtual_machine.isMatch(input);
     }
 
     /// Find the first match in the input string
     pub fn find(self: *const Regex, input: []const u8) !?Match {
         const nfa_mut = @constCast(&self.nfa);
-        var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count);
+        var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
 
         if (try virtual_machine.find(input)) |result| {
             // Convert VM result to Match
@@ -114,7 +122,7 @@ pub const Regex = struct {
         var pos: usize = 0;
         while (pos < input.len) {
             const nfa_mut = @constCast(&self.nfa);
-            var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count);
+            var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
 
             if (try virtual_machine.find(input[pos..])) |result| {
                 // Adjust positions relative to original input

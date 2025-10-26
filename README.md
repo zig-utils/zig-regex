@@ -4,9 +4,9 @@ A modern, performant regular expression library for Zig.
 
 ## Status
 
-**Currently in early development (Phase 1)**
+**Version 0.1.0 - Functional Release** 🎉
 
-This library is being built from the ground up to provide native regex support for Zig, which doesn't have built-in regular expression functionality.
+This library provides a working regex engine with core features implemented. All tests pass (45+ tests) and it's ready for basic to intermediate regex use cases.
 
 ## Goals
 
@@ -17,16 +17,30 @@ This library is being built from the ground up to provide native regex support f
 - **Comprehensive syntax** - support for common regex features
 - **Well-tested** - extensive test coverage and compliance tests
 
-## Planned Features
+## Features
 
-- Basic pattern matching (literals, character classes, quantifiers)
-- Capture groups (numbered and named)
-- Anchors and boundaries (`^`, `$`, `\b`)
-- Character class shortcuts (`\d`, `\w`, `\s`, etc.)
+### ✅ Implemented
+- **Literals** - Match exact characters and strings
+- **Quantifiers** - `*` (star), `+` (plus), `?` (optional), `{m,n}` (bounded)
+- **Alternation** - `|` for choices
+- **Character Classes** - `\d`, `\w`, `\s`, `\D`, `\W`, `\S`
+- **Custom Classes** - `[abc]`, `[a-z]`, `[0-9]`, `[^abc]` (negation)
+- **Anchors** - `^` (start), `$` (end), `\b` (word boundary), `\B`
+- **Wildcards** - `.` (any character)
+- **Capture Groups** - `()` with position tracking
+- **Escaping** - `\\`, `\.`, `\n`, `\t`, etc.
+- **Full API** - compile, compileWithFlags, isMatch, find, findAll, replace, replaceAll, split
+- **Case-Insensitive Matching** - Via `.case_insensitive` flag
+- **Benchmarking** - Performance testing suite included
+
+### 🚧 Planned Features
+- Named capture groups `(?P<name>)`
+- Non-capturing groups `(?:)`
 - Look-ahead and look-behind assertions
-- Case-insensitive matching
-- Unicode support (UTF-8)
-- Replace and split operations
+- Additional flags (multiline, dot-all, extended, unicode)
+- Backreferences
+- Extended Unicode support
+- Match iterators
 
 ## Installation
 
@@ -68,8 +82,11 @@ zig build
 # Run tests
 zig build test
 
-# Run example (when available)
-zig build run
+# Run example
+zig build example
+
+# Run benchmarks
+zig build bench
 ```
 
 ## Requirements

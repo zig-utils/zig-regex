@@ -242,8 +242,38 @@ pub const Parser = struct {
                     node = try ast.Node.createOptional(self.allocator, node, span);
                 },
                 .lbrace => {
-                    // TODO: Parse {m,n} syntax
-                    return RegexError.InvalidQuantifier;
+                    try self.advance(); // consume {
+
+                    // Parse minimum
+                    var min: usize = 0;
+                    while (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
+                        min = min * 10 + (self.current_token.value - '0');
+                        try self.advance();
+                    }
+
+                    var max: ?usize = min; // Default: exactly min times
+
+                    // Check for comma (range syntax)
+                    if (self.peek() == .literal and self.current_token.value == ',') {
+                        try self.advance(); // consume ,
+
+                        // Check if there's a max value
+                        if (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
+                            max = 0;
+                            while (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
+                                max = (max.? * 10) + (self.current_token.value - '0');
+                                try self.advance();
+                            }
+                        } else {
+                            // {m,} means m or more (unbounded)
+                            max = null;
+                        }
+                    }
+
+                    try self.expect(.rbrace);
+
+                    const bounds = ast.RepeatBounds.init(min, max);
+                    node = try ast.Node.createRepeat(self.allocator, node, bounds, span);
                 },
                 else => break,
             }
