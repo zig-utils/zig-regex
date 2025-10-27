@@ -40,6 +40,20 @@ pub const Composer = @import("builder.zig").Composer;
 pub const Lint = @import("lint.zig").Lint;
 pub const ComplexityAnalyzer = @import("lint.zig").ComplexityAnalyzer;
 
+// Macro system
+pub const macros = @import("macros.zig");
+pub const MacroRegistry = @import("macros.zig").MacroRegistry;
+pub const CommonMacros = @import("macros.zig").CommonMacros;
+
+// AST optimization and visualization
+pub const ASTOptimizer = @import("ast_optimizer.zig").ASTOptimizer;
+pub const PrettyPrinter = @import("pretty_print.zig").PrettyPrinter;
+pub const ASTStats = @import("pretty_print.zig").ASTStats;
+
+// NFA optimization and visualization
+pub const NFAOptimizer = @import("nfa_optimizer.zig").NFAOptimizer;
+pub const NFAVisualizer = @import("nfa_optimizer.zig").NFAVisualizer;
+
 // C FFI
 pub const c_api = @import("c_api.zig");
 

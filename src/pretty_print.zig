@@ -143,7 +143,6 @@ pub const PrettyPrinter = struct {
 
     /// Print as S-expression
     fn printSExpr(self: *PrettyPrinter, node: *ast.Node, writer: anytype) !void {
-        _ = self;
         switch (node.node_type) {
             .literal => {
                 try writer.print("(lit '{c}')", .{node.data.literal});
@@ -356,7 +355,6 @@ pub const PrettyPrinter = struct {
 
     /// Print in compact single-line format (reconstructs regex)
     fn printCompact(self: *PrettyPrinter, node: *ast.Node, writer: anytype) !void {
-        _ = self;
         switch (node.node_type) {
             .literal => {
                 const c = node.data.literal;
@@ -546,11 +544,11 @@ test "pretty print: tree format" {
     var tree = try p.parse();
     defer tree.deinit();
 
-    var buffer = std.ArrayList(u8).init(allocator);
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
     defer buffer.deinit();
 
     var printer = PrettyPrinter.init(allocator);
-    try printer.print(tree.root, buffer.writer(), .tree);
+    try printer.print(tree.root, buffer.writer(allocator), .tree);
 
     try std.testing.expect(buffer.items.len > 0);
 }
@@ -563,11 +561,11 @@ test "pretty print: sexpr format" {
     var tree = try p.parse();
     defer tree.deinit();
 
-    var buffer = std.ArrayList(u8).init(allocator);
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
     defer buffer.deinit();
 
     var printer = PrettyPrinter.init(allocator);
-    try printer.print(tree.root, buffer.writer(), .sexpr);
+    try printer.print(tree.root, buffer.writer(allocator), .sexpr);
 
     try std.testing.expect(buffer.items.len > 0);
 }
@@ -580,11 +578,11 @@ test "pretty print: compact format" {
     var tree = try p.parse();
     defer tree.deinit();
 
-    var buffer = std.ArrayList(u8).init(allocator);
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
     defer buffer.deinit();
 
     var printer = PrettyPrinter.init(allocator);
-    try printer.print(tree.root, buffer.writer(), .compact);
+    try printer.print(tree.root, buffer.writer(allocator), .compact);
 
     try std.testing.expect(buffer.items.len > 0);
 }

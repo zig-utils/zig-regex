@@ -216,7 +216,6 @@ pub const ASTOptimizer = struct {
 
     /// Flatten nested concatenations
     fn flattenConcat(self: *ASTOptimizer, node: **ast.Node) !bool {
-        _ = self;
         var changed = false;
 
         switch (node.*.node_type) {
