@@ -39,6 +39,7 @@ pub const Regex = struct {
     capture_count: usize,
     flags: common.CompileFlags,
     opt_info: optimizer.OptimizationInfo,
+    named_captures: std.StringHashMap(usize), // name -> capture_index mapping
 
     /// Compile a regex pattern with default flags
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
@@ -71,6 +72,11 @@ pub const Regex = struct {
         const owned_pattern = try allocator.dupe(u8, pattern);
         errdefer allocator.free(owned_pattern);
 
+        // Collect named captures from AST
+        var named_captures = std.StringHashMap(usize).init(allocator);
+        errdefer named_captures.deinit();
+        try collectNamedCaptures(tree.root, &named_captures);
+
         return Regex{
             .allocator = allocator,
             .pattern = owned_pattern,
@@ -78,6 +84,7 @@ pub const Regex = struct {
             .capture_count = tree.capture_count,
             .flags = flags,
             .opt_info = opt_info,
+            .named_captures = named_captures,
         };
     }
 
@@ -87,6 +94,28 @@ pub const Regex = struct {
         self.nfa.deinit();
         var mut_opt_info = self.opt_info;
         mut_opt_info.deinit(self.allocator);
+
+        // Free named capture keys and deinit map
+        var it = self.named_captures.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        var mut_named_captures = self.named_captures;
+        mut_named_captures.deinit();
+    }
+
+    /// Get the capture group index for a named group
+    /// Returns null if the name doesn't exist
+    pub fn getCaptureIndex(self: *const Regex, name: []const u8) ?usize {
+        return self.named_captures.get(name);
+    }
+
+    /// Get a named capture from a Match
+    /// Returns null if the name doesn't exist or the capture wasn't matched
+    pub fn getNamedCapture(self: *const Regex, match: *const Match, name: []const u8) ?[]const u8 {
+        const index = self.getCaptureIndex(name) orelse return null;
+        if (index == 0 or index > match.captures.len) return null;
+        return match.captures[index - 1]; // Captures are 1-indexed in the API
     }
 
     /// Check if the pattern matches the entire input string
@@ -431,6 +460,34 @@ pub const Regex = struct {
         return parts.toOwnedSlice(allocator);
     }
 };
+
+/// Helper function to recursively collect named captures from AST
+fn collectNamedCaptures(node: *ast.Node, map: *std.StringHashMap(usize)) !void {
+    switch (node.node_type) {
+        .group => {
+            const group = node.data.group;
+            if (group.name) |name| {
+                if (group.capture_index) |index| {
+                    try map.put(name, index);
+                }
+            }
+            try collectNamedCaptures(group.child, map);
+        },
+        .concat => {
+            try collectNamedCaptures(node.data.concat.left, map);
+            try collectNamedCaptures(node.data.concat.right, map);
+        },
+        .alternation => {
+            try collectNamedCaptures(node.data.alternation.left, map);
+            try collectNamedCaptures(node.data.alternation.right, map);
+        },
+        .star => try collectNamedCaptures(node.data.star.child, map),
+        .plus => try collectNamedCaptures(node.data.plus.child, map),
+        .optional => try collectNamedCaptures(node.data.optional.child, map),
+        .repeat => try collectNamedCaptures(node.data.repeat.child, map),
+        else => {}, // Literals, character classes, anchors don't contain groups
+    }
+}
 
 test "compile empty pattern" {
     const allocator = std.testing.allocator;

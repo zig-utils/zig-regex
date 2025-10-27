@@ -135,7 +135,7 @@ pub const Optimizer = struct {
             .optional => 0, // ? means 0 or 1
             .plus => {
                 // + means 1 or more
-                return self.calculateMinLength(node.data.plus);
+                return self.calculateMinLength(node.data.plus.child);
             },
             .repeat => {
                 const repeat = node.data.repeat;
@@ -170,7 +170,7 @@ pub const Optimizer = struct {
             .star => null, // * means unbounded
             .optional => {
                 // ? means 0 or 1
-                return self.calculateMaxLength(node.data.optional) orelse return null;
+                return self.calculateMaxLength(node.data.optional.child) orelse return null;
             },
             .plus => null, // + means unbounded
             .repeat => {

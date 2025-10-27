@@ -72,9 +72,9 @@ pub const Node = struct {
         any: void,
         concat: Concat,
         alternation: Alternation,
-        star: *Node,
-        plus: *Node,
-        optional: *Node,
+        star: Quantifier,
+        plus: Quantifier,
+        optional: Quantifier,
         repeat: Repeat,
         char_class: common.CharClass,
         group: Group,
@@ -92,14 +92,21 @@ pub const Node = struct {
         right: *Node,
     };
 
+    pub const Quantifier = struct {
+        child: *Node,
+        greedy: bool = true, // true for greedy, false for lazy
+    };
+
     pub const Repeat = struct {
         child: *Node,
         bounds: RepeatBounds,
+        greedy: bool = true,
     };
 
     pub const Group = struct {
         child: *Node,
         capture_index: ?usize, // null for non-capturing groups
+        name: ?[]const u8 = null, // null for unnamed groups
     };
 
     pub fn createLiteral(allocator: std.mem.Allocator, c: u8, span: common.Span) !*Node {
@@ -142,41 +149,41 @@ pub const Node = struct {
         return node;
     }
 
-    pub fn createStar(allocator: std.mem.Allocator, child: *Node, span: common.Span) !*Node {
+    pub fn createStar(allocator: std.mem.Allocator, child: *Node, greedy: bool, span: common.Span) !*Node {
         const node = try allocator.create(Node);
         node.* = .{
             .node_type = .star,
-            .data = .{ .star = child },
+            .data = .{ .star = .{ .child = child, .greedy = greedy } },
             .span = span,
         };
         return node;
     }
 
-    pub fn createPlus(allocator: std.mem.Allocator, child: *Node, span: common.Span) !*Node {
+    pub fn createPlus(allocator: std.mem.Allocator, child: *Node, greedy: bool, span: common.Span) !*Node {
         const node = try allocator.create(Node);
         node.* = .{
             .node_type = .plus,
-            .data = .{ .plus = child },
+            .data = .{ .plus = .{ .child = child, .greedy = greedy } },
             .span = span,
         };
         return node;
     }
 
-    pub fn createOptional(allocator: std.mem.Allocator, child: *Node, span: common.Span) !*Node {
+    pub fn createOptional(allocator: std.mem.Allocator, child: *Node, greedy: bool, span: common.Span) !*Node {
         const node = try allocator.create(Node);
         node.* = .{
             .node_type = .optional,
-            .data = .{ .optional = child },
+            .data = .{ .optional = .{ .child = child, .greedy = greedy } },
             .span = span,
         };
         return node;
     }
 
-    pub fn createRepeat(allocator: std.mem.Allocator, child: *Node, bounds: RepeatBounds, span: common.Span) !*Node {
+    pub fn createRepeat(allocator: std.mem.Allocator, child: *Node, bounds: RepeatBounds, greedy: bool, span: common.Span) !*Node {
         const node = try allocator.create(Node);
         node.* = .{
             .node_type = .repeat,
-            .data = .{ .repeat = .{ .child = child, .bounds = bounds } },
+            .data = .{ .repeat = .{ .child = child, .bounds = bounds, .greedy = greedy } },
             .span = span,
         };
         return node;
@@ -193,10 +200,14 @@ pub const Node = struct {
     }
 
     pub fn createGroup(allocator: std.mem.Allocator, child: *Node, capture_index: ?usize, span: common.Span) !*Node {
+        return createNamedGroup(allocator, child, capture_index, null, span);
+    }
+
+    pub fn createNamedGroup(allocator: std.mem.Allocator, child: *Node, capture_index: ?usize, name: ?[]const u8, span: common.Span) !*Node {
         const node = try allocator.create(Node);
         node.* = .{
             .node_type = .group,
-            .data = .{ .group = .{ .child = child, .capture_index = capture_index } },
+            .data = .{ .group = .{ .child = child, .capture_index = capture_index, .name = name } },
             .span = span,
         };
         return node;
@@ -233,8 +244,8 @@ pub const Node = struct {
                 alt.left.destroy(allocator);
                 alt.right.destroy(allocator);
             },
-            .star, .plus, .optional => |child| {
-                child.destroy(allocator);
+            .star, .plus, .optional => |quant| {
+                quant.child.destroy(allocator);
             },
             .repeat => |repeat| {
                 repeat.child.destroy(allocator);
@@ -306,10 +317,11 @@ test "create star node" {
     const span = common.Span.init(0, 2);
 
     const child = try Node.createLiteral(allocator, 'a', common.Span.init(0, 1));
-    const star = try Node.createStar(allocator, child, span);
+    const star = try Node.createStar(allocator, child, true, span);
     defer star.destroy(allocator);
 
     try std.testing.expectEqual(NodeType.star, star.node_type);
+    try std.testing.expectEqual(true, star.data.star.greedy);
 }
 
 test "repeat bounds" {

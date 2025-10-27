@@ -192,9 +192,9 @@ pub const Compiler = struct {
             .any => try self.compileAny(),
             .concat => try self.compileConcat(node.data.concat),
             .alternation => try self.compileAlternation(node.data.alternation),
-            .star => try self.compileStar(node.data.star),
-            .plus => try self.compilePlus(node.data.plus),
-            .optional => try self.compileOptional(node.data.optional),
+            .star => try self.compileStar(node.data.star.child, node.data.star.greedy),
+            .plus => try self.compilePlus(node.data.plus.child, node.data.plus.greedy),
+            .optional => try self.compileOptional(node.data.optional.child, node.data.optional.greedy),
             .repeat => try self.compileRepeat(node.data.repeat),
             .char_class => try self.compileCharClass(node.data.char_class),
             .group => try self.compileGroup(node.data.group),
@@ -263,28 +263,39 @@ pub const Compiler = struct {
         return Fragment{ .start = start, .accept = accept };
     }
 
-    /// Compile Kleene star (*)
-    fn compileStar(self: *Compiler, child: *ast.Node) !Fragment {
+    /// Compile Kleene star (*) or lazy star (*?)
+    fn compileStar(self: *Compiler, child: *ast.Node, greedy: bool) !Fragment {
         const child_frag = try self.compileNode(child);
 
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
 
-        // Start can skip to accept (zero matches) or go to child
         const start_state = self.nfa.getState(start);
-        try start_state.addTransition(Transition.epsilon(child_frag.start));
-        try start_state.addTransition(Transition.epsilon(accept));
-
-        // Child accept can loop back or go to final accept
         const child_accept = self.nfa.getState(child_frag.accept);
-        try child_accept.addTransition(Transition.epsilon(child_frag.start));
-        try child_accept.addTransition(Transition.epsilon(accept));
+
+        if (greedy) {
+            // Greedy: try to match first, then skip
+            // Start can go to child or skip to accept
+            try start_state.addTransition(Transition.epsilon(child_frag.start));
+            try start_state.addTransition(Transition.epsilon(accept));
+            // Child accept can loop back or go to final accept
+            try child_accept.addTransition(Transition.epsilon(child_frag.start));
+            try child_accept.addTransition(Transition.epsilon(accept));
+        } else {
+            // Lazy: try to skip first, then match
+            // Start can skip to accept or go to child
+            try start_state.addTransition(Transition.epsilon(accept));
+            try start_state.addTransition(Transition.epsilon(child_frag.start));
+            // Child accept can go to final accept or loop back
+            try child_accept.addTransition(Transition.epsilon(accept));
+            try child_accept.addTransition(Transition.epsilon(child_frag.start));
+        }
 
         return Fragment{ .start = start, .accept = accept };
     }
 
-    /// Compile plus (+)
-    fn compilePlus(self: *Compiler, child: *ast.Node) !Fragment {
+    /// Compile plus (+) or lazy plus (+?)
+    fn compilePlus(self: *Compiler, child: *ast.Node, greedy: bool) !Fragment {
         const child_frag = try self.compileNode(child);
 
         const start = try self.nfa.addState();
@@ -294,25 +305,39 @@ pub const Compiler = struct {
         const start_state = self.nfa.getState(start);
         try start_state.addTransition(Transition.epsilon(child_frag.start));
 
-        // Child accept can loop back or go to final accept
         const child_accept = self.nfa.getState(child_frag.accept);
-        try child_accept.addTransition(Transition.epsilon(child_frag.start));
-        try child_accept.addTransition(Transition.epsilon(accept));
+
+        if (greedy) {
+            // Greedy: try to loop back first, then accept
+            try child_accept.addTransition(Transition.epsilon(child_frag.start));
+            try child_accept.addTransition(Transition.epsilon(accept));
+        } else {
+            // Lazy: try to accept first, then loop back
+            try child_accept.addTransition(Transition.epsilon(accept));
+            try child_accept.addTransition(Transition.epsilon(child_frag.start));
+        }
 
         return Fragment{ .start = start, .accept = accept };
     }
 
-    /// Compile optional (?)
-    fn compileOptional(self: *Compiler, child: *ast.Node) !Fragment {
+    /// Compile optional (?) or lazy optional (??)
+    fn compileOptional(self: *Compiler, child: *ast.Node, greedy: bool) !Fragment {
         const child_frag = try self.compileNode(child);
 
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
 
-        // Start can skip to accept or go to child
         const start_state = self.nfa.getState(start);
-        try start_state.addTransition(Transition.epsilon(child_frag.start));
-        try start_state.addTransition(Transition.epsilon(accept));
+
+        if (greedy) {
+            // Greedy: try to match first, then skip
+            try start_state.addTransition(Transition.epsilon(child_frag.start));
+            try start_state.addTransition(Transition.epsilon(accept));
+        } else {
+            // Lazy: try to skip first, then match
+            try start_state.addTransition(Transition.epsilon(accept));
+            try start_state.addTransition(Transition.epsilon(child_frag.start));
+        }
 
         // Child accept goes to final accept
         const child_accept = self.nfa.getState(child_frag.accept);
@@ -321,22 +346,23 @@ pub const Compiler = struct {
         return Fragment{ .start = start, .accept = accept };
     }
 
-    /// Compile repetition {m,n}
+    /// Compile repetition {m,n} or lazy repetition {m,n}?
     fn compileRepeat(self: *Compiler, repeat: ast.Node.Repeat) !Fragment {
         // For now, implement {m,n} as m copies concatenated with (n-m) optional copies
         // This is not the most efficient, but it works
 
         const min = repeat.bounds.min;
         const max = repeat.bounds.max;
+        const greedy = repeat.greedy;
 
         if (min == 0 and max == null) {
-            // {0,} is equivalent to *
-            return self.compileStar(repeat.child);
+            // {0,} is equivalent to * or *?
+            return self.compileStar(repeat.child, greedy);
         }
 
         if (min == 1 and max == null) {
-            // {1,} is equivalent to +
-            return self.compilePlus(repeat.child);
+            // {1,} is equivalent to + or +?
+            return self.compilePlus(repeat.child, greedy);
         }
 
         // Build min required copies
@@ -356,7 +382,7 @@ pub const Compiler = struct {
             i = 0;
             while (i < diff) : (i += 1) {
                 const optional_child = try self.compileNode(repeat.child);
-                const opt_fragment = try self.compileOptional(repeat.child);
+                const opt_fragment = try self.compileOptional(repeat.child, greedy);
                 _ = optional_child;
                 const accept_state = self.nfa.getState(current_frag.accept);
                 try accept_state.addTransition(Transition.epsilon(opt_fragment.start));

@@ -94,22 +94,25 @@ pub const Visualizer = struct {
                 try self.printNode(node.data.alternation.right, depth + 1, new_prefix);
             },
             .star => {
-                try self.writer.print("{s}{s}Star{s} (*)\n", .{ prefix, node_color, reset });
+                const greedy_str = if (node.data.star.greedy) " (greedy)" else " (lazy)";
+                try self.writer.print("{s}{s}Star{s} (*{s})\n", .{ prefix, node_color, reset, greedy_str });
                 const new_prefix = try std.fmt.allocPrint(self.allocator, "{s}  ", .{prefix});
                 defer self.allocator.free(new_prefix);
-                try self.printNode(node.data.star, depth + 1, new_prefix);
+                try self.printNode(node.data.star.child, depth + 1, new_prefix);
             },
             .plus => {
-                try self.writer.print("{s}{s}Plus{s} (+)\n", .{ prefix, node_color, reset });
+                const greedy_str = if (node.data.plus.greedy) " (greedy)" else " (lazy)";
+                try self.writer.print("{s}{s}Plus{s} (+{s})\n", .{ prefix, node_color, reset, greedy_str });
                 const new_prefix = try std.fmt.allocPrint(self.allocator, "{s}  ", .{prefix});
                 defer self.allocator.free(new_prefix);
-                try self.printNode(node.data.plus, depth + 1, new_prefix);
+                try self.printNode(node.data.plus.child, depth + 1, new_prefix);
             },
             .optional => {
-                try self.writer.print("{s}{s}Optional{s} (?)\n", .{ prefix, node_color, reset });
+                const greedy_str = if (node.data.optional.greedy) " (greedy)" else " (lazy)";
+                try self.writer.print("{s}{s}Optional{s} (?{s})\n", .{ prefix, node_color, reset, greedy_str });
                 const new_prefix = try std.fmt.allocPrint(self.allocator, "{s}  ", .{prefix});
                 defer self.allocator.free(new_prefix);
-                try self.printNode(node.data.optional, depth + 1, new_prefix);
+                try self.printNode(node.data.optional.child, depth + 1, new_prefix);
             },
             .repeat => {
                 const repeat = node.data.repeat;
@@ -383,13 +386,13 @@ pub const PatternAnalyzer = struct {
             },
             .star, .plus => blk: {
                 const child = switch (node.node_type) {
-                    .star => self.calculateComplexity(node.data.star),
-                    .plus => self.calculateComplexity(node.data.plus),
+                    .star => self.calculateComplexity(node.data.star.child),
+                    .plus => self.calculateComplexity(node.data.plus.child),
                     else => unreachable,
                 };
                 break :blk child * 3; // Quantifiers add complexity
             },
-            .optional => self.calculateComplexity(node.data.optional) + 1,
+            .optional => self.calculateComplexity(node.data.optional.child) + 1,
             .repeat => blk: {
                 const child = self.calculateComplexity(node.data.repeat.child);
                 const max = node.data.repeat.bounds.max orelse 10;
@@ -414,7 +417,7 @@ pub const PatternAnalyzer = struct {
                 break :blk left or right;
             },
             .star, .optional => true,
-            .plus => self.canMatchEmpty(node.data.plus),
+            .plus => self.canMatchEmpty(node.data.plus.child),
             .repeat => blk: {
                 if (node.data.repeat.bounds.min == 0) break :blk true;
                 break :blk self.canMatchEmpty(node.data.repeat.child);
@@ -427,12 +430,12 @@ pub const PatternAnalyzer = struct {
         switch (node.node_type) {
             .star => {
                 // Check for nested quantifiers
-                if (self.hasQuantifier(node.data.star)) {
+                if (self.hasQuantifier(node.data.star.child)) {
                     try analysis.warnings.append(self.allocator, "Nested quantifiers detected - may cause performance issues");
                 }
             },
             .plus => {
-                if (self.hasQuantifier(node.data.plus)) {
+                if (self.hasQuantifier(node.data.plus.child)) {
                     try analysis.warnings.append(self.allocator, "Nested quantifiers detected - may cause performance issues");
                 }
             },

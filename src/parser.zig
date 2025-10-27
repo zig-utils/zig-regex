@@ -237,15 +237,24 @@ pub const Parser = struct {
             switch (token_type) {
                 .star => {
                     try self.advance();
-                    node = try ast.Node.createStar(self.allocator, node, span);
+                    // Check for lazy quantifier (? after *)
+                    const greedy = self.peek() != .question;
+                    if (!greedy) try self.advance();
+                    node = try ast.Node.createStar(self.allocator, node, greedy, span);
                 },
                 .plus => {
                     try self.advance();
-                    node = try ast.Node.createPlus(self.allocator, node, span);
+                    // Check for lazy quantifier (? after +)
+                    const greedy = self.peek() != .question;
+                    if (!greedy) try self.advance();
+                    node = try ast.Node.createPlus(self.allocator, node, greedy, span);
                 },
                 .question => {
                     try self.advance();
-                    node = try ast.Node.createOptional(self.allocator, node, span);
+                    // Check for lazy quantifier (? after ?)
+                    const greedy = self.peek() != .question;
+                    if (!greedy) try self.advance();
+                    node = try ast.Node.createOptional(self.allocator, node, greedy, span);
                 },
                 .lbrace => {
                     try self.advance(); // consume {
@@ -279,7 +288,10 @@ pub const Parser = struct {
                     try self.expect(.rbrace);
 
                     const bounds = ast.RepeatBounds.init(min, max);
-                    node = try ast.Node.createRepeat(self.allocator, node, bounds, span);
+                    // Check for lazy quantifier (? after {m,n})
+                    const greedy = self.peek() != .question;
+                    if (!greedy) try self.advance();
+                    node = try ast.Node.createRepeat(self.allocator, node, bounds, greedy, span);
                 },
                 else => break,
             }
@@ -382,27 +394,57 @@ pub const Parser = struct {
             .lparen => {
                 try self.advance(); // consume (
 
-                // Check for non-capturing group (?:...)
+                // Check for group extensions (?...)
                 var capture_index: ?usize = null;
+                var group_name: ?[]const u8 = null;
+
                 if (self.current_token.token_type == .question) {
                     try self.advance(); // consume ?
-                    // Check for : to confirm non-capturing group
-                    if (self.current_token.token_type == .literal and self.current_token.value == ':') {
-                        try self.advance(); // consume :
-                        // capture_index remains null for non-capturing group
+
+                    // Check what follows the ?
+                    if (self.current_token.token_type == .literal) {
+                        if (self.current_token.value == ':') {
+                            // Non-capturing group (?:...)
+                            try self.advance(); // consume :
+                            // capture_index remains null
+                        } else if (self.current_token.value == 'P') {
+                            // Python-style named group (?P<name>...)
+                            try self.advance(); // consume P
+                            if (self.current_token.token_type != .literal or self.current_token.value != '<') {
+                                return RegexError.UnexpectedCharacter;
+                            }
+                            try self.advance(); // consume <
+                            group_name = try self.parseGroupName();
+                            self.capture_count += 1;
+                            capture_index = self.capture_count;
+                        } else if (self.current_token.value == '<') {
+                            // .NET/Perl-style named group (?<name>...)
+                            try self.advance(); // consume <
+                            group_name = try self.parseGroupName();
+                            self.capture_count += 1;
+                            capture_index = self.capture_count;
+                        } else {
+                            // Unknown group extension
+                            return RegexError.UnexpectedCharacter;
+                        }
                     } else {
-                        // Invalid syntax - ? must be followed by : for group extensions
+                        // Invalid syntax after (?
                         return RegexError.UnexpectedCharacter;
                     }
                 } else {
-                    // Regular capturing group - assign capture index BEFORE parsing child (for correct nesting order)
+                    // Regular capturing group - assign capture index BEFORE parsing child
                     self.capture_count += 1;
                     capture_index = self.capture_count;
                 }
 
                 const child = try self.parseAlternation();
                 try self.expect(.rparen);
-                return ast.Node.createGroup(self.allocator, child, capture_index, span);
+
+                if (group_name) |name| {
+                    return ast.Node.createNamedGroup(self.allocator, child, capture_index, name, span);
+                } else {
+                    return ast.Node.createGroup(self.allocator, child, capture_index, span);
+                }
             },
             .lbracket => {
                 return try self.parseCharClass();
@@ -411,6 +453,52 @@ pub const Parser = struct {
                 return RegexError.UnexpectedCharacter;
             },
         }
+    }
+
+    /// Parse group name from (?P<name>...) or (?<name>...)
+    /// Expects current token to be first character of name
+    /// Consumes tokens until > is found
+    fn parseGroupName(self: *Parser) ![]const u8 {
+        var name_buf: [64]u8 = undefined;
+        var name_len: usize = 0;
+
+        // Collect name characters until we hit >
+        while (self.current_token.token_type != .eof) {
+            if (self.current_token.token_type == .literal) {
+                if (self.current_token.value == '>') {
+                    try self.advance(); // consume >
+                    break;
+                }
+
+                // Valid name characters: alphanumeric and underscore
+                const c = self.current_token.value;
+                if ((c >= 'a' and c <= 'z') or
+                    (c >= 'A' and c <= 'Z') or
+                    (c >= '0' and c <= '9') or
+                    c == '_')
+                {
+                    if (name_len >= name_buf.len) {
+                        return RegexError.InvalidCharacterClass; // Name too long
+                    }
+                    name_buf[name_len] = c;
+                    name_len += 1;
+                    try self.advance();
+                } else {
+                    return RegexError.InvalidCharacterClass; // Invalid character in name
+                }
+            } else {
+                return RegexError.InvalidCharacterClass; // Unexpected token in name
+            }
+        }
+
+        if (name_len == 0) {
+            return RegexError.InvalidCharacterClass; // Empty name
+        }
+
+        // Allocate and copy name
+        const name = try self.allocator.alloc(u8, name_len);
+        @memcpy(name, name_buf[0..name_len]);
+        return name;
     }
 
     /// Get POSIX character class by name
