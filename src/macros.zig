@@ -37,10 +37,9 @@ pub const MacroRegistry = struct {
         errdefer self.allocator.free(pattern_copy);
 
         // Check if macro already exists and free old values
-        if (self.macros.get(name)) |old_pattern| {
-            self.allocator.free(old_pattern);
-            const old_key = self.macros.getKey(name).?;
-            self.allocator.free(old_key);
+        if (self.macros.fetchRemove(name)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
         }
 
         try self.macros.put(name_copy, pattern_copy);
@@ -49,8 +48,8 @@ pub const MacroRegistry = struct {
     /// Expand macros in a pattern string
     /// Macros are referenced as ${name}
     pub fn expand(self: *MacroRegistry, pattern: []const u8) ![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        defer result.deinit();
+        var result = std.ArrayList(u8).initCapacity(self.allocator, 0) catch unreachable;
+        defer result.deinit(self.allocator);
 
         var i: usize = 0;
         while (i < pattern.len) {
@@ -65,7 +64,7 @@ pub const MacroRegistry = struct {
 
                     // Look up macro
                     if (self.macros.get(macro_name)) |macro_pattern| {
-                        try result.appendSlice(macro_pattern);
+                        try result.appendSlice(self.allocator, macro_pattern);
                         i = j + 1;
                         continue;
                     } else {
@@ -76,11 +75,11 @@ pub const MacroRegistry = struct {
             }
 
             // Regular character
-            try result.append(pattern[i]);
+            try result.append(self.allocator, pattern[i]);
             i += 1;
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Check if a macro is defined

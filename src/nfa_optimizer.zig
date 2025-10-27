@@ -345,7 +345,7 @@ pub const NFAVisualizer = struct {
         try writer.writeAll("NFA Statistics:\n");
         try writer.print("  States: {d}\n", .{self.nfa.states.items.len});
         try writer.print("  Accepting States: {d}\n", .{accepting_count});
-        try writer.print("  Transitions:\n");
+        try writer.writeAll("  Transitions:\n");
         try writer.print("    Epsilon: {d}\n", .{epsilon_count});
         try writer.print("    Char: {d}\n", .{char_count});
         try writer.print("    CharClass: {d}\n", .{class_count});

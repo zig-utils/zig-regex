@@ -61,15 +61,21 @@ pub const ASTOptimizer = struct {
 
                 // Fold concat(empty, x) -> x
                 if (node.*.data.concat.left.node_type == .empty) {
+                    const left_to_free = node.*.data.concat.left;
                     const right = node.*.data.concat.right;
                     node.*.* = right.*;
+                    self.allocator.destroy(left_to_free);
+                    self.allocator.destroy(right);
                     self.optimization_count += 1;
                     changed = true;
                 }
                 // Fold concat(x, empty) -> x
                 else if (node.*.data.concat.right.node_type == .empty) {
+                    const right_to_free = node.*.data.concat.right;
                     const left = node.*.data.concat.left;
                     node.*.* = left.*;
+                    self.allocator.destroy(right_to_free);
+                    self.allocator.destroy(left);
                     self.optimization_count += 1;
                     changed = true;
                 }
@@ -84,6 +90,8 @@ pub const ASTOptimizer = struct {
                 if (left.node_type == .literal and right.node_type == .literal) {
                     if (left.data.literal == right.data.literal) {
                         node.*.* = left.*;
+                        self.allocator.destroy(left);
+                        self.allocator.destroy(right);
                         self.optimization_count += 1;
                         changed = true;
                     }
@@ -95,10 +103,34 @@ pub const ASTOptimizer = struct {
                 // Fold star(empty) -> empty
                 if (node.*.data.star.child.node_type == .empty) {
                     const empty_node = try self.allocator.create(ast.Node);
-                    empty_node.* = .{ .node_type = .empty, .data = .{ .empty = {} } };
+                    empty_node.* = .{
+                        .node_type = .empty,
+                        .data = .{ .empty = {} },
+                        .span = node.*.span,
+                    };
                     node.* = empty_node;
                     self.optimization_count += 1;
                     changed = true;
+                }
+                // Fold star(star(x)) -> star(x) (nested stars)
+                else if (node.*.data.star.child.node_type == .star) {
+                    const child = node.*.data.star.child;
+                    node.*.* = child.*;
+                    self.allocator.destroy(child);
+                    self.optimization_count += 1;
+                    changed = true;
+                }
+                // Fold star(group(star(x))) -> star(group(x)) or star(x) if possible
+                else if (node.*.data.star.child.node_type == .group) {
+                    const group_child = node.*.data.star.child.data.group.child;
+                    if (group_child.node_type == .star) {
+                        // Replace star(group(star(x))) with group(star(x))
+                        const child = node.*.data.star.child;
+                        node.*.* = child.*;
+                        self.allocator.destroy(child);
+                        self.optimization_count += 1;
+                        changed = true;
+                    }
                 }
             },
             .plus => {
@@ -107,7 +139,11 @@ pub const ASTOptimizer = struct {
                 // Fold plus(empty) -> empty
                 if (node.*.data.plus.child.node_type == .empty) {
                     const empty_node = try self.allocator.create(ast.Node);
-                    empty_node.* = .{ .node_type = .empty, .data = .{ .empty = {} } };
+                    empty_node.* = .{
+                        .node_type = .empty,
+                        .data = .{ .empty = {} },
+                        .span = node.*.span,
+                    };
                     node.* = empty_node;
                     self.optimization_count += 1;
                     changed = true;
@@ -123,14 +159,20 @@ pub const ASTOptimizer = struct {
                 // Fold repeat{0,0}(x) -> empty
                 if (repeat.bounds.min == 0 and repeat.bounds.max != null and repeat.bounds.max.? == 0) {
                     const empty_node = try self.allocator.create(ast.Node);
-                    empty_node.* = .{ .node_type = .empty, .data = .{ .empty = {} } };
+                    empty_node.* = .{
+                        .node_type = .empty,
+                        .data = .{ .empty = {} },
+                        .span = node.*.span,
+                    };
                     node.* = empty_node;
                     self.optimization_count += 1;
                     changed = true;
                 }
                 // Fold repeat{1,1}(x) -> x
                 else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
-                    node.*.* = repeat.child.*;
+                    const child = repeat.child;
+                    node.*.* = child.*;
+                    self.allocator.destroy(child);
                     self.optimization_count += 1;
                     changed = true;
                 }
@@ -326,17 +368,22 @@ pub const ASTOptimizer = struct {
 
                 // Convert plus to star if child is optional: (a?)+ -> a*
                 if (node.*.data.plus.child.node_type == .optional) {
-                    const star_node = try self.allocator.create(ast.Node);
-                    star_node.* = .{
+                    const optional_child = node.*.data.plus.child;
+                    const child = optional_child.data.optional.child;
+                    const greedy = node.*.data.plus.greedy;
+                    const span = node.*.span;
+                    // Free the optional node since we're bypassing it
+                    self.allocator.destroy(optional_child);
+                    node.*.* = .{
                         .node_type = .star,
                         .data = .{
                             .star = .{
-                                .child = node.*.data.plus.child.data.optional.child,
-                                .greedy = node.*.data.plus.greedy,
+                                .child = child,
+                                .greedy = greedy,
                             },
                         },
+                        .span = span,
                     };
-                    node.* = star_node;
                     self.optimization_count += 1;
                     changed = true;
                 }
@@ -350,49 +397,55 @@ pub const ASTOptimizer = struct {
                 const repeat = node.*.data.repeat;
                 // Convert repeat{0,1} to optional
                 if (repeat.bounds.min == 0 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
-                    const opt_node = try self.allocator.create(ast.Node);
-                    opt_node.* = .{
+                    const child = repeat.child;
+                    const greedy = repeat.greedy;
+                    const span = node.*.span;
+                    node.*.* = .{
                         .node_type = .optional,
                         .data = .{
                             .optional = .{
-                                .child = repeat.child,
-                                .greedy = repeat.greedy,
+                                .child = child,
+                                .greedy = greedy,
                             },
                         },
+                        .span = span,
                     };
-                    node.* = opt_node;
                     self.optimization_count += 1;
                     changed = true;
                 }
                 // Convert repeat{0,} to star
                 else if (repeat.bounds.min == 0 and repeat.bounds.max == null) {
-                    const star_node = try self.allocator.create(ast.Node);
-                    star_node.* = .{
+                    const child = repeat.child;
+                    const greedy = repeat.greedy;
+                    const span = node.*.span;
+                    node.*.* = .{
                         .node_type = .star,
                         .data = .{
                             .star = .{
-                                .child = repeat.child,
-                                .greedy = repeat.greedy,
+                                .child = child,
+                                .greedy = greedy,
                             },
                         },
+                        .span = span,
                     };
-                    node.* = star_node;
                     self.optimization_count += 1;
                     changed = true;
                 }
                 // Convert repeat{1,} to plus
                 else if (repeat.bounds.min == 1 and repeat.bounds.max == null) {
-                    const plus_node = try self.allocator.create(ast.Node);
-                    plus_node.* = .{
+                    const child = repeat.child;
+                    const greedy = repeat.greedy;
+                    const span = node.*.span;
+                    node.*.* = .{
                         .node_type = .plus,
                         .data = .{
                             .plus = .{
-                                .child = repeat.child,
-                                .greedy = repeat.greedy,
+                                .child = child,
+                                .greedy = greedy,
                             },
                         },
+                        .span = span,
                     };
-                    node.* = plus_node;
                     self.optimization_count += 1;
                     changed = true;
                 }

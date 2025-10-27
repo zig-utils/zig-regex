@@ -63,7 +63,7 @@ pub const PrettyPrinter = struct {
                 try writer.print("CharClass: [{s}", .{negated});
 
                 // Show ranges
-                for (class.ranges.items) |range| {
+                for (class.ranges) |range| {
                     if (range.start == range.end) {
                         try writer.print("{c}", .{range.start});
                     } else {
@@ -168,7 +168,7 @@ pub const PrettyPrinter = struct {
                 try writer.writeAll("(class ");
                 const class = node.data.char_class;
                 if (class.negated) try writer.writeAll("^ ");
-                for (class.ranges.items) |range| {
+                for (class.ranges) |range| {
                     if (range.start == range.end) {
                         try writer.print("{c} ", .{range.start});
                     } else {
@@ -382,7 +382,7 @@ pub const PrettyPrinter = struct {
                 const class = node.data.char_class;
                 try writer.writeAll("[");
                 if (class.negated) try writer.writeAll("^");
-                for (class.ranges.items) |range| {
+                for (class.ranges) |range| {
                     if (range.start == range.end) {
                         try writer.print("{c}", .{range.start});
                     } else {
@@ -545,7 +545,7 @@ test "pretty print: tree format" {
     defer tree.deinit();
 
     var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit();
+    defer buffer.deinit(allocator);
 
     var printer = PrettyPrinter.init(allocator);
     try printer.print(tree.root, buffer.writer(allocator), .tree);
@@ -562,7 +562,7 @@ test "pretty print: sexpr format" {
     defer tree.deinit();
 
     var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit();
+    defer buffer.deinit(allocator);
 
     var printer = PrettyPrinter.init(allocator);
     try printer.print(tree.root, buffer.writer(allocator), .sexpr);
@@ -579,7 +579,7 @@ test "pretty print: compact format" {
     defer tree.deinit();
 
     var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit();
+    defer buffer.deinit(allocator);
 
     var printer = PrettyPrinter.init(allocator);
     try printer.print(tree.root, buffer.writer(allocator), .compact);
