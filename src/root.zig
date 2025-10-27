@@ -54,6 +54,19 @@ pub const ASTStats = @import("pretty_print.zig").ASTStats;
 pub const NFAOptimizer = @import("nfa_optimizer.zig").NFAOptimizer;
 pub const NFAVisualizer = @import("nfa_optimizer.zig").NFAVisualizer;
 
+// Advanced features - Named captures, Unicode, Conditionals, Atomic groups, Possessive quantifiers
+pub const named_captures = @import("named_captures.zig");
+pub const NamedCaptureRegistry = @import("named_captures.zig").NamedCaptureRegistry;
+pub const NamedMatch = @import("named_captures.zig").NamedMatch;
+
+pub const unicode = @import("unicode.zig");
+pub const UnicodeProperty = @import("unicode.zig").UnicodeProperty;
+
+pub const advanced = @import("advanced_features.zig");
+pub const AtomicGroupNode = @import("advanced_features.zig").AtomicGroupNode;
+pub const ConditionalNode = @import("advanced_features.zig").ConditionalNode;
+pub const PossessiveQuantifier = @import("advanced_features.zig").PossessiveQuantifier;
+
 // C FFI
 pub const c_api = @import("c_api.zig");
 

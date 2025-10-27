@@ -248,6 +248,89 @@ test "UTF-8 encoding" {
     try std.testing.expectEqualStrings("𝕳", buffer[0..len4]);
 }
 
+/// Unicode property names for \p{Property} matching
+pub const UnicodeProperty = enum {
+    // General categories (short & long forms)
+    Letter, L,
+    Lowercase_Letter, Ll,
+    Uppercase_Letter, Lu,
+    Titlecase_Letter, Lt,
+    Modifier_Letter, Lm,
+    Other_Letter, Lo,
+
+    Mark, M,
+    Nonspacing_Mark, Mn,
+    Spacing_Mark, Mc,
+    Enclosing_Mark, Me,
+
+    Number, N,
+    Decimal_Number, Nd,
+    Letter_Number, Nl,
+    Other_Number, No,
+
+    Punctuation, P,
+    Connector_Punctuation, Pc,
+    Dash_Punctuation, Pd,
+    Open_Punctuation, Ps,
+    Close_Punctuation, Pe,
+    Initial_Punctuation, Pi,
+    Final_Punctuation, Pf,
+    Other_Punctuation, Po,
+
+    Symbol, S,
+    Math_Symbol, Sm,
+    Currency_Symbol, Sc,
+    Modifier_Symbol, Sk,
+    Other_Symbol, So,
+
+    Separator, Z,
+    Space_Separator, Zs,
+    Line_Separator, Zl,
+    Paragraph_Separator, Zp,
+
+    Other, C,
+    Control, Cc,
+    Format, Cf,
+    Surrogate, Cs,
+    Private_Use, Co,
+    Not_Assigned, Cn,
+
+    pub fn fromString(s: []const u8) ?UnicodeProperty {
+        const map = std.ComptimeStringMap(UnicodeProperty, .{
+            .{ "Letter", .Letter }, .{ "L", .L },
+            .{ "Lowercase_Letter", .Lowercase_Letter }, .{ "Ll", .Ll },
+            .{ "Uppercase_Letter", .Uppercase_Letter }, .{ "Lu", .Lu },
+            .{ "Number", .Number }, .{ "N", .N },
+            .{ "Decimal_Number", .Decimal_Number }, .{ "Nd", .Nd },
+            .{ "Punctuation", .Punctuation }, .{ "P", .P },
+            .{ "Symbol", .Symbol }, .{ "S", .S },
+            .{ "Separator", .Separator }, .{ "Z", .Z },
+            .{ "Space_Separator", .Space_Separator }, .{ "Zs", .Zs },
+            .{ "Control", .Control }, .{ "Cc", .Cc },
+        });
+        return map.get(s);
+    }
+};
+
+/// Check if codepoint matches a Unicode property
+pub fn matchesProperty(cp: Codepoint, property: UnicodeProperty) bool {
+    return switch (property) {
+        .Letter, .L => isLetter(cp),
+        .Lowercase_Letter, .Ll => isInCategory(cp, .Ll),
+        .Uppercase_Letter, .Lu => isInCategory(cp, .Lu),
+        .Number, .N => isDigit(cp),
+        .Decimal_Number, .Nd => isInCategory(cp, .Nd),
+        .Punctuation, .P => blk: {
+            const cat = getGeneralCategory(cp);
+            break :blk cat == .Pc or cat == .Pd or cat == .Ps or
+                cat == .Pe or cat == .Pi or cat == .Pf or cat == .Po;
+        },
+        .Space_Separator, .Zs => isInCategory(cp, .Zs),
+        .Control, .Cc => isInCategory(cp, .Cc),
+        else => false,
+    };
+}
+
 test "Unicode categories" {
     try std.testing.expect(isLetter('a'));
     try std.testing.expect(isLetter('Z'));
@@ -262,4 +345,12 @@ test "Unicode categories" {
     try std.testing.expect(isWhitespace('\t'));
     try std.testing.expect(isWhitespace('\n'));
     try std.testing.expect(!isWhitespace('a'));
+}
+
+test "Unicode property matching" {
+    try std.testing.expect(matchesProperty('a', .Letter));
+    try std.testing.expect(matchesProperty('A', .Uppercase_Letter));
+    try std.testing.expect(matchesProperty('5', .Number));
+    try std.testing.expect(matchesProperty(' ', .Space_Separator));
+    try std.testing.expect(!matchesProperty('a', .Number));
 }
