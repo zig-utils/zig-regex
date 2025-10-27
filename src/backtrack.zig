@@ -31,6 +31,8 @@ pub const BacktrackEngine = struct {
     flags: common.CompileFlags,
     input: []const u8,
     captures: []CaptureGroup,
+    /// If true, lazy quantifiers will not backtrack (used in find() to prefer different positions over more matches)
+    disable_lazy_backtrack: bool,
 
     pub const CaptureGroup = struct {
         start: usize,
@@ -51,6 +53,7 @@ pub const BacktrackEngine = struct {
             .flags = flags,
             .input = &[_]u8{},
             .captures = captures,
+            .disable_lazy_backtrack = false,
         };
     }
 
@@ -68,6 +71,9 @@ pub const BacktrackEngine = struct {
     /// Find first match in input
     pub fn find(self: *BacktrackEngine, input: []const u8) ?BacktrackMatch {
         self.input = input;
+        // Enable lazy backtrack disabling for find() - prefer different positions over more matches
+        self.disable_lazy_backtrack = true;
+        defer self.disable_lazy_backtrack = false;
 
         var pos: usize = 0;
         while (pos <= input.len) : (pos += 1) {
@@ -162,32 +168,50 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchConcat(self: *BacktrackEngine, concat: ast.Node.Concat, pos: usize) ?usize {
-        // For proper backtracking, we need to try all possible matches from the left side
-        // and for each one, see if the right side can match
+        // Check if left side has quantifiers that need backtracking
+        const needs_backtrack = self.hasQuantifiers(concat.left);
 
-        // Get all possible ending positions from the left side
-        var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
-        defer left_positions.deinit(self.allocator);
+        if (needs_backtrack) {
+            // For quantifiers, collect all possible matches and try them in order
+            // Lazy quantifiers will be tried minimal-first, greedy maximal-first
+            var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+            defer left_positions.deinit(self.allocator);
 
-        // Collect all possible matches for the left side
-        self.collectAllMatches(concat.left, pos, &left_positions) catch return null;
+            self.collectAllMatches(concat.left, pos, &left_positions) catch return null;
 
-        // Try each left match to see if right side can match
-        for (left_positions.items) |left_end| {
-            // Save captures before trying right side
-            const saved_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
-            defer self.allocator.free(saved_captures);
-            @memcpy(saved_captures, self.captures);
+            for (left_positions.items) |left_end| {
+                const saved_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
+                defer self.allocator.free(saved_captures);
+                @memcpy(saved_captures, self.captures);
 
-            if (self.matchNode(concat.right, left_end)) |result| {
-                return result;
+                if (self.matchNode(concat.right, left_end)) |result| {
+                    return result;
+                }
+
+                @memcpy(self.captures, saved_captures);
             }
-
-            // Restore captures if right side failed
-            @memcpy(self.captures, saved_captures);
+            return null;
+        } else {
+            // For simple patterns without quantifiers, just try once
+            if (self.matchNode(concat.left, pos)) |left_end| {
+                if (self.matchNode(concat.right, left_end)) |right_end| {
+                    return right_end;
+                }
+            }
+            return null;
         }
+    }
 
-        return null;
+    fn hasQuantifiers(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            // Any quantifier needs backtracking support
+            .star, .plus, .optional, .repeat => true,
+            // Recursively check children
+            .concat => self.hasQuantifiers(node.data.concat.left) or self.hasQuantifiers(node.data.concat.right),
+            .alternation => self.hasQuantifiers(node.data.alternation.left) or self.hasQuantifiers(node.data.alternation.right),
+            .group => self.hasQuantifiers(node.data.group.child),
+            else => false,
+        };
     }
 
     /// Collect all possible ending positions for matching a node at a given position
@@ -216,7 +240,10 @@ pub const BacktrackEngine = struct {
                 } else {
                     // Lazy: try minimal (one match) first, then more
                     try positions.append(self.allocator, first_match);
-                    try self.collectLazyStarMatches(quant.child, first_match, positions);
+                    // If lazy backtrack is disabled (find() mode), only return minimal match
+                    if (!self.disable_lazy_backtrack) {
+                        try self.collectLazyStarMatches(quant.child, first_match, positions);
+                    }
                 }
             },
             .optional => {
@@ -230,8 +257,11 @@ pub const BacktrackEngine = struct {
                 } else {
                     // Lazy: try zero first, then matching
                     try positions.append(self.allocator, pos); // zero matches first
-                    if (self.matchNode(quant.child, pos)) |end| {
-                        try positions.append(self.allocator, end);
+                    // If lazy backtrack is disabled (find() mode), only return minimal (zero)
+                    if (!self.disable_lazy_backtrack) {
+                        if (self.matchNode(quant.child, pos)) |end| {
+                            try positions.append(self.allocator, end);
+                        }
                     }
                 }
             },
@@ -277,6 +307,11 @@ pub const BacktrackEngine = struct {
     fn collectLazyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
         // Collect all matches from shortest to longest
         try positions.append(self.allocator, pos); // zero matches first
+
+        // If lazy backtrack is disabled (find() mode), only return minimal match
+        if (self.disable_lazy_backtrack) {
+            return;
+        }
 
         var current_pos = pos;
         while (self.matchNode(child, current_pos)) |next_pos| {
@@ -341,6 +376,11 @@ pub const BacktrackEngine = struct {
 
         // Return positions from min to max (lazy: shortest first)
         try positions.append(self.allocator, current_pos);
+
+        // If lazy backtrack is disabled (find() mode), only return minimal match
+        if (self.disable_lazy_backtrack) {
+            return;
+        }
 
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
