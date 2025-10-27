@@ -176,7 +176,10 @@ pub const VM = struct {
                 for (state.transitions.items) |transition| {
                     const matches = switch (transition.transition_type) {
                         .char => self.charsMatch(transition.data.char, c),
-                        .any => true,
+                        .any => if (self.flags.dot_all)
+                            true
+                        else
+                            c != '\n',
                         .char_class => transition.data.char_class.matches(c),
                         .anchor => false, // Anchors don't consume input
                         .epsilon => false, // Already handled in epsilon closure
@@ -304,8 +307,14 @@ pub const VM = struct {
                     const anchor_type = transition.data.anchor;
                     // Check if anchor matches at current position
                     const anchor_matches = switch (anchor_type) {
-                        .start_line => pos == 0 or (pos > 0 and input[pos - 1] == '\n'),
-                        .end_line => pos == input.len or (pos < input.len and input[pos] == '\n'),
+                        .start_line => if (self.flags.multiline)
+                            pos == 0 or (pos > 0 and input[pos - 1] == '\n')
+                        else
+                            pos == 0,
+                        .end_line => if (self.flags.multiline)
+                            pos == input.len or (pos < input.len and input[pos] == '\n')
+                        else
+                            pos == input.len,
                         .start_text => pos == 0,
                         .end_text => pos == input.len,
                         .word_boundary => self.isWordBoundary(input, pos),

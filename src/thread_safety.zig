@@ -214,6 +214,7 @@ pub fn RegexCache(comptime Regex: type) type {
             while (it.next()) |entry| {
                 var regex = entry.value_ptr.*;
                 regex.deinit();
+                self.allocator.free(entry.key_ptr.*);
             }
             self.cache.deinit();
             self.initialized = false;

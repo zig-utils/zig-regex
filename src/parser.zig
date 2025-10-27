@@ -29,6 +29,9 @@ pub const TokenType = enum {
     escape_S, // \S
     escape_b, // \b
     escape_B, // \B
+    escape_A, // \A - start of text
+    escape_z, // \z - end of text
+    escape_Z, // \Z - end of text (before final newline)
     escape_char, // \n, \t, etc.
     eof,
 };
@@ -86,6 +89,9 @@ pub const Lexer = struct {
             'S' => self.makeToken(.escape_S, 0),
             'b' => self.makeToken(.escape_b, 0),
             'B' => self.makeToken(.escape_B, 0),
+            'A' => self.makeToken(.escape_A, 0),
+            'z' => self.makeToken(.escape_z, 0),
+            'Z' => self.makeToken(.escape_Z, 0),
             'n' => self.makeToken(.escape_char, '\n'),
             't' => self.makeToken(.escape_char, '\t'),
             'r' => self.makeToken(.escape_char, '\r'),
@@ -361,6 +367,14 @@ pub const Parser = struct {
                 try self.advance();
                 return ast.Node.createAnchor(self.allocator, .non_word_boundary, span);
             },
+            .escape_A => {
+                try self.advance();
+                return ast.Node.createAnchor(self.allocator, .start_text, span);
+            },
+            .escape_z, .escape_Z => {
+                try self.advance();
+                return ast.Node.createAnchor(self.allocator, .end_text, span);
+            },
             .escape_char => {
                 try self.advance();
                 return ast.Node.createLiteral(self.allocator, token.value, span);
@@ -437,7 +451,8 @@ pub const Parser = struct {
             // These should not appear here
             .rbracket, .caret, .backslash,
             .escape_d, .escape_D, .escape_w, .escape_W,
-            .escape_s, .escape_S, .escape_b, .escape_B, .eof => null,
+            .escape_s, .escape_S, .escape_b, .escape_B,
+            .escape_A, .escape_z, .escape_Z, .eof => null,
         };
     }
 
