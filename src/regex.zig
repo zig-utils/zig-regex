@@ -65,43 +65,91 @@ pub const Regex = struct {
         // Parse the pattern into an AST
         var p = try parser.Parser.init(allocator, pattern);
         var tree = try p.parse();
-        defer tree.deinit();
+
+        // Store owned copy of pattern
+        const owned_pattern = try allocator.dupe(u8, pattern);
+        errdefer allocator.free(owned_pattern);
 
         // Analyze AST for optimizations
         var opt = optimizer.Optimizer.init(allocator);
         var opt_info = try opt.analyze(tree.root);
         errdefer opt_info.deinit(allocator);
 
-        // Compile AST to NFA
-        var comp = compiler.Compiler.init(allocator);
-        errdefer comp.deinit();
-
-        _ = try comp.compile(&tree);
-
-        // Store owned copy of pattern
-        const owned_pattern = try allocator.dupe(u8, pattern);
-        errdefer allocator.free(owned_pattern);
-
         // Collect named captures from AST
         var named_captures = std.StringHashMap(usize).init(allocator);
         errdefer named_captures.deinit();
         try collectNamedCaptures(tree.root, &named_captures);
 
-        return Regex{
-            .allocator = allocator,
-            .pattern = owned_pattern,
-            .nfa = comp.nfa,
-            .capture_count = tree.capture_count,
-            .flags = flags,
-            .opt_info = opt_info,
-            .named_captures = named_captures,
-        };
+        // Detect if backtracking is required
+        const needs_backtracking = requiresBacktracking(tree.root);
+
+        if (needs_backtracking) {
+            // Use backtracking engine
+            var backtrack_engine = try backtrack.BacktrackEngine.init(
+                allocator,
+                tree.root,
+                tree.capture_count,
+                flags
+            );
+            errdefer backtrack_engine.deinit();
+
+            // Create a dummy NFA (not used)
+            var dummy_nfa = compiler.NFA.init(allocator);
+            errdefer dummy_nfa.deinit();
+            _ = try dummy_nfa.addState();
+
+            return Regex{
+                .allocator = allocator,
+                .pattern = owned_pattern,
+                .nfa = dummy_nfa,
+                .backtrack_engine = backtrack_engine,
+                .ast_tree = tree, // Keep AST for backtracking
+                .engine_type = .backtracking,
+                .capture_count = tree.capture_count,
+                .flags = flags,
+                .opt_info = opt_info,
+                .named_captures = named_captures,
+            };
+        } else {
+            // Use Thompson NFA engine
+            defer tree.deinit();
+
+            var comp = compiler.Compiler.init(allocator);
+            errdefer comp.deinit();
+            _ = try comp.compile(&tree);
+
+            return Regex{
+                .allocator = allocator,
+                .pattern = owned_pattern,
+                .nfa = comp.nfa,
+                .backtrack_engine = null,
+                .ast_tree = null,
+                .engine_type = .thompson_nfa,
+                .capture_count = tree.capture_count,
+                .flags = flags,
+                .opt_info = opt_info,
+                .named_captures = named_captures,
+            };
+        }
     }
 
     /// Free all resources associated with this regex
     pub fn deinit(self: *Regex) void {
         self.allocator.free(self.pattern);
         self.nfa.deinit();
+
+        // Deinit backtracking engine if present
+        if (self.backtrack_engine) |*engine| {
+            var mut_engine = engine.*;
+            mut_engine.deinit();
+        }
+
+        // Deinit AST tree if present
+        if (self.ast_tree) |*tree| {
+            var mut_tree = tree.*;
+            mut_tree.deinit();
+        }
+
         var mut_opt_info = self.opt_info;
         mut_opt_info.deinit(self.allocator);
 
@@ -130,9 +178,17 @@ pub const Regex = struct {
 
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
-        const nfa_mut = @constCast(&self.nfa);
-        var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
-        return try virtual_machine.isMatch(input);
+        switch (self.engine_type) {
+            .thompson_nfa => {
+                const nfa_mut = @constCast(&self.nfa);
+                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+                return try virtual_machine.isMatch(input);
+            },
+            .backtracking => {
+                const engine_mut = @constCast(&self.backtrack_engine.?);
+                return engine_mut.isMatch(input);
+            },
+        }
     }
 
     /// Helper to build a Match from a VM MatchResult
@@ -160,33 +216,69 @@ pub const Regex = struct {
         return match_result;
     }
 
-    /// Find the first match in the input string
-    pub fn find(self: *const Regex, input: []const u8) !?Match {
-        const nfa_mut = @constCast(&self.nfa);
-        var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+    /// Helper to build a Match from a Backtrack MatchResult
+    fn buildBacktrackMatch(self: *const Regex, input: []const u8, result: backtrack.BacktrackMatch) !Match {
+        var captures_list = try std.ArrayList([]const u8).initCapacity(self.allocator, result.captures.len);
+        errdefer captures_list.deinit(self.allocator);
 
-        // Use literal prefix optimization if available (but not in case-insensitive mode)
-        if (self.opt_info.literal_prefix) |prefix| {
-            if (!self.flags.case_insensitive) {
-                // Quick check: if input doesn't contain the prefix, no match possible
-                if (std.mem.indexOf(u8, input, prefix)) |prefix_pos| {
-                    // Try matching from the prefix position
-                    if (try virtual_machine.matchAt(input, prefix_pos)) |result| {
-                        return try self.buildMatch(input, result);
-                    }
-                    // If that didn't work, fall through to regular search
-                } else {
-                    // Prefix not found, no match possible
-                    return null;
-                }
+        for (result.captures) |cap| {
+            if (cap.matched) {
+                try captures_list.append(self.allocator, input[cap.start..cap.end]);
+            } else {
+                try captures_list.append(self.allocator, "");
             }
         }
 
-        if (try virtual_machine.find(input)) |result| {
-            return try self.buildMatch(input, result);
-        }
+        const captures = try captures_list.toOwnedSlice(self.allocator);
 
-        return null;
+        return Match{
+            .slice = input[result.start..result.end],
+            .start = result.start,
+            .end = result.end,
+            .captures = captures,
+        };
+    }
+
+    /// Find the first match in the input string
+    pub fn find(self: *const Regex, input: []const u8) !?Match {
+        switch (self.engine_type) {
+            .thompson_nfa => {
+                const nfa_mut = @constCast(&self.nfa);
+                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+
+                // Use literal prefix optimization if available (but not in case-insensitive mode)
+                if (self.opt_info.literal_prefix) |prefix| {
+                    if (!self.flags.case_insensitive) {
+                        // Quick check: if input doesn't contain the prefix, no match possible
+                        if (std.mem.indexOf(u8, input, prefix)) |prefix_pos| {
+                            // Try matching from the prefix position
+                            if (try virtual_machine.matchAt(input, prefix_pos)) |result| {
+                                return try self.buildMatch(input, result);
+                            }
+                            // If that didn't work, fall through to regular search
+                        } else {
+                            // Prefix not found, no match possible
+                            return null;
+                        }
+                    }
+                }
+
+                if (try virtual_machine.find(input)) |result| {
+                    return try self.buildMatch(input, result);
+                }
+
+                return null;
+            },
+            .backtracking => {
+                const engine_mut = @constCast(&self.backtrack_engine.?);
+                if (engine_mut.find(input)) |result| {
+                    var mut_result = result;
+                    defer mut_result.deinit(self.allocator);
+                    return try self.buildBacktrackMatch(input, result);
+                }
+                return null;
+            },
+        }
     }
 
     /// Find all matches in the input string
@@ -196,37 +288,77 @@ pub const Regex = struct {
 
         var pos: usize = 0;
         while (pos < input.len) {
-            const nfa_mut = @constCast(&self.nfa);
-            var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+            switch (self.engine_type) {
+                .thompson_nfa => {
+                    const nfa_mut = @constCast(&self.nfa);
+                    var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
 
-            if (try virtual_machine.find(input[pos..])) |result| {
-                // Adjust positions relative to original input
-                const adjusted_start = pos + result.start;
-                const adjusted_end = pos + result.end;
+                    if (try virtual_machine.find(input[pos..])) |result| {
+                        // Adjust positions relative to original input
+                        const adjusted_start = pos + result.start;
+                        const adjusted_end = pos + result.end;
 
-                var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
-                errdefer captures_list.deinit(allocator);
+                        var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
+                        errdefer captures_list.deinit(allocator);
 
-                for (result.captures) |cap| {
-                    try captures_list.append(allocator, cap.text);
-                }
+                        for (result.captures) |cap| {
+                            try captures_list.append(allocator, cap.text);
+                        }
 
-                const captures = try captures_list.toOwnedSlice(allocator);
+                        const captures = try captures_list.toOwnedSlice(allocator);
 
-                try matches.append(allocator, Match{
-                    .slice = input[adjusted_start..adjusted_end],
-                    .start = adjusted_start,
-                    .end = adjusted_end,
-                    .captures = captures,
-                });
+                        try matches.append(allocator, Match{
+                            .slice = input[adjusted_start..adjusted_end],
+                            .start = adjusted_start,
+                            .end = adjusted_end,
+                            .captures = captures,
+                        });
 
-                // Free the VM result
-                self.allocator.free(result.captures);
+                        // Free the VM result
+                        self.allocator.free(result.captures);
 
-                // Move past this match (avoid infinite loop on zero-width matches)
-                pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
-            } else {
-                break;
+                        // Move past this match (avoid infinite loop on zero-width matches)
+                        pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
+                    } else {
+                        break;
+                    }
+                },
+                .backtracking => {
+                    const engine_mut = @constCast(&self.backtrack_engine.?);
+                    if (engine_mut.find(input[pos..])) |result| {
+                        var mut_result = result;
+                        defer mut_result.deinit(self.allocator);
+
+                        // Adjust positions relative to original input
+                        const adjusted_start = pos + result.start;
+                        const adjusted_end = pos + result.end;
+
+                        var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
+                        errdefer captures_list.deinit(allocator);
+
+                        for (result.captures) |cap| {
+                            if (cap.matched) {
+                                try captures_list.append(allocator, input[cap.start..cap.end]);
+                            } else {
+                                try captures_list.append(allocator, "");
+                            }
+                        }
+
+                        const captures = try captures_list.toOwnedSlice(allocator);
+
+                        try matches.append(allocator, Match{
+                            .slice = input[adjusted_start..adjusted_end],
+                            .start = adjusted_start,
+                            .end = adjusted_end,
+                            .captures = captures,
+                        });
+
+                        // Move past this match (avoid infinite loop on zero-width matches)
+                        pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
+                    } else {
+                        break;
+                    }
+                },
             }
         }
 
@@ -387,42 +519,81 @@ pub const Regex = struct {
             if (self.done) return null;
 
             while (self.pos <= self.input.len) {
-                const nfa_mut = @constCast(&self.regex.nfa);
-                var virtual_machine = vm.VM.init(
-                    allocator,
-                    nfa_mut,
-                    self.regex.capture_count,
-                    self.regex.flags,
-                );
+                switch (self.regex.engine_type) {
+                    .thompson_nfa => {
+                        const nfa_mut = @constCast(&self.regex.nfa);
+                        var virtual_machine = vm.VM.init(
+                            allocator,
+                            nfa_mut,
+                            self.regex.capture_count,
+                            self.regex.flags,
+                        );
 
-                if (try virtual_machine.matchAt(self.input, self.pos)) |result| {
-                    const adjusted_start = result.start;
-                    const adjusted_end = result.end;
+                        if (try virtual_machine.matchAt(self.input, self.pos)) |result| {
+                            const adjusted_start = result.start;
+                            const adjusted_end = result.end;
 
-                    // Convert vm.Capture to []const u8
-                    var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
-                    errdefer captures_list.deinit(allocator);
+                            // Convert vm.Capture to []const u8
+                            var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
+                            errdefer captures_list.deinit(allocator);
 
-                    for (result.captures) |cap| {
-                        try captures_list.append(allocator, cap.text);
-                    }
+                            for (result.captures) |cap| {
+                                try captures_list.append(allocator, cap.text);
+                            }
 
-                    const captures = try captures_list.toOwnedSlice(allocator);
+                            const captures = try captures_list.toOwnedSlice(allocator);
 
-                    // Free the VM result
-                    allocator.free(result.captures);
+                            // Free the VM result
+                            allocator.free(result.captures);
 
-                    const match_result = Match{
-                        .slice = self.input[adjusted_start..adjusted_end],
-                        .start = adjusted_start,
-                        .end = adjusted_end,
-                        .captures = captures,
-                    };
+                            const match_result = Match{
+                                .slice = self.input[adjusted_start..adjusted_end],
+                                .start = adjusted_start,
+                                .end = adjusted_end,
+                                .captures = captures,
+                            };
 
-                    // Move past this match (avoid infinite loop on zero-width matches)
-                    self.pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
+                            // Move past this match (avoid infinite loop on zero-width matches)
+                            self.pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
 
-                    return match_result;
+                            return match_result;
+                        }
+                    },
+                    .backtracking => {
+                        const engine_mut = @constCast(&self.regex.backtrack_engine.?);
+
+                        // Try matching at current position
+                        engine_mut.resetCaptures();
+                        if (engine_mut.matchNode(engine_mut.ast_root, self.pos)) |end_pos| {
+                            if (end_pos > self.pos or (end_pos == self.pos and engine_mut.canMatchEmpty(engine_mut.ast_root))) {
+                                // Build match result
+                                var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, engine_mut.captures.len);
+                                errdefer captures_list.deinit(allocator);
+
+                                for (engine_mut.captures) |cap| {
+                                    if (cap.matched) {
+                                        try captures_list.append(allocator, self.input[cap.start..cap.end]);
+                                    } else {
+                                        try captures_list.append(allocator, "");
+                                    }
+                                }
+
+                                const captures = try captures_list.toOwnedSlice(allocator);
+
+                                const match_result = Match{
+                                    .slice = self.input[self.pos..end_pos],
+                                    .start = self.pos,
+                                    .end = end_pos,
+                                    .captures = captures,
+                                };
+
+                                // Move past this match
+                                self.pos = if (end_pos > self.pos) end_pos else end_pos + 1;
+
+                                return match_result;
+                            }
+                        }
+                    },
                 }
 
                 self.pos += 1;
@@ -471,6 +642,52 @@ pub const Regex = struct {
     }
 };
 
+/// Helper function to detect if AST requires backtracking engine
+fn requiresBacktracking(node: *ast.Node) bool {
+    switch (node.node_type) {
+        // These features require backtracking
+        .lookahead, .lookbehind, .backref => return true,
+
+        // Check for lazy quantifiers
+        .star, .plus, .optional => {
+            const greedy = switch (node.node_type) {
+                .star => node.data.star.greedy,
+                .plus => node.data.plus.greedy,
+                .optional => node.data.optional.greedy,
+                else => unreachable,
+            };
+            if (!greedy) return true; // Lazy quantifiers need backtracking
+
+            // Recursively check child
+            const child = switch (node.node_type) {
+                .star => node.data.star.child,
+                .plus => node.data.plus.child,
+                .optional => node.data.optional.child,
+                else => unreachable,
+            };
+            return requiresBacktracking(child);
+        },
+        .repeat => {
+            if (!node.data.repeat.greedy) return true;
+            return requiresBacktracking(node.data.repeat.child);
+        },
+
+        // Recursively check compound nodes
+        .concat => {
+            return requiresBacktracking(node.data.concat.left) or
+                   requiresBacktracking(node.data.concat.right);
+        },
+        .alternation => {
+            return requiresBacktracking(node.data.alternation.left) or
+                   requiresBacktracking(node.data.alternation.right);
+        },
+        .group => return requiresBacktracking(node.data.group.child),
+
+        // These don't require backtracking
+        .literal, .any, .char_class, .anchor, .empty => return false,
+    }
+}
+
 /// Helper function to recursively collect named captures from AST
 fn collectNamedCaptures(node: *ast.Node, map: *std.StringHashMap(usize)) !void {
     switch (node.node_type) {
@@ -495,7 +712,15 @@ fn collectNamedCaptures(node: *ast.Node, map: *std.StringHashMap(usize)) !void {
         .plus => try collectNamedCaptures(node.data.plus.child, map),
         .optional => try collectNamedCaptures(node.data.optional.child, map),
         .repeat => try collectNamedCaptures(node.data.repeat.child, map),
-        else => {}, // Literals, character classes, anchors don't contain groups
+        .lookahead, .lookbehind => {
+            const child = switch (node.node_type) {
+                .lookahead => node.data.lookahead.child,
+                .lookbehind => node.data.lookbehind.child,
+                else => unreachable,
+            };
+            try collectNamedCaptures(child, map);
+        },
+        else => {}, // Literals, character classes, anchors, backreferences don't contain groups
     }
 }
 
