@@ -385,12 +385,10 @@ Building a production-ready regular expression library for Zig that provides:
 ### Potential Features
 - [ ] Regex macros/composition
 - [ ] Pattern compilation to native code
-- [ ] Integration with other Zig ecosystem tools
 - [ ] C FFI for use in other languages
 - [ ] WASM support
 - [ ] Regex builder API (type-safe pattern construction)
-- [ ] Regex lint/analysis tools
-- [ ] IDE integration (syntax highlighting, validation)
+- [ ] Regex lint/analysis tools / extreme narrow typing for user patterns
 
 ### Research Topics
 - [ ] Investigate derivative-based regex matching

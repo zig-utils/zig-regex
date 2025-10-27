@@ -221,6 +221,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_utf8_unicode_tests = b.addRunArtifact(utf8_unicode_tests);
 
+    const thread_safety_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/thread_safety.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_thread_safety_tests = b.addRunArtifact(thread_safety_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -235,6 +247,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_iterator_tests.step);
     test_step.dependOn(&run_non_capturing_groups_tests.step);
     test_step.dependOn(&run_utf8_unicode_tests.step);
+    test_step.dependOn(&run_thread_safety_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
@@ -301,4 +314,76 @@ pub fn build(b: *std.Build) void {
     const prefix_bench_run = b.addRunArtifact(prefix_bench);
     const prefix_bench_step = b.step("bench-prefix", "Run prefix optimization benchmarks");
     prefix_bench_step.dependOn(&prefix_bench_run.step);
+
+    // Add debug visualization example
+    const debug_example = b.addExecutable(.{
+        .name = "debug_visualization",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/debug_visualization.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(debug_example);
+
+    const debug_example_run = b.addRunArtifact(debug_example);
+    const debug_example_step = b.step("debug-example", "Run debug and visualization examples");
+    debug_example_step.dependOn(&debug_example_run.step);
+
+    // Add error handling example
+    const error_example = b.addExecutable(.{
+        .name = "error_handling",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/error_handling.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(error_example);
+
+    const error_example_run = b.addRunArtifact(error_example);
+    const error_example_step = b.step("error-example", "Run error handling examples");
+    error_example_step.dependOn(&error_example_run.step);
+
+    // Add profiling example
+    const profiling_example = b.addExecutable(.{
+        .name = "profiling_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/profiling_example.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(profiling_example);
+
+    const profiling_example_run = b.addRunArtifact(profiling_example);
+    const profiling_example_step = b.step("profiling-example", "Run profiling examples");
+    profiling_example_step.dependOn(&profiling_example_run.step);
+
+    // Add thread safety example
+    const thread_safety_example = b.addExecutable(.{
+        .name = "thread_safety_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/thread_safety.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(thread_safety_example);
+
+    const thread_safety_example_run = b.addRunArtifact(thread_safety_example);
+    const thread_safety_example_step = b.step("thread-safety-example", "Run thread safety examples");
+    thread_safety_example_step.dependOn(&thread_safety_example_run.step);
 }
