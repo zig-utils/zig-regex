@@ -61,9 +61,9 @@ test "string anchors: \\A vs ^" {
     // \\A should NOT match after newline
     try std.testing.expect(!try regex_A.isMatch(input2));
 
-    // ^ in our implementation also matches after newlines (by design)
-    // This is actually correct behavior for ^ (it matches at start of line)
-    try std.testing.expect(try regex_caret.isMatch(input2));
+    // ^ with default flags (multiline=false) should also NOT match after newline
+    // Use multiline mode to match after newlines
+    try std.testing.expect(!try regex_caret.isMatch(input2));
 }
 
 test "string anchors: combined \\A and \\z" {
