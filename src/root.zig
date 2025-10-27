@@ -31,6 +31,18 @@ pub const thread_safety = @import("thread_safety.zig");
 pub const SharedRegex = @import("thread_safety.zig").SharedRegex(Regex);
 pub const RegexCache = @import("thread_safety.zig").RegexCache(Regex);
 
+// Builder API and pattern composition
+pub const Builder = @import("builder.zig").Builder;
+pub const Patterns = @import("builder.zig").Patterns;
+pub const Composer = @import("builder.zig").Composer;
+
+// Linting and analysis
+pub const Lint = @import("lint.zig").Lint;
+pub const ComplexityAnalyzer = @import("lint.zig").ComplexityAnalyzer;
+
+// C FFI
+pub const c_api = @import("c_api.zig");
+
 // Internal modules (for advanced users and debugging)
 pub const common = @import("common.zig");
 pub const parser = @import("parser.zig");

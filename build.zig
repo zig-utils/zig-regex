@@ -386,4 +386,22 @@ pub fn build(b: *std.Build) void {
     const thread_safety_example_run = b.addRunArtifact(thread_safety_example);
     const thread_safety_example_step = b.step("thread-safety-example", "Run thread safety examples");
     thread_safety_example_step.dependOn(&thread_safety_example_run.step);
+
+    // Add advanced features example
+    const advanced_example = b.addExecutable(.{
+        .name = "advanced_features",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/advanced_features.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(advanced_example);
+
+    const advanced_example_run = b.addRunArtifact(advanced_example);
+    const advanced_example_step = b.step("advanced-example", "Run advanced features examples");
+    advanced_example_step.dependOn(&advanced_example_run.step);
 }
