@@ -6,6 +6,7 @@ const vm = @import("vm.zig");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
 const optimizer = @import("optimizer.zig");
+const backtrack = @import("backtrack.zig");
 
 /// Represents a match result from a regex operation
 pub const Match = struct {
@@ -31,11 +32,20 @@ pub const Match = struct {
     }
 };
 
+/// Engine type used for regex matching
+pub const EngineType = enum {
+    thompson_nfa, // Fast O(n*m) but limited features
+    backtracking, // Slower but supports all features
+};
+
 /// Main regex type - represents a compiled regular expression pattern
 pub const Regex = struct {
     allocator: std.mem.Allocator,
     pattern: []const u8,
     nfa: compiler.NFA,
+    backtrack_engine: ?backtrack.BacktrackEngine,
+    ast_tree: ?ast.AST, // Kept for backtracking engine
+    engine_type: EngineType,
     capture_count: usize,
     flags: common.CompileFlags,
     opt_info: optimizer.OptimizationInfo,

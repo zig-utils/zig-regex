@@ -399,13 +399,22 @@ pub const PatternAnalyzer = struct {
                 break :blk child * max;
             },
             .group => self.calculateComplexity(node.data.group.child),
+            .lookahead, .lookbehind => blk: {
+                const child = switch (node.node_type) {
+                    .lookahead => self.calculateComplexity(node.data.lookahead.child),
+                    .lookbehind => self.calculateComplexity(node.data.lookbehind.child),
+                    else => unreachable,
+                };
+                break :blk child * 5; // Assertions add significant complexity
+            },
+            .backref => 5, // Backreferences are complex
         };
     }
 
     fn canMatchEmpty(self: *PatternAnalyzer, node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .any, .char_class => false,
-            .empty, .anchor => true,
+            .literal, .any, .char_class, .backref => false,
+            .empty, .anchor, .lookahead, .lookbehind => true,
             .concat => blk: {
                 const left = self.canMatchEmpty(node.data.concat.left);
                 const right = self.canMatchEmpty(node.data.concat.right);

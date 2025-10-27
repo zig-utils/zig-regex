@@ -110,7 +110,9 @@ pub const Optimizer = struct {
                 return true;
             },
             // Any of these stop prefix collection
-            .alternation, .star, .plus, .optional, .repeat, .any, .char_class => false,
+            .alternation, .star, .plus, .optional, .repeat, .any, .char_class, .backref => false,
+            // Lookahead/lookbehind don't consume input
+            .lookahead, .lookbehind => true,
             .empty => true,
         };
     }
@@ -144,6 +146,15 @@ pub const Optimizer = struct {
             },
             .group => {
                 return self.calculateMinLength(node.data.group.child);
+            },
+            .lookahead, .lookbehind => {
+                // Lookaround assertions don't consume input
+                return 0;
+            },
+            .backref => {
+                // Backreferences have variable length (depends on what was captured)
+                // Conservative estimate: 0 minimum
+                return 0;
             },
             .anchor, .empty => 0,
         };
@@ -183,6 +194,14 @@ pub const Optimizer = struct {
             },
             .group => {
                 return self.calculateMaxLength(node.data.group.child);
+            },
+            .lookahead, .lookbehind => {
+                // Lookaround assertions don't consume input
+                return 0;
+            },
+            .backref => {
+                // Backreferences have unbounded max length
+                return null;
             },
             .anchor, .empty => 0,
         };

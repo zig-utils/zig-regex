@@ -33,6 +33,7 @@ pub const TokenType = enum {
     escape_z, // \z - end of text
     escape_Z, // \Z - end of text (before final newline)
     escape_char, // \n, \t, etc.
+    backref, // \1, \2, etc.
     eof,
 };
 
@@ -95,6 +96,10 @@ pub const Lexer = struct {
             'n' => self.makeToken(.escape_char, '\n'),
             't' => self.makeToken(.escape_char, '\t'),
             'r' => self.makeToken(.escape_char, '\r'),
+            '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
+                // Backreference \1, \2, etc.
+                return self.makeToken(.backref, c - '0');
+            },
             '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => {
                 // Literal escape of special characters
                 return self.makeToken(.literal, c);
@@ -391,6 +396,11 @@ pub const Parser = struct {
                 try self.advance();
                 return ast.Node.createLiteral(self.allocator, token.value, span);
             },
+            .backref => {
+                try self.advance();
+                const index = token.value; // 1-based capture group index
+                return ast.Node.createBackreference(self.allocator, index, null, span);
+            },
             .lparen => {
                 try self.advance(); // consume (
 
@@ -407,6 +417,18 @@ pub const Parser = struct {
                             // Non-capturing group (?:...)
                             try self.advance(); // consume :
                             // capture_index remains null
+                        } else if (self.current_token.value == '=') {
+                            // Positive lookahead (?=...)
+                            try self.advance(); // consume =
+                            const child = try self.parseAlternation();
+                            try self.expect(.rparen);
+                            return ast.Node.createLookahead(self.allocator, child, true, span);
+                        } else if (self.current_token.value == '!') {
+                            // Negative lookahead (?!...)
+                            try self.advance(); // consume !
+                            const child = try self.parseAlternation();
+                            try self.expect(.rparen);
+                            return ast.Node.createLookahead(self.allocator, child, false, span);
                         } else if (self.current_token.value == 'P') {
                             // Python-style named group (?P<name>...)
                             try self.advance(); // consume P
@@ -418,11 +440,38 @@ pub const Parser = struct {
                             self.capture_count += 1;
                             capture_index = self.capture_count;
                         } else if (self.current_token.value == '<') {
-                            // .NET/Perl-style named group (?<name>...)
+                            // Check if it's lookbehind or named group
+                            // Need to peek ahead to distinguish (?<=...) from (?<name>...)
+                            const saved_pos = self.lexer.pos;
+                            const saved_token = self.current_token;
                             try self.advance(); // consume <
-                            group_name = try self.parseGroupName();
-                            self.capture_count += 1;
-                            capture_index = self.capture_count;
+
+                            if (self.current_token.token_type == .literal) {
+                                if (self.current_token.value == '=') {
+                                    // Positive lookbehind (?<=...)
+                                    try self.advance(); // consume =
+                                    const child = try self.parseAlternation();
+                                    try self.expect(.rparen);
+                                    return ast.Node.createLookbehind(self.allocator, child, true, span);
+                                } else if (self.current_token.value == '!') {
+                                    // Negative lookbehind (?<!...)
+                                    try self.advance(); // consume !
+                                    const child = try self.parseAlternation();
+                                    try self.expect(.rparen);
+                                    return ast.Node.createLookbehind(self.allocator, child, false, span);
+                                } else {
+                                    // .NET/Perl-style named group (?<name>...)
+                                    // Restore position to re-parse the name
+                                    self.lexer.pos = saved_pos;
+                                    self.current_token = saved_token;
+                                    try self.advance(); // consume <
+                                    group_name = try self.parseGroupName();
+                                    self.capture_count += 1;
+                                    capture_index = self.capture_count;
+                                }
+                            } else {
+                                return RegexError.UnexpectedCharacter;
+                            }
                         } else {
                             // Unknown group extension
                             return RegexError.UnexpectedCharacter;
@@ -540,7 +589,7 @@ pub const Parser = struct {
             .rbracket, .caret, .backslash,
             .escape_d, .escape_D, .escape_w, .escape_W,
             .escape_s, .escape_S, .escape_b, .escape_B,
-            .escape_A, .escape_z, .escape_Z, .eof => null,
+            .escape_A, .escape_z, .escape_Z, .backref, .eof => null,
         };
     }
 

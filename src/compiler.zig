@@ -186,7 +186,7 @@ pub const Compiler = struct {
     }
 
     /// Compile a single AST node into an NFA fragment
-    fn compileNode(self: *Compiler, node: *ast.Node) std.mem.Allocator.Error!Fragment {
+    fn compileNode(self: *Compiler, node: *ast.Node) anyerror!Fragment {
         return switch (node.node_type) {
             .literal => try self.compileLiteral(node.data.literal),
             .any => try self.compileAny(),
@@ -200,6 +200,8 @@ pub const Compiler = struct {
             .group => try self.compileGroup(node.data.group),
             .anchor => try self.compileAnchor(node.data.anchor),
             .empty => try self.compileEmpty(),
+            // These features require backtracking engine
+            .lookahead, .lookbehind, .backref => @import("errors.zig").RegexError.NotImplemented,
         };
     }
 

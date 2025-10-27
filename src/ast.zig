@@ -27,6 +27,12 @@ pub const NodeType = enum {
     anchor,
     /// Empty/epsilon
     empty,
+    /// Lookahead assertion (?=...) or (?!...)
+    lookahead,
+    /// Lookbehind assertion (?<=...) or (?<!...)
+    lookbehind,
+    /// Backreference \1, \2, etc.
+    backref,
 };
 
 /// Anchor types
@@ -80,6 +86,9 @@ pub const Node = struct {
         group: Group,
         anchor: AnchorType,
         empty: void,
+        lookahead: Assertion,
+        lookbehind: Assertion,
+        backref: Backreference,
     };
 
     pub const Concat = struct {
@@ -107,6 +116,16 @@ pub const Node = struct {
         child: *Node,
         capture_index: ?usize, // null for non-capturing groups
         name: ?[]const u8 = null, // null for unnamed groups
+    };
+
+    pub const Assertion = struct {
+        child: *Node,
+        positive: bool, // true for positive, false for negative
+    };
+
+    pub const Backreference = struct {
+        index: usize, // 1-based capture group index
+        name: ?[]const u8 = null, // optional name for named backreferences
     };
 
     pub fn createLiteral(allocator: std.mem.Allocator, c: u8, span: common.Span) !*Node {
@@ -233,6 +252,36 @@ pub const Node = struct {
         return node;
     }
 
+    pub fn createLookahead(allocator: std.mem.Allocator, child: *Node, positive: bool, span: common.Span) !*Node {
+        const node = try allocator.create(Node);
+        node.* = .{
+            .node_type = .lookahead,
+            .data = .{ .lookahead = .{ .child = child, .positive = positive } },
+            .span = span,
+        };
+        return node;
+    }
+
+    pub fn createLookbehind(allocator: std.mem.Allocator, child: *Node, positive: bool, span: common.Span) !*Node {
+        const node = try allocator.create(Node);
+        node.* = .{
+            .node_type = .lookbehind,
+            .data = .{ .lookbehind = .{ .child = child, .positive = positive } },
+            .span = span,
+        };
+        return node;
+    }
+
+    pub fn createBackreference(allocator: std.mem.Allocator, index: usize, name: ?[]const u8, span: common.Span) !*Node {
+        const node = try allocator.create(Node);
+        node.* = .{
+            .node_type = .backref,
+            .data = .{ .backref = .{ .index = index, .name = name } },
+            .span = span,
+        };
+        return node;
+    }
+
     /// Recursively free an AST node and all its children
     pub fn destroy(self: *Node, allocator: std.mem.Allocator) void {
         switch (self.data) {
@@ -252,6 +301,14 @@ pub const Node = struct {
             },
             .group => |group| {
                 group.child.destroy(allocator);
+            },
+            .lookahead, .lookbehind => |assertion| {
+                assertion.child.destroy(allocator);
+            },
+            .backref => |backref| {
+                if (backref.name) |name| {
+                    allocator.free(name);
+                }
             },
             .char_class => |char_class| {
                 // Free the ranges array. This is safe because:
