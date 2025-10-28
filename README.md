@@ -75,7 +75,7 @@ zig-regex is a comprehensive regular expression engine for Zig featuring Thompso
     .version = "0.1.0",
     .dependencies = .{
         .regex = .{
-            .url = "https://github.com/yourusername/zig-regex/archive/main.tar.gz",
+            .url = "https://github.com/zig-utils/zig-regex/archive/main.tar.gz",
             .hash = "...", // zig will provide this
         },
     },
@@ -94,7 +94,7 @@ exe.root_module.addImport("regex", regex.module("regex"));
 ### Manual Installation
 
 ```bash
-git clone https://github.com/yourusername/zig-regex.git
+git clone https://github.com/zig-utils/zig-regex.git
 cd zig-regex
 zig build
 ```
@@ -295,8 +295,8 @@ Inspired by:
 
 ## Support
 
-- [GitHub Issues](https://github.com/yourusername/zig-regex/issues)
-- [Discussions](https://github.com/yourusername/zig-regex/discussions)
+- [GitHub Issues](https://github.com/zig-utils/zig-regex/issues)
+- [Discussions](https://github.com/zig-utils/zig-regex/discussions)
 
 ---
 
