@@ -19,6 +19,7 @@ pub const RegexError = error{
     InvalidGroupName,
     InvalidBackreference,
     DuplicateGroupName,
+    NestingTooDeep,
 
     // Compilation errors
     CompilationFailed,

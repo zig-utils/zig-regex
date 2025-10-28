@@ -67,6 +67,14 @@ pub const AtomicGroupNode = @import("advanced_features.zig").AtomicGroupNode;
 pub const ConditionalNode = @import("advanced_features.zig").ConditionalNode;
 pub const PossessiveQuantifier = @import("advanced_features.zig").PossessiveQuantifier;
 
+// Security - Pattern analysis and vulnerability detection
+pub const pattern_analyzer = @import("pattern_analyzer.zig");
+pub const PatternAnalyzer = @import("pattern_analyzer.zig").PatternAnalyzer;
+pub const AnalysisResult = @import("pattern_analyzer.zig").AnalysisResult;
+pub const RiskLevel = @import("pattern_analyzer.zig").RiskLevel;
+pub const analyzePattern = @import("pattern_analyzer.zig").analyzePattern;
+pub const analyzeAndValidate = @import("pattern_analyzer.zig").analyzeAndValidate;
+
 // C FFI
 pub const c_api = @import("c_api.zig");
 

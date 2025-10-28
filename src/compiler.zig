@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
+const RegexError = @import("errors.zig").RegexError;
 
 /// State ID in the NFA
 pub const StateId = usize;
@@ -357,6 +358,18 @@ pub const Compiler = struct {
         const max = repeat.bounds.max;
         const greedy = repeat.greedy;
 
+        // SECURITY: Defense-in-depth - prevent excessive state allocation
+        // Parser should already limit quantifiers to 100,000, but check again
+        const MAX_REPEAT_EXPANSION: usize = 10_000; // Conservative limit for actual NFA expansion
+        if (max) |max_val| {
+            if (max_val > MAX_REPEAT_EXPANSION) {
+                return RegexError.PatternTooComplex;
+            }
+        }
+        if (min > MAX_REPEAT_EXPANSION) {
+            return RegexError.PatternTooComplex;
+        }
+
         if (min == 0 and max == null) {
             // {0,} is equivalent to * or *?
             return self.compileStar(repeat.child, greedy);
@@ -499,6 +512,37 @@ test "compile alternation" {
 test "compile star" {
     const allocator = std.testing.allocator;
     var parser = @import("parser.zig").Parser.init(allocator, "a*") catch unreachable;
+    var tree = try parser.parse();
+    defer tree.deinit();
+
+    var compiler = Compiler.init(allocator);
+    defer compiler.deinit();
+
+    _ = try compiler.compile(&tree);
+    try std.testing.expect(compiler.nfa.states.items.len > 0);
+}
+
+test "compiler: repeat expansion limit" {
+    const allocator = std.testing.allocator;
+
+    // Pattern with quantifier exceeding MAX_REPEAT_EXPANSION (10,000)
+    // Parser allows up to 100,000, but compiler should reject > 10,000
+    var parser = @import("parser.zig").Parser.init(allocator, "a{50000}") catch unreachable;
+    var tree = try parser.parse();
+    defer tree.deinit();
+
+    var compiler = Compiler.init(allocator);
+    defer compiler.deinit();
+
+    const result = compiler.compile(&tree);
+    try std.testing.expectError(RegexError.PatternTooComplex, result);
+}
+
+test "compiler: acceptable repeat expansion" {
+    const allocator = std.testing.allocator;
+
+    // Pattern with quantifier within MAX_REPEAT_EXPANSION
+    var parser = @import("parser.zig").Parser.init(allocator, "a{100}") catch unreachable;
     var tree = try parser.parse();
     defer tree.deinit();
 

@@ -146,6 +146,10 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     current_token: Token,
     capture_count: usize,
+    nesting_depth: usize,
+
+    /// Maximum nesting depth to prevent stack overflow from patterns like (((((...
+    pub const MAX_NESTING_DEPTH: usize = 100;
 
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !Parser {
         var lexer = Lexer.init(pattern);
@@ -155,6 +159,7 @@ pub const Parser = struct {
             .allocator = allocator,
             .current_token = first_token,
             .capture_count = 0,
+            .nesting_depth = 0,
         };
     }
 
@@ -264,10 +269,25 @@ pub const Parser = struct {
                 .lbrace => {
                     try self.advance(); // consume {
 
-                    // Parse minimum
+                    // Parse minimum with overflow protection
+                    const MAX_QUANTIFIER: usize = 100_000; // Reasonable upper limit to prevent DoS
                     var min: usize = 0;
                     while (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
-                        min = min * 10 + (self.current_token.value - '0');
+                        const digit = self.current_token.value - '0';
+
+                        // Check for multiplication overflow before computing
+                        if (min > std.math.maxInt(usize) / 10) {
+                            return RegexError.InvalidQuantifier;
+                        }
+
+                        const new_min = min * 10 + digit;
+
+                        // Enforce reasonable maximum to prevent resource exhaustion
+                        if (new_min > MAX_QUANTIFIER) {
+                            return RegexError.InvalidQuantifier;
+                        }
+
+                        min = new_min;
                         try self.advance();
                     }
 
@@ -281,7 +301,21 @@ pub const Parser = struct {
                         if (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
                             max = 0;
                             while (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
-                                max = (max.? * 10) + (self.current_token.value - '0');
+                                const digit = self.current_token.value - '0';
+
+                                // Check for multiplication overflow
+                                if (max.? > std.math.maxInt(usize) / 10) {
+                                    return RegexError.InvalidQuantifier;
+                                }
+
+                                const new_max = max.? * 10 + digit;
+
+                                // Enforce reasonable maximum
+                                if (new_max > MAX_QUANTIFIER) {
+                                    return RegexError.InvalidQuantifier;
+                                }
+
+                                max = new_max;
                                 try self.advance();
                             }
                         } else {
@@ -402,6 +436,13 @@ pub const Parser = struct {
                 return ast.Node.createBackreference(self.allocator, index, null, span);
             },
             .lparen => {
+                // SECURITY: Check nesting depth to prevent stack overflow
+                self.nesting_depth += 1;
+                if (self.nesting_depth > MAX_NESTING_DEPTH) {
+                    return RegexError.NestingTooDeep;
+                }
+                defer self.nesting_depth -= 1;
+
                 try self.advance(); // consume (
 
                 // Check for group extensions (?...)
@@ -781,3 +822,64 @@ test "parser group" {
 //
 //     try std.testing.expectEqual(ast.NodeType.char_class, tree.root.node_type);
 // }
+
+test "parser: nesting depth limit" {
+    const allocator = std.testing.allocator;
+
+    // Create a pattern with 101 levels of nesting (exceeds MAX_NESTING_DEPTH of 100)
+    var pattern_buf: [300]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&pattern_buf);
+    const writer = fbs.writer();
+
+    // Write 101 opening parens
+    var i: usize = 0;
+    while (i < 101) : (i += 1) {
+        try writer.writeByte('(');
+    }
+
+    // Write 'a' in the middle
+    try writer.writeByte('a');
+
+    // Write 101 closing parens
+    i = 0;
+    while (i < 101) : (i += 1) {
+        try writer.writeByte(')');
+    }
+
+    const pattern = fbs.getWritten();
+    var parser = try Parser.init(allocator, pattern);
+    const result = parser.parse();
+
+    try std.testing.expectError(RegexError.NestingTooDeep, result);
+}
+
+test "parser: acceptable nesting depth" {
+    const allocator = std.testing.allocator;
+
+    // Create a pattern with 50 levels of nesting (well within MAX_NESTING_DEPTH of 100)
+    var pattern_buf: [200]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&pattern_buf);
+    const writer = fbs.writer();
+
+    // Write 50 opening parens
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        try writer.writeByte('(');
+    }
+
+    // Write 'a' in the middle
+    try writer.writeByte('a');
+
+    // Write 50 closing parens
+    i = 0;
+    while (i < 50) : (i += 1) {
+        try writer.writeByte(')');
+    }
+
+    const pattern = fbs.getWritten();
+    var parser = try Parser.init(allocator, pattern);
+    var result = try parser.parse();
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 50), result.capture_count);
+}

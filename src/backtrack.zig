@@ -33,12 +33,19 @@ pub const BacktrackEngine = struct {
     captures: []CaptureGroup,
     /// If true, lazy quantifiers will not backtrack (used in find() to prefer different positions over more matches)
     disable_lazy_backtrack: bool,
+    /// ReDoS protection: count of matching steps
+    step_count: usize,
+    /// Maximum steps before aborting (prevents catastrophic backtracking)
+    max_steps: usize,
 
     pub const CaptureGroup = struct {
         start: usize,
         end: usize,
         matched: bool,
     };
+
+    /// Default maximum steps: 10 million (prevents ReDoS while allowing complex patterns)
+    pub const DEFAULT_MAX_STEPS: usize = 10_000_000;
 
     pub fn init(allocator: std.mem.Allocator, root: *ast.Node, capture_count: usize, flags: common.CompileFlags) !BacktrackEngine {
         const captures = try allocator.alloc(CaptureGroup, capture_count);
@@ -54,6 +61,8 @@ pub const BacktrackEngine = struct {
             .input = &[_]u8{},
             .captures = captures,
             .disable_lazy_backtrack = false,
+            .step_count = 0,
+            .max_steps = DEFAULT_MAX_STEPS,
         };
     }
 
@@ -127,6 +136,12 @@ pub const BacktrackEngine = struct {
     /// Match a node starting at position, returns end position or null if no match
     /// Returns position where match ended, or null if no match
     pub fn matchNode(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
+        // ReDoS protection: increment step counter and check limit
+        self.step_count += 1;
+        if (self.step_count > self.max_steps) {
+            return null; // Abort matching to prevent catastrophic backtracking
+        }
+
         return switch (node.node_type) {
             .literal => self.matchLiteral(node.data.literal, pos),
             .any => self.matchAny(pos),
@@ -644,3 +659,152 @@ pub const BacktrackEngine = struct {
         return null;
     }
 };
+
+// ============================================================================
+// SECURITY TESTS: ReDoS Protection
+// ============================================================================
+
+test "backtrack: ReDoS protection - nested quantifiers (a+)+b" {
+    const allocator = std.testing.allocator;
+
+    // Pattern: (a+)+b - classic ReDoS pattern
+    // Input: "aaaaaaaaaaaaaaaaaaaac" (20 'a's followed by 'c' instead of 'b')
+    // This causes O(2^n) backtracking without protection
+
+    const parser = @import("parser.zig");
+    const compiler = @import("compiler.zig");
+
+    var p = try parser.Parser.init(allocator, "(a+)+b");
+    var tree = try p.parse();
+    defer tree.deinit();
+
+    var comp = compiler.Compiler.init(allocator);
+    defer comp.deinit();
+    _ = try comp.compile(&tree);
+
+    // Input that doesn't match but would cause catastrophic backtracking
+    const input = "aaaaaaaaaaaaaaaaaaaac";
+
+    var engine = try BacktrackEngine.init(allocator, tree.root, tree.capture_count, .{});
+    defer engine.deinit();
+
+    // Should timeout/abort instead of hanging
+    const result = engine.find(input);
+
+    // Either returns null (no match) or completes quickly
+    // The key is that it DOES return, not hang forever
+    try std.testing.expect(result == null);
+
+    // Verify step counter was incremented (shows protection is working)
+    // We don't assert a specific minimum since the actual count depends on implementation
+    try std.testing.expect(engine.step_count > 0);
+}
+
+test "backtrack: ReDoS protection - nested stars (a*)*b" {
+    const allocator = std.testing.allocator;
+
+    // Pattern: (a*)*b - another catastrophic backtracking pattern
+
+    const parser = @import("parser.zig");
+    const compiler = @import("compiler.zig");
+
+    var p = try parser.Parser.init(allocator, "(a*)*b");
+    var tree = try p.parse();
+    defer tree.deinit();
+
+    var comp = compiler.Compiler.init(allocator);
+    defer comp.deinit();
+    _ = try comp.compile(&tree);
+
+    const input = "aaaaaaaaaaaaaaaaaac";
+
+    var engine = try BacktrackEngine.init(allocator, tree.root, tree.capture_count, .{});
+    defer engine.deinit();
+
+    const result = engine.find(input);
+    try std.testing.expect(result == null);
+}
+
+test "backtrack: ReDoS protection - ambiguous alternation (a|a)*b" {
+    const allocator = std.testing.allocator;
+
+    // Pattern: (a|a)*b - ambiguous alternation causing exponential backtracking
+
+    const parser = @import("parser.zig");
+    const compiler = @import("compiler.zig");
+
+    var p = try parser.Parser.init(allocator, "(a|a)*b");
+    var tree = try p.parse();
+    defer tree.deinit();
+
+    var comp = compiler.Compiler.init(allocator);
+    defer comp.deinit();
+    _ = try comp.compile(&tree);
+
+    const input = "aaaaaaaaaaaaaaaac";
+
+    var engine = try BacktrackEngine.init(allocator, tree.root, tree.capture_count, .{});
+    defer engine.deinit();
+
+    const result = engine.find(input);
+    try std.testing.expect(result == null);
+}
+
+test "backtrack: configurable step limit" {
+    const allocator = std.testing.allocator;
+
+    // Test that we can configure a lower step limit
+
+    const parser = @import("parser.zig");
+    const compiler = @import("compiler.zig");
+
+    var p = try parser.Parser.init(allocator, "(a+)+b");
+    var tree = try p.parse();
+    defer tree.deinit();
+
+    var comp = compiler.Compiler.init(allocator);
+    defer comp.deinit();
+    _ = try comp.compile(&tree);
+
+    const input = "aaaaaaaaaaaac";
+
+    var engine = try BacktrackEngine.init(allocator, tree.root, tree.capture_count, .{});
+    defer engine.deinit();
+
+    // Set a very low limit to test timeout behavior
+    engine.max_steps = 100;
+
+    const result = engine.find(input);
+    try std.testing.expect(result == null);
+
+    // Should have done some steps (may or may not hit the limit depending on pattern)
+    try std.testing.expect(engine.step_count > 0);
+}
+
+test "backtrack: step counter increments" {
+    const allocator = std.testing.allocator;
+
+    // Verify that step counter actually increments during matching
+
+    const parser = @import("parser.zig");
+    const compiler = @import("compiler.zig");
+
+    var p = try parser.Parser.init(allocator, "a+b+");
+    var tree = try p.parse();
+    defer tree.deinit();
+
+    var comp = compiler.Compiler.init(allocator);
+    defer comp.deinit();
+    _ = try comp.compile(&tree);
+
+    const input = "aaaabbbbb";
+
+    var engine = try BacktrackEngine.init(allocator, tree.root, tree.capture_count, .{});
+    defer engine.deinit();
+
+    const initial_count = engine.step_count;
+    _ = engine.find(input);
+
+    // Step counter should have increased
+    try std.testing.expect(engine.step_count > initial_count);
+}

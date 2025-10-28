@@ -65,6 +65,13 @@ pub const Regex = struct {
         // Parse the pattern into an AST
         var p = try parser.Parser.init(allocator, pattern);
         var tree = try p.parse();
+        errdefer tree.deinit(); // Free AST if compilation fails
+
+        // SECURITY: Analyze pattern for vulnerabilities (ReDoS, nested quantifiers, etc.)
+        // Reject patterns that are too dangerous (critical risk only)
+        // Medium and high risk patterns are allowed but will be protected by runtime step counter
+        const pattern_analyzer = @import("pattern_analyzer.zig");
+        try pattern_analyzer.analyzeAndValidate(allocator, tree.root, .high);
 
         // Store owned copy of pattern
         const owned_pattern = try allocator.dupe(u8, pattern);
@@ -859,4 +866,28 @@ test "split" {
     try std.testing.expectEqualStrings("a", parts[0]);
     try std.testing.expectEqualStrings("b", parts[1]);
     try std.testing.expectEqualStrings("c", parts[2]);
+}
+
+test "compile rejects dangerous nested quantifiers" {
+    const allocator = std.testing.allocator;
+
+    // This pattern should be rejected as critical risk
+    const result = Regex.compile(allocator, "(a+)+");
+    try std.testing.expectError(RegexError.PatternTooComplex, result);
+}
+
+test "compile rejects nested stars" {
+    const allocator = std.testing.allocator;
+
+    // This pattern should be rejected
+    const result = Regex.compile(allocator, "(a*)*");
+    try std.testing.expectError(RegexError.PatternTooComplex, result);
+}
+
+test "compile accepts safe complex patterns" {
+    const allocator = std.testing.allocator;
+
+    // This pattern should be accepted (medium risk is OK)
+    var regex = try Regex.compile(allocator, "a+b*c?d{2,5}");
+    defer regex.deinit();
 }
