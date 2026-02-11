@@ -326,6 +326,13 @@ pub const Parser = struct {
 
                     try self.expect(.rbrace);
 
+                    // Validate min <= max
+                    if (max) |max_val| {
+                        if (min > max_val) {
+                            return RegexError.InvalidQuantifier;
+                        }
+                    }
+
                     const bounds = ast.RepeatBounds.init(min, max);
                     // Check for lazy quantifier (? after {m,n})
                     const greedy = self.peek() != .question;
@@ -828,25 +835,25 @@ test "parser: nesting depth limit" {
 
     // Create a pattern with 101 levels of nesting (exceeds MAX_NESTING_DEPTH of 100)
     var pattern_buf: [300]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&pattern_buf);
-    const writer = fbs.writer();
+    var pos: usize = 0;
 
     // Write 101 opening parens
-    var i: usize = 0;
-    while (i < 101) : (i += 1) {
-        try writer.writeByte('(');
+    for (0..101) |_| {
+        pattern_buf[pos] = '(';
+        pos += 1;
     }
 
     // Write 'a' in the middle
-    try writer.writeByte('a');
+    pattern_buf[pos] = 'a';
+    pos += 1;
 
     // Write 101 closing parens
-    i = 0;
-    while (i < 101) : (i += 1) {
-        try writer.writeByte(')');
+    for (0..101) |_| {
+        pattern_buf[pos] = ')';
+        pos += 1;
     }
 
-    const pattern = fbs.getWritten();
+    const pattern = pattern_buf[0..pos];
     var parser = try Parser.init(allocator, pattern);
     const result = parser.parse();
 
@@ -858,25 +865,25 @@ test "parser: acceptable nesting depth" {
 
     // Create a pattern with 50 levels of nesting (well within MAX_NESTING_DEPTH of 100)
     var pattern_buf: [200]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&pattern_buf);
-    const writer = fbs.writer();
+    var pos: usize = 0;
 
     // Write 50 opening parens
-    var i: usize = 0;
-    while (i < 50) : (i += 1) {
-        try writer.writeByte('(');
+    for (0..50) |_| {
+        pattern_buf[pos] = '(';
+        pos += 1;
     }
 
     // Write 'a' in the middle
-    try writer.writeByte('a');
+    pattern_buf[pos] = 'a';
+    pos += 1;
 
     // Write 50 closing parens
-    i = 0;
-    while (i < 50) : (i += 1) {
-        try writer.writeByte(')');
+    for (0..50) |_| {
+        pattern_buf[pos] = ')';
+        pos += 1;
     }
 
-    const pattern = fbs.getWritten();
+    const pattern = pattern_buf[0..pos];
     var parser = try Parser.init(allocator, pattern);
     var result = try parser.parse();
     defer result.deinit();

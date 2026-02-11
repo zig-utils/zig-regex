@@ -351,8 +351,7 @@ pub const Compiler = struct {
 
     /// Compile repetition {m,n} or lazy repetition {m,n}?
     fn compileRepeat(self: *Compiler, repeat: ast.Node.Repeat) !Fragment {
-        // For now, implement {m,n} as m copies concatenated with (n-m) optional copies
-        // This is not the most efficient, but it works
+        // Implement {m,n} as m mandatory copies concatenated with (n-m) optional copies
 
         const min = repeat.bounds.min;
         const max = repeat.bounds.max;
@@ -380,7 +379,23 @@ pub const Compiler = struct {
             return self.compilePlus(repeat.child, greedy);
         }
 
-        // Build min required copies
+        // Handle min == 0 with bounded max: all copies are optional
+        if (min == 0) {
+            if (max) |max_val| {
+                // {0,n}: n optional copies
+                var current_frag = try self.compileOptional(repeat.child, greedy);
+                var i: usize = 1;
+                while (i < max_val) : (i += 1) {
+                    const opt_fragment = try self.compileOptional(repeat.child, greedy);
+                    const accept_state = self.nfa.getState(current_frag.accept);
+                    try accept_state.addTransition(Transition.epsilon(opt_fragment.start));
+                    current_frag.accept = opt_fragment.accept;
+                }
+                return current_frag;
+            }
+        }
+
+        // Build min required (mandatory) copies
         var current_frag = try self.compileNode(repeat.child);
 
         var i: usize = 1;
@@ -392,17 +407,21 @@ pub const Compiler = struct {
         }
 
         if (max) |max_val| {
-            // Add optional copies for the difference
+            // Add optional copies for the difference (max - min)
             const diff = max_val - min;
             i = 0;
             while (i < diff) : (i += 1) {
-                const optional_child = try self.compileNode(repeat.child);
                 const opt_fragment = try self.compileOptional(repeat.child, greedy);
-                _ = optional_child;
                 const accept_state = self.nfa.getState(current_frag.accept);
                 try accept_state.addTransition(Transition.epsilon(opt_fragment.start));
                 current_frag.accept = opt_fragment.accept;
             }
+        } else {
+            // {min,} - unbounded: add a star after the mandatory copies
+            const star_frag = try self.compileStar(repeat.child, greedy);
+            const accept_state = self.nfa.getState(current_frag.accept);
+            try accept_state.addTransition(Transition.epsilon(star_frag.start));
+            current_frag.accept = star_frag.accept;
         }
 
         return current_frag;

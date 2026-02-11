@@ -34,7 +34,7 @@ pub const PrettyPrinter = struct {
     /// Print as a tree structure
     fn printTree(self: *PrettyPrinter, node: *ast.Node, writer: anytype, depth: usize) !void {
         const indent = self.indent_size * depth;
-        try writer.writeByteNTimes(' ', indent);
+        try writer.splatByteAll(' ', indent);
 
         switch (node.node_type) {
             .literal => {
@@ -544,13 +544,13 @@ test "pretty print: tree format" {
     var tree = try p.parse();
     defer tree.deinit();
 
-    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     var printer = PrettyPrinter.init(allocator);
-    try printer.print(tree.root, buffer.writer(allocator), .tree);
+    try printer.print(tree.root, &aw.writer, .tree);
 
-    try std.testing.expect(buffer.items.len > 0);
+    try std.testing.expect(aw.writer.end > 0);
 }
 
 test "pretty print: sexpr format" {
@@ -561,13 +561,13 @@ test "pretty print: sexpr format" {
     var tree = try p.parse();
     defer tree.deinit();
 
-    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     var printer = PrettyPrinter.init(allocator);
-    try printer.print(tree.root, buffer.writer(allocator), .sexpr);
+    try printer.print(tree.root, &aw.writer, .sexpr);
 
-    try std.testing.expect(buffer.items.len > 0);
+    try std.testing.expect(aw.writer.end > 0);
 }
 
 test "pretty print: compact format" {
@@ -578,13 +578,13 @@ test "pretty print: compact format" {
     var tree = try p.parse();
     defer tree.deinit();
 
-    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
     var printer = PrettyPrinter.init(allocator);
-    try printer.print(tree.root, buffer.writer(allocator), .compact);
+    try printer.print(tree.root, &aw.writer, .compact);
 
-    try std.testing.expect(buffer.items.len > 0);
+    try std.testing.expect(aw.writer.end > 0);
 }
 
 test "AST stats" {

@@ -146,27 +146,23 @@ pub const Regex = struct {
         self.nfa.deinit();
 
         // Deinit backtracking engine if present
-        if (self.backtrack_engine) |*engine| {
-            var mut_engine = engine.*;
-            mut_engine.deinit();
+        if (self.backtrack_engine != null) {
+            self.backtrack_engine.?.deinit();
         }
 
         // Deinit AST tree if present
-        if (self.ast_tree) |*tree| {
-            var mut_tree = tree.*;
-            mut_tree.deinit();
+        if (self.ast_tree != null) {
+            self.ast_tree.?.deinit();
         }
 
-        var mut_opt_info = self.opt_info;
-        mut_opt_info.deinit(self.allocator);
+        self.opt_info.deinit(self.allocator);
 
         // Free named capture keys and deinit map
         var it = self.named_captures.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
-        var mut_named_captures = self.named_captures;
-        mut_named_captures.deinit();
+        self.named_captures.deinit();
     }
 
     /// Get the capture group index for a named group
@@ -256,17 +252,18 @@ pub const Regex = struct {
                 // Use literal prefix optimization if available (but not in case-insensitive mode)
                 if (self.opt_info.literal_prefix) |prefix| {
                     if (!self.flags.case_insensitive) {
-                        // Quick check: if input doesn't contain the prefix, no match possible
-                        if (std.mem.indexOf(u8, input, prefix)) |prefix_pos| {
-                            // Try matching from the prefix position
+                        // Skip ahead to each occurrence of the prefix and try matching there
+                        var search_from: usize = 0;
+                        while (std.mem.indexOf(u8, input[search_from..], prefix)) |rel_pos| {
+                            const prefix_pos = search_from + rel_pos;
                             if (try virtual_machine.matchAt(input, prefix_pos)) |result| {
                                 return try self.buildMatch(input, result);
                             }
-                            // If that didn't work, fall through to regular search
-                        } else {
-                            // Prefix not found, no match possible
-                            return null;
+                            // Try next occurrence
+                            search_from = prefix_pos + 1;
                         }
+                        // No prefix occurrence matched
+                        return null;
                     }
                 }
 
@@ -373,7 +370,7 @@ pub const Regex = struct {
     }
 
     /// Expand replacement string with backreferences ($1, $2, etc.)
-    fn expandReplacement(allocator: std.mem.Allocator, replacement: []const u8, captures: []const []const u8) ![]u8 {
+    fn expandReplacement(allocator: std.mem.Allocator, replacement: []const u8, captures: []const []const u8, full_match: []const u8) ![]u8 {
         var result = try std.ArrayList(u8).initCapacity(allocator, 0);
         defer result.deinit(allocator);
 
@@ -393,12 +390,9 @@ pub const Regex = struct {
                 if (next_char >= '0' and next_char <= '9') {
                     const capture_index = next_char - '0';
 
-                    // $0 is the entire match (index 0), $1 is first capture (index 0 in captures array)
+                    // $0 is the entire match, $1 is first capture (index 0 in captures array)
                     if (capture_index == 0) {
-                        // For $0, we'd need the whole match text, which isn't in captures
-                        // Skip for now or handle specially
-                        try result.append(allocator, '$');
-                        try result.append(allocator, next_char);
+                        try result.appendSlice(allocator, full_match);
                     } else if (capture_index - 1 < captures.len) {
                         const capture = captures[capture_index - 1];
                         try result.appendSlice(allocator, capture);
@@ -428,7 +422,7 @@ pub const Regex = struct {
             }
 
             // Expand replacement with backreferences
-            const expanded_replacement = try expandReplacement(allocator, replacement, match_result.captures);
+            const expanded_replacement = try expandReplacement(allocator, replacement, match_result.captures, match_result.slice);
             defer allocator.free(expanded_replacement);
 
             // Build result: before + replacement + after
@@ -476,7 +470,7 @@ pub const Regex = struct {
         // Calculate result size
         var result_len: usize = input.len;
         for (matches, 0..) |match_result, i| {
-            expanded_replacements[i] = try expandReplacement(allocator, replacement, match_result.captures);
+            expanded_replacements[i] = try expandReplacement(allocator, replacement, match_result.captures, match_result.slice);
             result_len = result_len - (match_result.end - match_result.start) + expanded_replacements[i].len;
         }
 

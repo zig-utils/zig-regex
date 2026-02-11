@@ -406,13 +406,6 @@ test "analyzer: nested quantifiers (a+)+" {
     var result = try analyzePattern(allocator, tree.root);
     defer result.deinit(allocator);
 
-    std.debug.print("\n(a+)+ Risk level: {}\n", .{result.risk_level});
-    std.debug.print("Explosion factor: {d:.2}\n", .{result.explosion_factor});
-    std.debug.print("Issues: {}\n", .{result.issues.len});
-    for (result.issues) |issue| {
-        std.debug.print("  - {s}\n", .{issue});
-    }
-
     try std.testing.expectEqual(RiskLevel.critical, result.risk_level);
     try std.testing.expect(result.issues.len > 0);
     try std.testing.expect(result.explosion_factor >= 1000000.0);
@@ -498,14 +491,6 @@ test "analyzer: complex URL pattern - part" {
     var result = try analyzePattern(allocator, tree.root);
     defer result.deinit(allocator);
 
-    std.debug.print("\nPattern: {s}\n", .{pattern});
-    std.debug.print("Risk level: {}\n", .{result.risk_level});
-    std.debug.print("Explosion factor: {d:.2}\n", .{result.explosion_factor});
-    std.debug.print("\nIssues ({}):\n", .{result.issues.len});
-    for (result.issues) |issue| {
-        std.debug.print("  - {s}\n", .{issue});
-    }
-
     // This should not be critical
     try std.testing.expect(result.risk_level != .critical);
 }
@@ -521,14 +506,6 @@ test "analyzer: full URL pattern" {
 
     var result = try analyzePattern(allocator, tree.root);
     defer result.deinit(allocator);
-
-    std.debug.print("\nFull pattern: {s}\n", .{pattern});
-    std.debug.print("Risk level: {}\n", .{result.risk_level});
-    std.debug.print("Explosion factor: {d:.2}\n", .{result.explosion_factor});
-    std.debug.print("\nIssues ({}):\n", .{result.issues.len});
-    for (result.issues) |issue| {
-        std.debug.print("  - {s}\n", .{issue});
-    }
 
     // Should not be critical
     try std.testing.expect(result.risk_level != .critical);

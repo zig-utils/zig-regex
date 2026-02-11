@@ -87,6 +87,7 @@ pub const BacktrackEngine = struct {
         var pos: usize = 0;
         while (pos <= input.len) : (pos += 1) {
             self.resetCaptures();
+            self.step_count = 0; // Reset step counter per starting position
             if (self.matchNode(self.ast_root, pos)) |end_pos| {
                 if (end_pos > pos or (end_pos == pos and self.canMatchEmpty(self.ast_root))) {
                     // Found a match
@@ -651,7 +652,16 @@ pub const BacktrackEngine = struct {
 
         const text_to_match = self.input[pos .. pos + captured_text.len];
 
-        // Compare byte by byte (case sensitive)
+        if (self.flags.case_insensitive) {
+            // Case-insensitive comparison
+            for (captured_text, text_to_match) |a, b| {
+                const a_lower = if (a >= 'A' and a <= 'Z') a + ('a' - 'A') else a;
+                const b_lower = if (b >= 'A' and b <= 'Z') b + ('a' - 'A') else b;
+                if (a_lower != b_lower) return null;
+            }
+            return pos + captured_text.len;
+        }
+
         if (std.mem.eql(u8, captured_text, text_to_match)) {
             return pos + captured_text.len;
         }

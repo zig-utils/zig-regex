@@ -108,6 +108,11 @@ pub const VM = struct {
             next_threads.deinit(self.allocator);
         }
 
+        // Pre-allocate visited array for epsilon closure (reused across iterations)
+        const num_states = self.nfa.states.items.len;
+        const visited_buf = try self.allocator.alloc(bool, num_states);
+        defer self.allocator.free(visited_buf);
+
         // Start with initial thread at start state
         var initial_thread = try Thread.init(self.allocator, self.nfa.start_state, self.num_captures);
 
@@ -127,7 +132,7 @@ pub const VM = struct {
         try current_threads.append(self.allocator, initial_thread);
 
         // Process epsilon closures for initial state
-        try self.addEpsilonClosure(&current_threads, start_pos, input);
+        try self.addEpsilonClosure(&current_threads, start_pos, input, visited_buf);
 
         var pos = start_pos;
         var last_match: ?MatchResult = null;
@@ -208,7 +213,7 @@ pub const VM = struct {
             }
 
             // Process epsilon closures for next threads
-            try self.addEpsilonClosure(&next_threads, pos + 1, input);
+            try self.addEpsilonClosure(&next_threads, pos + 1, input, visited_buf);
 
             // Swap thread lists
             const tmp = current_threads;
@@ -253,15 +258,17 @@ pub const VM = struct {
     }
 
     /// Add epsilon closure - follow all epsilon transitions
-    fn addEpsilonClosure(self: *VM, threads: *std.ArrayList(Thread), pos: usize, input: []const u8) !void {
-        var visited = std.AutoHashMap(compiler.StateId, void).init(self.allocator);
-        defer visited.deinit();
+    /// Uses a pre-allocated visited buffer (boolean array indexed by state ID)
+    /// to avoid HashMap allocation overhead on every call.
+    fn addEpsilonClosure(self: *VM, threads: *std.ArrayList(Thread), pos: usize, input: []const u8, visited: []bool) !void {
+        // Reset visited array
+        @memset(visited, false);
 
         var i: usize = 0;
         while (i < threads.items.len) : (i += 1) {
             // IMPORTANT: Pass thread by value to avoid dangling pointer issues
             // when ArrayList reallocates during followEpsilons
-            try self.followEpsilons(threads.items[i], threads, &visited, pos, input);
+            try self.followEpsilons(threads.items[i], threads, visited, pos, input);
         }
     }
 
@@ -269,12 +276,12 @@ pub const VM = struct {
         self: *VM,
         thread: Thread,
         threads: *std.ArrayList(Thread),
-        visited: *std.AutoHashMap(compiler.StateId, void),
+        visited: []bool,
         pos: usize,
         input: []const u8,
     ) !void {
-        if (visited.contains(thread.state)) return;
-        try visited.put(thread.state, {});
+        if (visited[thread.state]) return;
+        visited[thread.state] = true;
 
         const state = self.nfa.getState(thread.state);
 
@@ -282,7 +289,7 @@ pub const VM = struct {
             switch (transition.transition_type) {
                 .epsilon => {
                     // Check if we've already visited this state
-                    if (visited.contains(transition.to)) continue;
+                    if (visited[transition.to]) continue;
 
                     var new_thread = try thread.clone(self.allocator);
                     new_thread.state = transition.to;
@@ -323,7 +330,7 @@ pub const VM = struct {
 
                     if (anchor_matches) {
                         // Check if we've already visited this state
-                        if (visited.contains(transition.to)) continue;
+                        if (visited[transition.to]) continue;
 
                         var new_thread = try thread.clone(self.allocator);
                         new_thread.state = transition.to;

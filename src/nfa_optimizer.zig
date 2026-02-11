@@ -411,9 +411,9 @@ test "nfa_optimizer: visualizer stats" {
 
     var visualizer = NFAVisualizer.init(allocator, &nfa);
 
-    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    defer buffer.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
 
-    try visualizer.printStats(buffer.writer(allocator));
-    try std.testing.expect(buffer.items.len > 0);
+    try visualizer.printStats(&aw.writer);
+    try std.testing.expect(aw.writer.end > 0);
 }

@@ -38,7 +38,7 @@ pub fn main() !void {
                 RegexError.UnmatchedParenthesis => ErrorHelper.unmatchedParen(3, pattern),
                 RegexError.UnmatchedBracket => ErrorHelper.unmatchedBracket(3, pattern),
                 RegexError.InvalidQuantifier => ErrorHelper.invalidQuantifier(3, pattern),
-                else => ErrorContext.init(err, 0, pattern, "Compilation failed"),
+                else => ErrorContext.init(RegexError.CompilationFailed, 0, pattern, "Compilation failed"),
             };
 
             std.debug.print("{any}\n", .{ctx});

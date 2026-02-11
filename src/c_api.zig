@@ -204,10 +204,12 @@ pub fn generateHeader(writer: anytype) !void {
 }
 
 test "C API header generation" {
-    var buffer = try std.ArrayList(u8).initCapacity(std.testing.allocator, 0);
-    defer buffer.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
 
-    try generateHeader(buffer.writer(std.testing.allocator));
-    try std.testing.expect(buffer.items.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "ZIG_REGEX_H") != null);
+    try generateHeader(&aw.writer);
+    var result = aw.toArrayList();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.items.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, result.items, "ZIG_REGEX_H") != null);
 }

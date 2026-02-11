@@ -149,7 +149,7 @@ pub fn main() !void {
 
         const Worker = struct {
             fn run(r: *const Regex) usize {
-                const start = std.time.nanoTimestamp();
+                var timer = std.time.Timer.start() catch return 0;
 
                 var count: usize = 0;
                 var i: usize = 0;
@@ -159,8 +159,7 @@ pub fn main() !void {
                     } else |_| {}
                 }
 
-                const end = std.time.nanoTimestamp();
-                const elapsed_ms = @as(u64, @intCast(end - start)) / 1_000_000;
+                const elapsed_ms = timer.read() / 1_000_000;
                 return elapsed_ms;
             }
         };
@@ -180,7 +179,7 @@ pub fn main() !void {
             }
         };
 
-        const parallel_start = std.time.nanoTimestamp();
+        var parallel_timer = try std.time.Timer.start();
 
         for (&threads, 0..) |*thread, i| {
             thread.* = try std.Thread.spawn(.{}, ParallelWorker.run, .{ &regex, &times[i] });
@@ -190,8 +189,7 @@ pub fn main() !void {
             thread.join();
         }
 
-        const parallel_end = std.time.nanoTimestamp();
-        const total_parallel = @as(u64, @intCast(parallel_end - parallel_start)) / 1_000_000;
+        const total_parallel = parallel_timer.read() / 1_000_000;
 
         std.debug.print("Parallel ({d} threads): 40,000 matches in {d}ms\n", .{ thread_count, total_parallel });
         std.debug.print("Individual thread times: ", .{});
