@@ -90,7 +90,7 @@ pub const State = struct {
     pub fn init(allocator: std.mem.Allocator, id: StateId) State {
         return .{
             .id = id,
-            .transitions = std.ArrayList(Transition).initCapacity(allocator, 0) catch unreachable,
+            .transitions = .empty,
             .allocator = allocator,
             .is_accepting = false,
         };
@@ -126,9 +126,9 @@ pub const NFA = struct {
 
     pub fn init(allocator: std.mem.Allocator) NFA {
         return .{
-            .states = std.ArrayList(State).initCapacity(allocator, 0) catch unreachable,
+            .states = .empty,
             .start_state = 0,
-            .accept_states = std.ArrayList(StateId).initCapacity(allocator, 0) catch unreachable,
+            .accept_states = .empty,
             .allocator = allocator,
         };
     }
@@ -382,6 +382,15 @@ pub const Compiler = struct {
         // Handle min == 0 with bounded max: all copies are optional
         if (min == 0) {
             if (max) |max_val| {
+                // {0,0}: matches empty string only
+                if (max_val == 0) {
+                    const start = try self.nfa.addState();
+                    const accept = try self.nfa.addState();
+                    const start_state = self.nfa.getState(start);
+                    try start_state.addTransition(Transition.epsilon(accept));
+                    return Fragment{ .start = start, .accept = accept };
+                }
+
                 // {0,n}: n optional copies
                 var current_frag = try self.compileOptional(repeat.child, greedy);
                 var i: usize = 1;
@@ -504,7 +513,7 @@ test "compile literal" {
 
 test "compile concatenation" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser.zig").Parser.init(allocator, "ab") catch unreachable;
+    var parser = try @import("parser.zig").Parser.init(allocator, "ab");
     var tree = try parser.parse();
     defer tree.deinit();
 
@@ -517,7 +526,7 @@ test "compile concatenation" {
 
 test "compile alternation" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser.zig").Parser.init(allocator, "a|b") catch unreachable;
+    var parser = try @import("parser.zig").Parser.init(allocator, "a|b");
     var tree = try parser.parse();
     defer tree.deinit();
 
@@ -530,7 +539,7 @@ test "compile alternation" {
 
 test "compile star" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser.zig").Parser.init(allocator, "a*") catch unreachable;
+    var parser = try @import("parser.zig").Parser.init(allocator, "a*");
     var tree = try parser.parse();
     defer tree.deinit();
 
@@ -546,7 +555,7 @@ test "compiler: repeat expansion limit" {
 
     // Pattern with quantifier exceeding MAX_REPEAT_EXPANSION (10,000)
     // Parser allows up to 100,000, but compiler should reject > 10,000
-    var parser = @import("parser.zig").Parser.init(allocator, "a{50000}") catch unreachable;
+    var parser = try @import("parser.zig").Parser.init(allocator, "a{50000}");
     var tree = try parser.parse();
     defer tree.deinit();
 
@@ -561,7 +570,7 @@ test "compiler: acceptable repeat expansion" {
     const allocator = std.testing.allocator;
 
     // Pattern with quantifier within MAX_REPEAT_EXPANSION
-    var parser = @import("parser.zig").Parser.init(allocator, "a{100}") catch unreachable;
+    var parser = try @import("parser.zig").Parser.init(allocator, "a{100}");
     var tree = try parser.parse();
     defer tree.deinit();
 

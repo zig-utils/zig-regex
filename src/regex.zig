@@ -287,7 +287,7 @@ pub const Regex = struct {
 
     /// Find all matches in the input string
     pub fn findAll(self: *const Regex, allocator: std.mem.Allocator, input: []const u8) ![]Match {
-        var matches = std.ArrayList(Match).initCapacity(allocator, 0) catch unreachable;
+        var matches: std.ArrayList(Match) = .empty;
         errdefer matches.deinit(allocator);
 
         var pos: usize = 0;
@@ -627,7 +627,7 @@ pub const Regex = struct {
             allocator.free(matches);
         }
 
-        var parts = std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable;
+        var parts: std.ArrayList([]const u8) = .empty;
         errdefer parts.deinit(allocator);
 
         var pos: usize = 0;

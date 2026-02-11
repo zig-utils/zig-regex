@@ -72,9 +72,11 @@ pub const BacktrackEngine = struct {
 
     /// Test if pattern matches entire input
     pub fn isMatch(self: *BacktrackEngine, input: []const u8) bool {
-        self.input = input;
-        self.resetCaptures();
-        return self.matchNode(self.ast_root, 0) == input.len;
+        if (self.find(input)) |match| {
+            self.allocator.free(match.captures);
+            return true;
+        }
+        return false;
     }
 
     /// Find first match in input

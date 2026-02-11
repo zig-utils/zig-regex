@@ -318,6 +318,62 @@ pub fn build(b: *std.Build) void {
     // Temporarily disabled - fuzz tests need refinement
     // test_step.dependOn(&run_fuzz_tests.step);
 
+    // Regression tests for specific fixes
+    const regression_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/regression.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_regression_tests = b.addRunArtifact(regression_tests);
+    test_step.dependOn(&run_regression_tests.step);
+
+    // Stress and edge case tests
+    const stress_edge_cases_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/stress_edge_cases.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_stress_edge_cases_tests = b.addRunArtifact(stress_edge_cases_tests);
+    test_step.dependOn(&run_stress_edge_cases_tests.step);
+
+    // Advanced feature edge cases
+    const advanced_edge_cases_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/advanced_edge_cases.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_advanced_edge_cases_tests = b.addRunArtifact(advanced_edge_cases_tests);
+    test_step.dependOn(&run_advanced_edge_cases_tests.step);
+
+    // Parser and compiler edge cases
+    const parser_compiler_edge_cases_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/parser_compiler_edge_cases.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_parser_compiler_edge_cases_tests = b.addRunArtifact(parser_compiler_edge_cases_tests);
+    test_step.dependOn(&run_parser_compiler_edge_cases_tests.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

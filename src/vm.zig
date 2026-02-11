@@ -92,7 +92,7 @@ pub const VM = struct {
 
     /// Check if the pattern matches at a specific position in the input
     pub fn matchAt(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
-        var current_threads = std.ArrayList(Thread).initCapacity(self.allocator, 0) catch unreachable;
+        var current_threads: std.ArrayList(Thread) = .empty;
         defer {
             for (current_threads.items) |*thread| {
                 thread.deinit(self.allocator);
@@ -100,7 +100,7 @@ pub const VM = struct {
             current_threads.deinit(self.allocator);
         }
 
-        var next_threads = std.ArrayList(Thread).initCapacity(self.allocator, 0) catch unreachable;
+        var next_threads: std.ArrayList(Thread) = .empty;
         defer {
             for (next_threads.items) |*thread| {
                 thread.deinit(self.allocator);

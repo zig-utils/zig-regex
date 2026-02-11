@@ -1,11 +1,11 @@
 # Zig Regex Library - Development Roadmap
 
-A modern, performant regex library for Zig 0.15.1+
+A modern, performant regex library for Zig 0.16+
 
 ## Current Status: **PRODUCTION READY** 🎉
 
-**Version:** 0.1.1
-**Test Coverage:** 165+ tests (all passing - 100% pass rate) ✅
+**Version:** 0.1.0
+**Test Coverage:** 500+ tests (all passing - 100% pass rate)
 **Memory Safety:** Zero memory leaks detected ✅
 **Total Lines of Code:** ~5,500+ lines (including docs and tests)
 **Phases Completed:** 10 out of 11 (core + testing + docs + advanced features + fuzzing complete)

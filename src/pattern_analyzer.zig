@@ -56,8 +56,8 @@ pub const PatternAnalyzer = struct {
     pub fn init(allocator: std.mem.Allocator) PatternAnalyzer {
         return .{
             .allocator = allocator,
-            .issues = std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable,
-            .recommendations = std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable,
+            .issues = .empty,
+            .recommendations = .empty,
             .explosion_factor = 1.0,
             .can_use_thompson = true,
             .max_explosion_factor = DEFAULT_MAX_EXPLOSION_FACTOR,

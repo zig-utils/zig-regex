@@ -4,10 +4,10 @@
 
 **A modern, high-performance regular expression library for Zig**
 
-[![Zig](https://img.shields.io/badge/Zig-0.15.1-orange.svg)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/Zig-0.16+-orange.svg)](https://ziglang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Features](#features) • [Installation](#installation) • [Quick Start](#quick-start) • [Documentation](#documentation) • [Performance](#performance)
+[Features](#features) - [Installation](#installation) - [Quick Start](#quick-start) - [CLI](#cli) - [Documentation](#documentation)
 
 </div>
 
@@ -15,75 +15,68 @@
 
 ## Overview
 
-zig-regex is a comprehensive regular expression engine for Zig featuring Thompson NFA construction with linear time complexity, extensive pattern support, and advanced optimization capabilities. Built with zero external dependencies and full memory control through Zig allocators.
+zig-regex is a regular expression engine for Zig featuring Thompson NFA construction with linear time complexity, a backtracking engine for advanced features, and extensive pattern support. Built with zero external dependencies and full memory control through Zig allocators.
 
 ## Features
 
 ### Core Regex Features
 
-| Feature | Syntax | Description |
-|---------|--------|-------------|
-| **Literals** | `abc`, `123` | Match exact characters and strings |
-| **Quantifiers** | `*`, `+`, `?`, `{n}`, `{m,n}` | Greedy repetition |
-| **Lazy Quantifiers** | `*?`, `+?`, `??`, `{n,m}?` | Non-greedy repetition |
-| **Possessive Quantifiers** | `*+`, `++`, `?+`, `{n,m}+` | Atomic repetition (no backtracking) |
-| **Alternation** | `a\|b\|c` | Match any alternative |
-| **Character Classes** | `\d`, `\w`, `\s`, `\D`, `\W`, `\S` | Predefined character sets |
-| **Custom Classes** | `[abc]`, `[a-z]`, `[^0-9]` | User-defined character sets |
-| **Unicode Classes** | `\p{Letter}`, `\p{Number}`, `\X` | Unicode property support |
-| **Anchors** | `^`, `$`, `\A`, `\z`, `\Z`, `\b`, `\B` | Position matching |
-| **Wildcards** | `.` | Match any character |
-| **Groups** | `(...)` | Capturing groups |
-| **Named Groups** | `(?P<name>...)`, `(?<name>...)` | Named capturing groups |
-| **Non-capturing** | `(?:...)` | Grouping without capture |
-| **Atomic Groups** | `(?>...)` | Possessive grouping |
-| **Lookahead** | `(?=...)`, `(?!...)` | Positive/negative lookahead |
-| **Lookbehind** | `(?<=...)`, `(?<!...)` | Positive/negative lookbehind |
-| **Backreferences** | `\1`, `\2`, `\k<name>` | Reference previous captures |
-| **Conditionals** | `(?(condition)yes\|no)` | Conditional patterns |
-| **Escaping** | `\\`, `\.`, `\n`, `\t`, etc. | Special character escaping |
+| Feature | Syntax | Status |
+|---------|--------|--------|
+| **Literals** | `abc`, `123` | Stable |
+| **Quantifiers** | `*`, `+`, `?`, `{n}`, `{m,n}` | Stable |
+| **Alternation** | `a\|b\|c` | Stable |
+| **Character Classes** | `\d`, `\w`, `\s`, `\D`, `\W`, `\S` | Stable |
+| **Custom Classes** | `[abc]`, `[a-z]`, `[^0-9]` | Stable |
+| **Anchors** | `^`, `$`, `\b`, `\B` | Stable |
+| **Wildcards** | `.` | Stable |
+| **Capturing Groups** | `(...)` | Stable |
+| **Named Groups** | `(?P<name>...)`, `(?<name>...)` | Stable |
+| **Non-capturing** | `(?:...)` | Stable |
+| **Lookahead** | `(?=...)`, `(?!...)` | Stable |
+| **Lookbehind** | `(?<=...)`, `(?<!...)` | Stable |
+| **Backreferences** | `\1`, `\2` | Stable |
+| **Case-insensitive** | `compileWithFlags(..., .{.case_insensitive = true})` | Stable |
+| **Multiline** | `compileWithFlags(..., .{.multiline = true})` | Stable |
+| **Dot-all** | `compileWithFlags(..., .{.dot_matches_newline = true})` | Stable |
+| **Escaping** | `\\`, `\.`, `\n`, `\t`, `\r` | Stable |
 
 ### Advanced Features
 
-- **Hybrid Execution Engine**: Automatically selects between Thompson NFA (O(n×m)) and optimized backtracking
+- **Hybrid Execution Engine**: Automatically selects between Thompson NFA (O(n*m)) and optimized backtracking
 - **AST Optimization**: Constant folding, dead code elimination, quantifier simplification
 - **NFA Optimization**: Epsilon transition removal, state merging, transition optimization
 - **Pattern Macros**: Composable, reusable pattern definitions
 - **Type-Safe Builder API**: Fluent interface for programmatic pattern construction
-- **Thread Safety**: Safe concurrent matching with proper synchronization
-- **C FFI**: Complete C API for interoperability
-- **WASM Support**: WebAssembly compilation target
-- **Profiling & Analysis**: Built-in performance profiling and pattern linting
+- **Thread Safety**: Safe concurrent matching with `SharedRegex` and `RegexCache`
+- **Pattern Analysis**: Built-in ReDoS detection and pattern linting
 - **Comprehensive API**: `compile`, `find`, `findAll`, `replace`, `replaceAll`, `split`, iterator support
 
-### Quality & Performance
+### Quality
 
 - **Zero Dependencies**: Only Zig standard library
-- **Linear Time Matching**: Thompson NFA guarantees O(n×m) worst-case
-- **Memory Safety**: Full control via Zig allocators, no hidden allocations
-- **Extensive Tests**: Comprehensive test suite with 150+ test cases
-- **Battle-Tested**: Compliance tests against standard regex behavior
+- **Linear Time Matching**: Thompson NFA guarantees O(n*m) worst-case
+- **Memory Safety**: Full control via Zig allocators, no hidden allocations, zero leaks
+- **500+ Tests**: Comprehensive test suite covering core features, edge cases, regressions, and stress tests
 
 ## Installation
 
-### Using Zig Package Manager (zon)
+### Using Zig Package Manager
+
+Add to your `build.zig.zon`:
 
 ```zig
-// build.zig.zon
-.{
-    .name = "your-project",
-    .version = "0.1.0",
-    .dependencies = .{
-        .regex = .{
-            .url = "https://github.com/zig-utils/zig-regex/archive/main.tar.gz",
-            .hash = "...", // zig will provide this
-        },
+.dependencies = .{
+    .regex = .{
+        .url = "https://github.com/zig-utils/zig-regex/archive/main.tar.gz",
+        .hash = "...", // zig will provide this
     },
-}
+},
 ```
 
+Then in `build.zig`:
+
 ```zig
-// build.zig
 const regex = b.dependency("regex", .{
     .target = target,
     .optimize = optimize,
@@ -97,6 +90,7 @@ exe.root_module.addImport("regex", regex.module("regex"));
 git clone https://github.com/zig-utils/zig-regex.git
 cd zig-regex
 zig build
+zig build test
 ```
 
 ## Quick Start
@@ -112,163 +106,122 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Simple matching
-    const regex = try Regex.compile(allocator, "\\d{3}-\\d{4}");
+    var regex = try Regex.compile(allocator, "\\d{3}-\\d{4}");
     defer regex.deinit();
 
     if (try regex.find("Call me at 555-1234")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
         std.debug.print("Found: {s}\n", .{match.slice}); // "555-1234"
     }
 }
 ```
 
-### Named Capture Groups
+### Find All Matches
 
 ```zig
-const regex = try Regex.compile(allocator, "(?P<year>\\d{4})-(?P<month>\\d{2})-(?P<day>\\d{2})");
+var regex = try Regex.compile(allocator, "\\d+");
+defer regex.deinit();
+
+const matches = try regex.findAll(allocator, "a1b23c456");
+defer {
+    for (matches) |*m| {
+        var mut_m = m;
+        mut_m.deinit(allocator);
+    }
+    allocator.free(matches);
+}
+
+// matches: "1", "23", "456"
+```
+
+### Replace
+
+```zig
+var regex = try Regex.compile(allocator, "(\\w+)@(\\w+)");
+defer regex.deinit();
+
+const result = try regex.replace(allocator, "email: user@host ok", "[$0]");
+defer allocator.free(result);
+// result: "email: [user@host] ok"
+```
+
+### Capture Groups
+
+```zig
+var regex = try Regex.compile(allocator, "(\\d{4})-(\\d{2})-(\\d{2})");
 defer regex.deinit();
 
 if (try regex.find("Date: 2024-03-15")) |match| {
-    const year = match.getCapture("year");   // "2024"
-    const month = match.getCapture("month"); // "03"
-    const day = match.getCapture("day");     // "15"
+    var mut_match = match;
+    defer mut_match.deinit(allocator);
+
+    // match.captures[0] = "2024"
+    // match.captures[1] = "03"
+    // match.captures[2] = "15"
 }
 ```
 
-### Unicode Support
+### Case-Insensitive / Multiline
 
 ```zig
-// Match any Unicode letter
-const regex = try Regex.compile(allocator, "\\p{Letter}+");
-
-// Match emoji
-const emoji_regex = try Regex.compile(allocator, "\\p{Emoji}");
-
-// Match grapheme clusters
-const grapheme_regex = try Regex.compile(allocator, "\\X+");
-```
-
-### Atomic Groups & Possessive Quantifiers
-
-```zig
-// Prevent catastrophic backtracking
-const regex = try Regex.compile(allocator, "(?>a+)b");
-const poss_regex = try Regex.compile(allocator, "a++b");
-
-// These won't match "aaaa" - no backtracking allowed
-try std.testing.expect(try regex.find("aaaa") == null);
-try std.testing.expect(try poss_regex.find("aaaa") == null);
-```
-
-### Conditional Patterns
-
-```zig
-// Match different patterns based on a condition
-const regex = try Regex.compile(allocator, "(a)?(?(1)b|c)");
-
-try std.testing.expectEqualStrings("ab", (try regex.find("ab")).?.slice);
-try std.testing.expectEqualStrings("c", (try regex.find("c")).?.slice);
-```
-
-### Builder API
-
-```zig
-const Builder = @import("regex").Builder;
-
-var builder = Builder.init(allocator);
-defer builder.deinit();
-
-const pattern = try builder
-    .startGroup()
-    .literal("https?://")
-    .oneOrMore(Builder.Patterns.word())
-    .literal(".")
-    .oneOrMore(Builder.Patterns.alpha())
-    .endGroup()
-    .build();
-
-const regex = try Regex.compile(allocator, pattern);
+var regex = try Regex.compileWithFlags(allocator, "^hello", .{
+    .case_insensitive = true,
+    .multiline = true,
+});
 defer regex.deinit();
 ```
 
-### Pattern Macros
+## CLI
 
-```zig
-const MacroRegistry = @import("regex").MacroRegistry;
-const CommonMacros = @import("regex").CommonMacros;
+zig-regex includes a command-line tool:
 
-var macros = MacroRegistry.init(allocator);
-defer macros.deinit();
+```bash
+# Find first match
+regex '\d+' 'hello 123 world'
+# Output: 123
 
-// Load common macros
-try CommonMacros.loadInto(&macros);
+# Find all matches
+regex -g '\d+' 'hello 123 world 456'
+# Output:
+# 123
+# 456
 
-// Define custom macros
-try macros.define("phone", "\\d{3}-\\d{4}");
-try macros.define("email", "${email_local}@${email_domain}");
+# Replace
+regex -r '[$0]' '\d+' 'hello 123 world'
+# Output: hello [123] world
 
-// Expand macros in patterns
-const pattern = try macros.expand("Contact: ${email} or ${phone}");
-defer allocator.free(pattern);
+# Case-insensitive
+regex -i 'hello' 'HELLO world'
+
+# Read from stdin
+echo "hello 123 world" | regex '\d+'
+
+# Version
+regex -v
 ```
-
-## Documentation
-
-- [API Reference](docs/API.md) - Complete API documentation
-- [Advanced Features Guide](docs/ADVANCED_FEATURES.md) - Detailed feature explanations
-- [Architecture](docs/ARCHITECTURE.md) - Design and implementation
-- [Examples](docs/EXAMPLES.md) - Real-world usage examples
-- [Performance Guide](docs/BENCHMARKS.md) - Optimization tips
-- [Limitations](docs/LIMITATIONS.md) - Known constraints and workarounds
-
-## Performance
-
-zig-regex uses Thompson NFA construction to guarantee **O(n×m)** worst-case time complexity:
-- **n** = input string length
-- **m** = pattern length
-
-This prevents catastrophic backtracking that plagues traditional regex engines.
-
-### Benchmarks
-
-```
-Pattern: /\d{3}-\d{4}/
-Input: 1000-byte string
-Time: ~850ns (M1 MacBook Pro)
-
-Pattern: /(?:a|b)*c/
-Input: 10000 'a's + 'c'
-Time: Linear growth (no exponential backtracking)
-```
-
-Run benchmarks: `zig build bench`
 
 ## Building
 
 ```bash
-# Build library
-zig build
-
-# Run tests
-zig build test
-
-# Run examples
-zig build example
-
-# Run benchmarks
-zig build bench
-
-# Generate documentation
-zig build docs
+zig build           # Build library and CLI
+zig build test      # Run all tests
+zig build run       # Run CLI
+zig build example   # Run basic example
+zig build bench     # Run benchmarks
 ```
 
-## Development Roadmap
+## Documentation
 
-See [TODO.md](TODO.md) for the complete development roadmap and planned features.
+- [API Reference](docs/API.md)
+- [Advanced Features Guide](docs/ADVANCED_FEATURES.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Examples](docs/EXAMPLES.md)
+- [Performance Guide](docs/BENCHMARKS.md)
 
 ## Requirements
 
-- Zig 0.15.1 or later
+- Zig 0.16 or later
 - No external dependencies
 
 ## Contributing
@@ -278,7 +231,7 @@ Contributions are welcome! Please:
 1. Fork the repository
 2. Create a feature branch
 3. Add tests for new functionality
-4. Ensure all tests pass
+4. Ensure all tests pass (`zig build test`)
 5. Submit a pull request
 
 ## License
@@ -291,15 +244,7 @@ Inspired by:
 - Ken Thompson's NFA construction algorithm
 - RE2 (Google's regex engine)
 - Rust's regex crate
-- PCRE (Perl Compatible Regular Expressions)
 
 ## Support
 
 - [GitHub Issues](https://github.com/zig-utils/zig-regex/issues)
-- [Discussions](https://github.com/zig-utils/zig-regex/discussions)
-
----
-
-<div align="center">
-Made with ❤️ for the Zig community
-</div>

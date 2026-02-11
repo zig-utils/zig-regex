@@ -137,7 +137,7 @@ pub const NFAOptimizer = struct {
             }
 
             // Remove merged states (mark for removal)
-            var new_states = std.ArrayList(compiler.State).initCapacity(self.allocator, self.nfa.states.items.len) catch unreachable;
+            var new_states = try std.ArrayList(compiler.State).initCapacity(self.allocator, self.nfa.states.items.len);
             for (self.nfa.states.items) |state| {
                 if (!state_map.contains(state.id)) {
                     try new_states.append(self.allocator, state);

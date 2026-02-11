@@ -181,12 +181,24 @@ pub const Parser = struct {
     /// Parse the entire regex pattern
     pub fn parse(self: *Parser) !ast.AST {
         const root = try self.parseAlternation();
+        errdefer root.destroy(self.allocator);
+
+        // Verify all input was consumed
+        if (self.peek() != .eof) {
+            return switch (self.peek()) {
+                .rparen => RegexError.UnmatchedParenthesis,
+                .rbracket => RegexError.UnmatchedBracket,
+                else => RegexError.UnexpectedCharacter,
+            };
+        }
+
         return ast.AST.init(self.allocator, root, self.capture_count);
     }
 
     /// Parse alternation (lowest precedence)
     fn parseAlternation(self: *Parser) !*ast.Node {
         var left = try self.parseConcat();
+        errdefer left.destroy(self.allocator);
 
         while (self.peek() == .pipe) {
             const start = self.current_token.span.start;
@@ -201,8 +213,13 @@ pub const Parser = struct {
 
     /// Parse concatenation
     fn parseConcat(self: *Parser) !*ast.Node {
-        var nodes = std.ArrayList(*ast.Node).initCapacity(self.allocator, 0) catch unreachable;
+        var nodes: std.ArrayList(*ast.Node) = .empty;
         defer nodes.deinit(self.allocator);
+        errdefer {
+            for (nodes.items) |n| {
+                n.destroy(self.allocator);
+            }
+        }
 
         while (true) {
             const token_type = self.peek();
@@ -238,6 +255,7 @@ pub const Parser = struct {
     /// Parse repetition operators (*, +, ?, {m,n})
     fn parseRepeat(self: *Parser) !*ast.Node {
         var node = try self.parsePrimary();
+        errdefer node.destroy(self.allocator);
         const start = node.span.start;
 
         while (true) {
@@ -469,12 +487,14 @@ pub const Parser = struct {
                             // Positive lookahead (?=...)
                             try self.advance(); // consume =
                             const child = try self.parseAlternation();
+                            errdefer child.destroy(self.allocator);
                             try self.expect(.rparen);
                             return ast.Node.createLookahead(self.allocator, child, true, span);
                         } else if (self.current_token.value == '!') {
                             // Negative lookahead (?!...)
                             try self.advance(); // consume !
                             const child = try self.parseAlternation();
+                            errdefer child.destroy(self.allocator);
                             try self.expect(.rparen);
                             return ast.Node.createLookahead(self.allocator, child, false, span);
                         } else if (self.current_token.value == 'P') {
@@ -499,12 +519,14 @@ pub const Parser = struct {
                                     // Positive lookbehind (?<=...)
                                     try self.advance(); // consume =
                                     const child = try self.parseAlternation();
+                                    errdefer child.destroy(self.allocator);
                                     try self.expect(.rparen);
                                     return ast.Node.createLookbehind(self.allocator, child, true, span);
                                 } else if (self.current_token.value == '!') {
                                     // Negative lookbehind (?<!...)
                                     try self.advance(); // consume !
                                     const child = try self.parseAlternation();
+                                    errdefer child.destroy(self.allocator);
                                     try self.expect(.rparen);
                                     return ast.Node.createLookbehind(self.allocator, child, false, span);
                                 } else {
@@ -535,6 +557,7 @@ pub const Parser = struct {
                 }
 
                 const child = try self.parseAlternation();
+                errdefer child.destroy(self.allocator);
                 try self.expect(.rparen);
 
                 if (group_name) |name| {
@@ -652,7 +675,7 @@ pub const Parser = struct {
             try self.advance();
         }
 
-        var ranges = std.ArrayList(common.CharRange).initCapacity(self.allocator, 0) catch unreachable;
+        var ranges: std.ArrayList(common.CharRange) = .empty;
         defer ranges.deinit(self.allocator);
 
         while (self.peek() != .rbracket and self.peek() != .eof) {

@@ -48,7 +48,7 @@ pub const MacroRegistry = struct {
     /// Expand macros in a pattern string
     /// Macros are referenced as ${name}
     pub fn expand(self: *MacroRegistry, pattern: []const u8) ![]u8 {
-        var result = std.ArrayList(u8).initCapacity(self.allocator, 0) catch unreachable;
+        var result: std.ArrayList(u8) = .empty;
         defer result.deinit(self.allocator);
 
         var i: usize = 0;

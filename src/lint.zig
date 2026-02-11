@@ -301,10 +301,10 @@ pub const Lint = struct {
         return false;
     }
 
-    /// Print all warnings
+    /// Print all warnings to stderr (convenience wrapper)
     pub fn printWarnings(self: *const Lint) void {
         if (self.warnings.items.len == 0) {
-            std.debug.print("✓ No issues found\n", .{});
+            std.debug.print("No issues found\n", .{});
             return;
         }
 
@@ -316,6 +316,23 @@ pub const Lint = struct {
         }
 
         std.debug.print("\nTotal: {d} issue(s) found\n", .{self.warnings.items.len});
+    }
+
+    /// Format all warnings to any writer
+    pub fn formatWarnings(self: *const Lint, writer: anytype) !void {
+        if (self.warnings.items.len == 0) {
+            try writer.writeAll("No issues found\n");
+            return;
+        }
+
+        try writer.writeAll("\n=== Regex Analysis Results ===\n");
+        try writer.print("Pattern: \"{s}\"\n\n", .{self.pattern});
+
+        for (self.warnings.items) |warning| {
+            try writer.print("{any}", .{warning});
+        }
+
+        try writer.print("\nTotal: {d} issue(s) found\n", .{self.warnings.items.len});
     }
 };
 

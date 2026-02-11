@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux
+            artifact: regex-linux-x64
+          - target: aarch64-linux
+            artifact: regex-linux-arm64
+          - target: x86_64-macos
+            artifact: regex-darwin-x64
+          - target: aarch64-macos
+            artifact: regex-darwin-arm64
+          - target: x86_64-windows
+            artifact: regex-windows-x64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: master
+
+      - name: Build (${{ matrix.target }})
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+
+      - name: Rename binary
+        run: |
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            mv zig-out/bin/regex.exe zig-out/bin/${{ matrix.artifact }}
+          else
+            mv zig-out/bin/regex zig-out/bin/${{ matrix.artifact }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: zig-out/bin/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - uses: stacksjs/action-releaser@v1.2.7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            artifacts/regex-linux-x64
+            artifacts/regex-linux-arm64
+            artifacts/regex-darwin-x64
+            artifacts/regex-darwin-arm64
+            artifacts/regex-windows-x64.exe
