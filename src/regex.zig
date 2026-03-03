@@ -41,6 +41,7 @@ pub const EngineType = enum {
 /// Main regex type - represents a compiled regular expression pattern
 pub const Regex = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     pattern: []const u8,
     nfa: compiler.NFA,
     backtrack_engine: ?backtrack.BacktrackEngine,
@@ -52,12 +53,12 @@ pub const Regex = struct {
     named_captures: std.StringHashMap(usize), // name -> capture_index mapping
 
     /// Compile a regex pattern with default flags
-    pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
-        return compileWithFlags(allocator, pattern, .{});
+    pub fn compile(allocator: std.mem.Allocator, io: std.Io, pattern: []const u8) !Regex {
+        return compileWithFlags(allocator, io, pattern, .{});
     }
 
     /// Compile a regex pattern with custom flags
-    pub fn compileWithFlags(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
+    pub fn compileWithFlags(allocator: std.mem.Allocator, io: std.Io, pattern: []const u8, flags: common.CompileFlags) !Regex {
         if (pattern.len == 0) {
             return RegexError.EmptyPattern;
         }
@@ -92,12 +93,7 @@ pub const Regex = struct {
 
         if (needs_backtracking) {
             // Use backtracking engine
-            var backtrack_engine = try backtrack.BacktrackEngine.init(
-                allocator,
-                tree.root,
-                tree.capture_count,
-                flags
-            );
+            var backtrack_engine = try backtrack.BacktrackEngine.init(allocator, tree.root, tree.capture_count, flags);
             errdefer backtrack_engine.deinit();
 
             // Create a dummy NFA (not used)
@@ -106,6 +102,7 @@ pub const Regex = struct {
             _ = try dummy_nfa.addState();
 
             return Regex{
+                .io = io,
                 .allocator = allocator,
                 .pattern = owned_pattern,
                 .nfa = dummy_nfa,
@@ -126,6 +123,7 @@ pub const Regex = struct {
             _ = try comp.compile(&tree);
 
             return Regex{
+                .io = io,
                 .allocator = allocator,
                 .pattern = owned_pattern,
                 .nfa = comp.nfa,
@@ -676,11 +674,11 @@ fn requiresBacktracking(node: *ast.Node) bool {
         // Recursively check compound nodes
         .concat => {
             return requiresBacktracking(node.data.concat.left) or
-                   requiresBacktracking(node.data.concat.right);
+                requiresBacktracking(node.data.concat.right);
         },
         .alternation => {
             return requiresBacktracking(node.data.alternation.left) or
-                   requiresBacktracking(node.data.alternation.right);
+                requiresBacktracking(node.data.alternation.right);
         },
         .group => return requiresBacktracking(node.data.group.child),
 
@@ -727,20 +725,20 @@ fn collectNamedCaptures(node: *ast.Node, map: *std.StringHashMap(usize)) !void {
 
 test "compile empty pattern" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "");
+    const result = Regex.compile(allocator, std.testing.io, "");
     try std.testing.expectError(RegexError.EmptyPattern, result);
 }
 
 test "compile basic pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "test");
+    var regex = try Regex.compile(allocator, std.testing.io, "test");
     defer regex.deinit();
     try std.testing.expectEqualStrings("test", regex.pattern);
 }
 
 test "match literal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "hello");
+    var regex = try Regex.compile(allocator, std.testing.io, "hello");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -749,7 +747,7 @@ test "match literal" {
 
 test "find literal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "world");
+    var regex = try Regex.compile(allocator, std.testing.io, "world");
     defer regex.deinit();
 
     if (try regex.find("hello world")) |match_result| {
@@ -765,7 +763,7 @@ test "find literal" {
 
 test "alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "cat|dog");
+    var regex = try Regex.compile(allocator, std.testing.io, "cat|dog");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("cat"));
@@ -775,7 +773,7 @@ test "alternation" {
 
 test "star quantifier" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a*");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -785,7 +783,7 @@ test "star quantifier" {
 
 test "plus quantifier" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch(""));
@@ -795,7 +793,7 @@ test "plus quantifier" {
 
 test "optional quantifier" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a?");
+    var regex = try Regex.compile(allocator, std.testing.io, "a?");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -804,7 +802,7 @@ test "optional quantifier" {
 
 test "dot wildcard" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a.c");
+    var regex = try Regex.compile(allocator, std.testing.io, "a.c");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));
@@ -814,7 +812,7 @@ test "dot wildcard" {
 
 test "character class \\d" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     if (try regex.find("abc123def")) |match_result| {
@@ -828,7 +826,7 @@ test "character class \\d" {
 
 test "replace" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "world");
+    var regex = try Regex.compile(allocator, std.testing.io, "world");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "hello world", "Zig");
@@ -839,7 +837,7 @@ test "replace" {
 
 test "replace all" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a");
+    var regex = try Regex.compile(allocator, std.testing.io, "a");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "banana", "o");
@@ -850,7 +848,7 @@ test "replace all" {
 
 test "split" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ",");
+    var regex = try Regex.compile(allocator, std.testing.io, ",");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "a,b,c");
@@ -866,7 +864,7 @@ test "compile rejects dangerous nested quantifiers" {
     const allocator = std.testing.allocator;
 
     // This pattern should be rejected as critical risk
-    const result = Regex.compile(allocator, "(a+)+");
+    const result = Regex.compile(allocator, std.testing.io, "(a+)+");
     try std.testing.expectError(RegexError.PatternTooComplex, result);
 }
 
@@ -874,7 +872,7 @@ test "compile rejects nested stars" {
     const allocator = std.testing.allocator;
 
     // This pattern should be rejected
-    const result = Regex.compile(allocator, "(a*)*");
+    const result = Regex.compile(allocator, std.testing.io, "(a*)*");
     try std.testing.expectError(RegexError.PatternTooComplex, result);
 }
 
@@ -882,6 +880,6 @@ test "compile accepts safe complex patterns" {
     const allocator = std.testing.allocator;
 
     // This pattern should be accepted (medium risk is OK)
-    var regex = try Regex.compile(allocator, "a+b*c?d{2,5}");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+b*c?d{2,5}");
     defer regex.deinit();
 }

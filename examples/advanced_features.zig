@@ -6,7 +6,7 @@ const Composer = @import("regex").Composer;
 const Lint = @import("regex").Lint;
 const ComplexityAnalyzer = @import("regex").ComplexityAnalyzer;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -39,7 +39,7 @@ pub fn main() !void {
 
         std.debug.print("Built pattern: {s}\n", .{pattern});
 
-        var regex = try Regex.compile(allocator, pattern);
+        var regex = try Regex.compile(allocator, init.io, pattern);
         defer regex.deinit();
 
         const test_emails = [_][]const u8{
@@ -78,7 +78,7 @@ pub fn main() !void {
         std.debug.print("Phone pattern: {s}\n\n", .{phone_pattern});
 
         // Test phone number pattern
-        var phone_regex = try Regex.compile(allocator, phone_pattern);
+        var phone_regex = try Regex.compile(allocator, init.io, phone_pattern);
         defer phone_regex.deinit();
 
         const test_phones = [_][]const u8{
@@ -116,7 +116,7 @@ pub fn main() !void {
 
         std.debug.print("Composed pattern (OR): {s}\n", .{alternatives});
 
-        var regex = try Regex.compile(allocator, alternatives);
+        var regex = try Regex.compile(allocator, init.io, alternatives);
         defer regex.deinit();
 
         const test_strings = [_][]const u8{
@@ -232,7 +232,7 @@ pub fn main() !void {
         std.debug.print("Complexity: {s} (score: {d})\n\n", .{ @tagName(complexity.getLevel()), complexity.complexity_score });
 
         // Test the pattern
-        var regex = try Regex.compile(allocator, url_pattern_built);
+        var regex = try Regex.compile(allocator, init.io, url_pattern_built);
         defer regex.deinit();
 
         const test_urls = [_][]const u8{
@@ -305,7 +305,7 @@ pub fn main() !void {
 
         std.debug.print("Built pattern: {s}\n\n", .{ipv4_pattern});
 
-        var regex = try Regex.compile(allocator, ipv4_pattern);
+        var regex = try Regex.compile(allocator, init.io, ipv4_pattern);
         defer regex.deinit();
 
         const test_ips = [_][]const u8{

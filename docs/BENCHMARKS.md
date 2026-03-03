@@ -32,12 +32,12 @@ All benchmarks run with 10,000 iterations unless otherwise noted.
 
 ### Core Operations
 
-| Pattern | Input | Avg Time | Ops/sec | Description |
-|---------|-------|----------|---------|-------------|
-| `hello` | `hello world` | ~6.87 µs | ~145,000 | Simple literal match |
-| `a+` | `aaaa` | ~5.50 µs | ~182,000 | Quantifier (one or more) |
-| `\d+` | `12345` | ~5.01 µs | ~200,000 | Digit character class |
-| `hello` (case-insensitive) | `HELLO` | ~4.62 µs | ~216,000 | Case-insensitive match |
+| Pattern                    | Input         | Avg Time | Ops/sec  | Description              |
+| -------------------------- | ------------- | -------- | -------- | ------------------------ |
+| `hello`                    | `hello world` | ~6.87 µs | ~145,000 | Simple literal match     |
+| `a+`                       | `aaaa`        | ~5.50 µs | ~182,000 | Quantifier (one or more) |
+| `\d+`                      | `12345`       | ~5.01 µs | ~200,000 | Digit character class    |
+| `hello` (case-insensitive) | `HELLO`       | ~4.62 µs | ~216,000 | Case-insensitive match   |
 
 ### Detailed Results
 
@@ -65,24 +65,24 @@ Test 4: Case-insensitive matching...
 
 ### Time Complexity
 
-| Operation | Complexity | Notes |
-|-----------|------------|-------|
-| Compile | O(p) | p = pattern length |
-| isMatch | O(n × m) | n = input length, m = NFA states |
-| find | O(n × m × k) | k = starting positions attempted |
-| findAll | O(n × m) | Amortized over all matches |
-| replace | O(n + r) | r = replacement length |
-| replaceAll | O(n × m + r) | Includes matching cost |
-| split | O(n × m) | Plus array allocation |
+| Operation  | Complexity   | Notes                            |
+| ---------- | ------------ | -------------------------------- |
+| Compile    | O(p)         | p = pattern length               |
+| isMatch    | O(n × m)     | n = input length, m = NFA states |
+| find       | O(n × m × k) | k = starting positions attempted |
+| findAll    | O(n × m)     | Amortized over all matches       |
+| replace    | O(n + r)     | r = replacement length           |
+| replaceAll | O(n × m + r) | Includes matching cost           |
+| split      | O(n × m)     | Plus array allocation            |
 
 ### Space Complexity
 
-| Component | Complexity | Notes |
-|-----------|------------|-------|
-| Compiled Regex (NFA) | O(p) | Persistent storage |
-| VM Execution | O(m × c) | c = capture group count |
-| Match Results | O(r) | r = number of results |
-| Temporary (AST) | O(p) | Freed after compilation |
+| Component            | Complexity | Notes                   |
+| -------------------- | ---------- | ----------------------- |
+| Compiled Regex (NFA) | O(p)       | Persistent storage      |
+| VM Execution         | O(m × c)   | c = capture group count |
+| Match Results        | O(r)       | r = number of results   |
+| Temporary (AST)      | O(p)       | Freed after compilation |
 
 ### Greedy Matching Performance
 
@@ -255,11 +255,13 @@ Pattern: "\\d{3}-\\d{4}"
 ### vs. Backtracking Engines (PCRE, Python re)
 
 **Advantages:**
+
 - ✅ **No catastrophic backtracking** - Always linear time
 - ✅ **Predictable performance** - O(n×m) guaranteed
 - ✅ **Memory safe** - No stack overflow on deep recursion
 
 **Trade-offs:**
+
 - ❌ **Slower on simple patterns** - More overhead for simple cases
 - ❌ **No backreferences** - Not currently supported
 - ❌ **No look-around** - Not currently supported
@@ -267,10 +269,12 @@ Pattern: "\\d{3}-\\d{4}"
 ### vs. DFA Engines (RE2, ripgrep)
 
 **Similarities:**
+
 - ✅ **Linear time** - Both guarantee O(n×m)
 - ✅ **No backtracking** - Deterministic matching
 
 **Trade-offs:**
+
 - ❌ **NFA simulation** - We don't build full DFA (saves memory)
 - ❌ **Capture groups** - Our approach is simpler for captures
 - ✅ **Memory usage** - Lower than full DFA construction
@@ -410,6 +414,7 @@ CSV splitting (100,000 rows):       ~300ms total
 ```
 
 These are estimates. Actual performance depends on:
+
 - Pattern complexity
 - Input characteristics
 - Hardware specifications

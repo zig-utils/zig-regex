@@ -657,10 +657,7 @@ pub const Parser = struct {
             .dollar => '$',
             .lbracket => '[', // Allow [ as literal (for non-POSIX cases)
             // These should not appear here
-            .rbracket, .caret, .backslash,
-            .escape_d, .escape_D, .escape_w, .escape_W,
-            .escape_s, .escape_S, .escape_b, .escape_B,
-            .escape_A, .escape_z, .escape_Z, .backref, .eof => null,
+            .rbracket, .caret, .backslash, .escape_d, .escape_D, .escape_w, .escape_W, .escape_s, .escape_S, .escape_b, .escape_B, .escape_A, .escape_z, .escape_Z, .backref, .eof => null,
         };
     }
 
@@ -685,7 +682,8 @@ pub const Parser = struct {
 
             if (current_pos + 1 < self.lexer.input.len and
                 self.lexer.input[current_pos] == '[' and
-                self.lexer.input[current_pos + 1] == ':') {
+                self.lexer.input[current_pos + 1] == ':')
+            {
 
                 // Find the closing :]
                 var found_posix = false;
@@ -693,7 +691,7 @@ pub const Parser = struct {
                 while (i + 1 < self.lexer.input.len) : (i += 1) {
                     if (self.lexer.input[i] == ':' and self.lexer.input[i + 1] == ']') {
                         // Found [:name:]
-                        const class_name = self.lexer.input[current_pos + 2..i];
+                        const class_name = self.lexer.input[current_pos + 2 .. i];
 
                         // Skip to the character AFTER ':]' which should be the outer ']' or more chars
                         // We want the lexer to be positioned so that the NEXT token read will be correct

@@ -6,11 +6,11 @@ test "multiline flag: ^ matches after newlines" {
     const allocator = std.testing.allocator;
 
     // Without multiline flag
-    var regex_single = try Regex.compileWithFlags(allocator, "^test", .{ .multiline = false });
+    var regex_single = try Regex.compileWithFlags(allocator, std.testing.io, "^test", .{ .multiline = false });
     defer regex_single.deinit();
 
     // With multiline flag
-    var regex_multi = try Regex.compileWithFlags(allocator, "^test", .{ .multiline = true });
+    var regex_multi = try Regex.compileWithFlags(allocator, std.testing.io, "^test", .{ .multiline = true });
     defer regex_multi.deinit();
 
     const input = "line1\ntest";
@@ -26,11 +26,11 @@ test "multiline flag: $ matches before newlines" {
     const allocator = std.testing.allocator;
 
     // Without multiline flag
-    var regex_single = try Regex.compileWithFlags(allocator, "test$", .{ .multiline = false });
+    var regex_single = try Regex.compileWithFlags(allocator, std.testing.io, "test$", .{ .multiline = false });
     defer regex_single.deinit();
 
     // With multiline flag
-    var regex_multi = try Regex.compileWithFlags(allocator, "test$", .{ .multiline = true });
+    var regex_multi = try Regex.compileWithFlags(allocator, std.testing.io, "test$", .{ .multiline = true });
     defer regex_multi.deinit();
 
     const input = "test\nline2";
@@ -45,7 +45,7 @@ test "multiline flag: $ matches before newlines" {
 test "multiline flag: complex pattern" {
     const allocator = std.testing.allocator;
 
-    var regex = try Regex.compileWithFlags(allocator, "^\\w+$", .{ .multiline = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^\\w+$", .{ .multiline = true });
     defer regex.deinit();
 
     // Should match each line
@@ -57,11 +57,11 @@ test "dot-all flag: . matches newlines" {
     const allocator = std.testing.allocator;
 
     // Without dot-all flag
-    var regex_normal = try Regex.compileWithFlags(allocator, "a.b", .{ .dot_all = false });
+    var regex_normal = try Regex.compileWithFlags(allocator, std.testing.io, "a.b", .{ .dot_all = false });
     defer regex_normal.deinit();
 
     // With dot-all flag
-    var regex_dotall = try Regex.compileWithFlags(allocator, "a.b", .{ .dot_all = true });
+    var regex_dotall = try Regex.compileWithFlags(allocator, std.testing.io, "a.b", .{ .dot_all = true });
     defer regex_dotall.deinit();
 
     const input_with_newline = "a\nb";
@@ -80,11 +80,11 @@ test "dot-all flag: .* matches across lines" {
     const allocator = std.testing.allocator;
 
     // Without dot-all flag
-    var regex_normal = try Regex.compileWithFlags(allocator, "start.*end", .{ .dot_all = false });
+    var regex_normal = try Regex.compileWithFlags(allocator, std.testing.io, "start.*end", .{ .dot_all = false });
     defer regex_normal.deinit();
 
     // With dot-all flag
-    var regex_dotall = try Regex.compileWithFlags(allocator, "start.*end", .{ .dot_all = true });
+    var regex_dotall = try Regex.compileWithFlags(allocator, std.testing.io, "start.*end", .{ .dot_all = true });
     defer regex_dotall.deinit();
 
     const input = "start\nmiddle\nend";
@@ -99,7 +99,7 @@ test "dot-all flag: .* matches across lines" {
 test "combined multiline and dot-all flags" {
     const allocator = std.testing.allocator;
 
-    var regex = try Regex.compileWithFlags(allocator, "^.*$", .{
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^.*$", .{
         .multiline = true,
         .dot_all = true,
     });
@@ -112,7 +112,7 @@ test "combined multiline and dot-all flags" {
 test "multiline flag: multiple matches with findAll" {
     const allocator = std.testing.allocator;
 
-    var regex = try Regex.compileWithFlags(allocator, "^\\d+", .{ .multiline = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^\\d+", .{ .multiline = true });
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "123\n456\n789");
@@ -135,7 +135,7 @@ test "default flags: multiline and dot-all are false" {
     const allocator = std.testing.allocator;
 
     // Default compile should have multiline=false and dot_all=false
-    var regex = try Regex.compile(allocator, "^test$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^test$");
     defer regex.deinit();
 
     // Should not match with newlines

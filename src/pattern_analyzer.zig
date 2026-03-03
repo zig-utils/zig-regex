@@ -324,7 +324,6 @@ pub const PatternAnalyzer = struct {
     }
 
     fn nodesAreIdentical(self: *PatternAnalyzer, left: *ast.Node, right: *ast.Node) bool {
-
         if (left.node_type != right.node_type) return false;
 
         return switch (left.node_type) {
@@ -337,7 +336,7 @@ pub const PatternAnalyzer = struct {
                 const left_concat = left.data.concat;
                 const right_concat = right.data.concat;
                 return self.nodesAreIdentical(left_concat.left, right_concat.left) and
-                       self.nodesAreIdentical(left_concat.right, right_concat.right);
+                    self.nodesAreIdentical(left_concat.right, right_concat.right);
             },
             else => false,
         };

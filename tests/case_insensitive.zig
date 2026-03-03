@@ -4,7 +4,7 @@ const common = @import("regex").common;
 
 test "case insensitive: simple literal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "hello", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -16,7 +16,7 @@ test "case insensitive: simple literal" {
 
 test "case insensitive: with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "a+b*", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "a+b*", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("aaa"));
@@ -29,7 +29,7 @@ test "case insensitive: with quantifiers" {
 
 test "case insensitive: mixed with alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "cat|dog", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "cat|dog", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("cat"));
@@ -42,7 +42,7 @@ test "case insensitive: mixed with alternation" {
 
 test "case insensitive: find in text" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "hello", .{ .case_insensitive = true });
     defer regex.deinit();
 
     if (try regex.find("Say HELLO world")) |match| {
@@ -56,7 +56,7 @@ test "case insensitive: find in text" {
 
 test "case insensitive: with anchors" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "^hello$", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^hello$", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -68,7 +68,7 @@ test "case insensitive: with anchors" {
 
 test "case insensitive: replace" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "hello", .{ .case_insensitive = true });
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "Say HELLO world", "hi");
@@ -79,7 +79,7 @@ test "case insensitive: replace" {
 
 test "case insensitive: replaceAll" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "a", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "a", .{ .case_insensitive = true });
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "AaAa", "X");
@@ -90,7 +90,7 @@ test "case insensitive: replaceAll" {
 
 test "case insensitive: disabled by default" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "hello");
+    var regex = try Regex.compile(allocator, std.testing.io, "hello");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -100,7 +100,7 @@ test "case insensitive: disabled by default" {
 
 test "case insensitive: with numbers and special chars" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "test123", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "test123", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("test123"));

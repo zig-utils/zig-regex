@@ -3,7 +3,7 @@ const Regex = @import("regex").Regex;
 
 test "string anchor: \\A start of text" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\Aabc");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\Aabc");
     defer regex.deinit();
 
     // Should match at the start of the text
@@ -17,7 +17,7 @@ test "string anchor: \\A start of text" {
 
 test "string anchor: \\z end of text" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "abc\\z");
+    var regex = try Regex.compile(allocator, std.testing.io, "abc\\z");
     defer regex.deinit();
 
     // Should match at the end of the text
@@ -30,7 +30,7 @@ test "string anchor: \\z end of text" {
 
 test "string anchor: \\Z end of text (before optional newline)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "abc\\Z");
+    var regex = try Regex.compile(allocator, std.testing.io, "abc\\Z");
     defer regex.deinit();
 
     // Should match at the end of the text
@@ -45,10 +45,10 @@ test "string anchor: \\Z end of text (before optional newline)" {
 test "string anchors: \\A vs ^" {
     const allocator = std.testing.allocator;
 
-    var regex_A = try Regex.compile(allocator, "\\Atest");
+    var regex_A = try Regex.compile(allocator, std.testing.io, "\\Atest");
     defer regex_A.deinit();
 
-    var regex_caret = try Regex.compile(allocator, "^test");
+    var regex_caret = try Regex.compile(allocator, std.testing.io, "^test");
     defer regex_caret.deinit();
 
     const input1 = "test";
@@ -68,7 +68,7 @@ test "string anchors: \\A vs ^" {
 
 test "string anchors: combined \\A and \\z" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\Aexact\\z");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\Aexact\\z");
     defer regex.deinit();
 
     // Should match only exact strings

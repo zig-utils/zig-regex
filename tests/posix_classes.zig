@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "posix: [:alpha:] matches letters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:alpha:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:alpha:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -17,7 +17,7 @@ test "posix: [:alpha:] matches letters" {
 
 test "posix: [:digit:] matches digits" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:digit:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:digit:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("123"));
@@ -29,7 +29,7 @@ test "posix: [:digit:] matches digits" {
 
 test "posix: [:alnum:] matches alphanumeric" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:alnum:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:alnum:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello123"));
@@ -41,7 +41,7 @@ test "posix: [:alnum:] matches alphanumeric" {
 
 test "posix: [:space:] matches whitespace" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:space:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:space:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("   "));
@@ -53,7 +53,7 @@ test "posix: [:space:] matches whitespace" {
 
 test "posix: [:upper:] matches uppercase" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:upper:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:upper:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("HELLO"));
@@ -65,7 +65,7 @@ test "posix: [:upper:] matches uppercase" {
 
 test "posix: [:lower:] matches lowercase" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:lower:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:lower:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -77,7 +77,7 @@ test "posix: [:lower:] matches lowercase" {
 
 test "posix: [:xdigit:] matches hex digits" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:xdigit:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:xdigit:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("0123456789"));
@@ -90,7 +90,7 @@ test "posix: [:xdigit:] matches hex digits" {
 
 test "posix: [:punct:] matches punctuation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:punct:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:punct:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("!@#$%"));
@@ -102,7 +102,7 @@ test "posix: [:punct:] matches punctuation" {
 
 test "posix: [:blank:] matches space and tab" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:blank:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:blank:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("   "));
@@ -114,7 +114,7 @@ test "posix: [:blank:] matches space and tab" {
 
 test "posix: [:print:] matches printable characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:print:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:print:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("Hello World!"));
@@ -124,7 +124,7 @@ test "posix: [:print:] matches printable characters" {
 
 test "posix: [:graph:] matches visible characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:graph:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:graph:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("Hello"));
@@ -136,7 +136,7 @@ test "posix: [:graph:] matches visible characters" {
 
 test "posix: [:cntrl:] matches control characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:cntrl:]]");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:cntrl:]]");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("\x00"));
@@ -149,7 +149,7 @@ test "posix: [:cntrl:] matches control characters" {
 
 test "posix: combined with regular characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:alpha:]0-9_]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:alpha:]0-9_]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello123"));
@@ -159,7 +159,7 @@ test "posix: combined with regular characters" {
 
 test "posix: multiple POSIX classes in one bracket" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:alpha:][:digit:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:alpha:][:digit:]]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc123"));
@@ -169,7 +169,7 @@ test "posix: multiple POSIX classes in one bracket" {
 
 test "posix: extract words with [:alpha:]" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:alpha:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:alpha:]]+");
     defer regex.deinit();
 
     const text = "Hello World 123";
@@ -189,7 +189,7 @@ test "posix: extract words with [:alpha:]" {
 
 test "posix: extract hex numbers with [:xdigit:]" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "0x[[:xdigit:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "0x[[:xdigit:]]+");
     defer regex.deinit();
 
     const text = "Colors: 0xFF5733 and 0xABCDEF";
@@ -209,7 +209,7 @@ test "posix: extract hex numbers with [:xdigit:]" {
 
 test "posix: validate identifier with [:alnum:]" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[[:alpha:]_][[:alnum:]_]*$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[[:alpha:]_][[:alnum:]_]*$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("valid_identifier"));
@@ -221,7 +221,7 @@ test "posix: validate identifier with [:alnum:]" {
 
 test "posix: split on whitespace with [:space:]" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:space:]]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[[:space:]]+");
     defer regex.deinit();
 
     const text = "one\ttwo\nthree  four";

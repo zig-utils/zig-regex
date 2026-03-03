@@ -3,7 +3,7 @@ const Regex = @import("regex").Regex;
 
 test "comprehensive: email-like pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+@\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+@\\w+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("user@domain"));
@@ -12,7 +12,7 @@ test "comprehensive: email-like pattern" {
 
 test "comprehensive: phone number pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+-\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+-\\d+");
     defer regex.deinit();
 
     if (try regex.find("Call 555-1234 now")) |match| {
@@ -26,7 +26,7 @@ test "comprehensive: phone number pattern" {
 
 test "comprehensive: complex alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "cat|dog|bird");
+    var regex = try Regex.compile(allocator, std.testing.io, "cat|dog|bird");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("cat"));
@@ -37,7 +37,7 @@ test "comprehensive: complex alternation" {
 
 test "comprehensive: nested grouping" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a(b)c)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a(b)c)");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));
@@ -46,7 +46,7 @@ test "comprehensive: nested grouping" {
 
 test "comprehensive: multiple quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+b*c?");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+b*c?");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -57,7 +57,7 @@ test "comprehensive: multiple quantifiers" {
 
 test "comprehensive: start and end anchors" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^hello$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^hello$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -67,7 +67,7 @@ test "comprehensive: start and end anchors" {
 
 test "comprehensive: character class ranges" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[a-z]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a-z]+");
     defer regex.deinit();
 
     if (try regex.find("ABC123xyz")) |match| {
@@ -81,7 +81,7 @@ test "comprehensive: character class ranges" {
 
 test "comprehensive: negated character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[^0-9]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[^0-9]+");
     defer regex.deinit();
 
     if (try regex.find("123abc456")) |match| {
@@ -95,7 +95,7 @@ test "comprehensive: negated character class" {
 
 test "comprehensive: findAll with multiple matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "10 cats and 20 dogs");
@@ -114,7 +114,7 @@ test "comprehensive: findAll with multiple matches" {
 
 test "comprehensive: replaceAll multiple occurrences" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "I have 2 cats and 3 dogs", "many");
@@ -125,7 +125,7 @@ test "comprehensive: replaceAll multiple occurrences" {
 
 test "comprehensive: split by whitespace pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\s+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\s+");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "hello    world   test");
@@ -139,7 +139,7 @@ test "comprehensive: split by whitespace pattern" {
 
 test "comprehensive: dot matches any character" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a.c");
+    var regex = try Regex.compile(allocator, std.testing.io, "a.c");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));
@@ -150,7 +150,7 @@ test "comprehensive: dot matches any character" {
 
 test "comprehensive: escape special characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\$\\d+\\.\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\$\\d+\\.\\d+");
     defer regex.deinit();
 
     if (try regex.find("Price: $19.99")) |match| {
@@ -164,7 +164,7 @@ test "comprehensive: escape special characters" {
 
 test "comprehensive: word boundary" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\bword\\b");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\bword\\b");
     defer regex.deinit();
 
     if (try regex.find("a word here")) |match| {

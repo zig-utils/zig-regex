@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "lazy star: a*? matches minimal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a*?b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*?b");
     defer regex.deinit();
 
     // Greedy would match "aaab", lazy should match "b"
@@ -22,7 +22,7 @@ test "lazy star vs greedy star" {
     const allocator = std.testing.allocator;
 
     // Greedy star
-    var greedy = try Regex.compile(allocator, "a*b");
+    var greedy = try Regex.compile(allocator, std.testing.io, "a*b");
     defer greedy.deinit();
 
     if (try greedy.find("aaab")) |match| {
@@ -35,7 +35,7 @@ test "lazy star vs greedy star" {
     }
 
     // Lazy star
-    var lazy = try Regex.compile(allocator, "a*?b");
+    var lazy = try Regex.compile(allocator, std.testing.io, "a*?b");
     defer lazy.deinit();
 
     if (try lazy.find("aaab")) |match| {
@@ -50,7 +50,7 @@ test "lazy star vs greedy star" {
 
 test "lazy plus: a+? matches minimal (at least one)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+?b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+?b");
     defer regex.deinit();
 
     // Lazy plus must match at least one 'a'
@@ -67,7 +67,7 @@ test "lazy plus vs greedy plus" {
     const allocator = std.testing.allocator;
 
     // Greedy plus
-    var greedy = try Regex.compile(allocator, "a+b");
+    var greedy = try Regex.compile(allocator, std.testing.io, "a+b");
     defer greedy.deinit();
 
     if (try greedy.find("aaab")) |match| {
@@ -80,7 +80,7 @@ test "lazy plus vs greedy plus" {
     }
 
     // Lazy plus
-    var lazy = try Regex.compile(allocator, "a+?b");
+    var lazy = try Regex.compile(allocator, std.testing.io, "a+?b");
     defer lazy.deinit();
 
     if (try lazy.find("aaab")) |match| {
@@ -95,7 +95,7 @@ test "lazy plus vs greedy plus" {
 
 test "lazy optional: a?? matches minimal (zero)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a??b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a??b");
     defer regex.deinit();
 
     // Lazy optional prefers zero matches
@@ -112,7 +112,7 @@ test "lazy optional vs greedy optional" {
     const allocator = std.testing.allocator;
 
     // Greedy optional
-    var greedy = try Regex.compile(allocator, "a?b");
+    var greedy = try Regex.compile(allocator, std.testing.io, "a?b");
     defer greedy.deinit();
 
     if (try greedy.find("ab")) |match| {
@@ -125,7 +125,7 @@ test "lazy optional vs greedy optional" {
     }
 
     // Lazy optional
-    var lazy = try Regex.compile(allocator, "a??b");
+    var lazy = try Regex.compile(allocator, std.testing.io, "a??b");
     defer lazy.deinit();
 
     if (try lazy.find("ab")) |match| {
@@ -140,7 +140,7 @@ test "lazy optional vs greedy optional" {
 
 test "lazy repeat: a{2,4}? matches minimal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{2,4}?b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a{2,4}?b");
     defer regex.deinit();
 
     // Lazy repeat matches minimum (2 'a's)
@@ -157,7 +157,7 @@ test "lazy repeat vs greedy repeat" {
     const allocator = std.testing.allocator;
 
     // Greedy repeat
-    var greedy = try Regex.compile(allocator, "a{2,4}b");
+    var greedy = try Regex.compile(allocator, std.testing.io, "a{2,4}b");
     defer greedy.deinit();
 
     if (try greedy.find("aaaaab")) |match| {
@@ -170,7 +170,7 @@ test "lazy repeat vs greedy repeat" {
     }
 
     // Lazy repeat
-    var lazy = try Regex.compile(allocator, "a{2,4}?b");
+    var lazy = try Regex.compile(allocator, std.testing.io, "a{2,4}?b");
     defer lazy.deinit();
 
     if (try lazy.find("aaaaab")) |match| {
@@ -185,7 +185,7 @@ test "lazy repeat vs greedy repeat" {
 
 test "lazy quantifier in alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a*?b|c");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*?b|c");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("b"));
@@ -195,7 +195,7 @@ test "lazy quantifier in alternation" {
 
 test "multiple lazy quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a*?b+?c");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*?b+?c");
     defer regex.deinit();
 
     if (try regex.find("aaabbbbc")) |match| {
@@ -210,7 +210,7 @@ test "multiple lazy quantifiers" {
 
 test "lazy quantifier with character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[a-z]+?\\d");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a-z]+?\\d");
     defer regex.deinit();
 
     if (try regex.find("abc123")) |match| {
@@ -225,7 +225,7 @@ test "lazy quantifier with character class" {
 
 test "lazy star with dot" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ".*?x");
+    var regex = try Regex.compile(allocator, std.testing.io, ".*?x");
     defer regex.deinit();
 
     if (try regex.find("abcxyz")) |match| {
@@ -240,7 +240,7 @@ test "lazy star with dot" {
 
 test "lazy quantifier in capture group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a+?)b");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a+?)b");
     defer regex.deinit();
 
     if (try regex.find("aaab")) |match| {
@@ -258,7 +258,7 @@ test "lazy quantifier in capture group" {
 
 test "lazy repeat {n,}?" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{2,}?b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a{2,}?b");
     defer regex.deinit();
 
     if (try regex.find("aaaaab")) |match| {
@@ -274,7 +274,7 @@ test "lazy repeat {n,}?" {
 test "lazy quantifier backtracking" {
     const allocator = std.testing.allocator;
     // Even though lazy, it must backtrack if necessary to match
-    var regex = try Regex.compile(allocator, "a*?aab");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*?aab");
     defer regex.deinit();
 
     if (try regex.find("aaab")) |match| {
@@ -289,7 +289,7 @@ test "lazy quantifier backtracking" {
 
 test "nested lazy quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a*?b+?)*?c");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a*?b+?)*?c");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("c"));
@@ -299,7 +299,7 @@ test "nested lazy quantifiers" {
 
 test "lazy quantifier at end of pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+?");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+?");
     defer regex.deinit();
 
     if (try regex.find("aaa")) |match| {
@@ -318,10 +318,10 @@ test "lazy vs greedy performance comparison" {
     const input = "a" ** 100 ++ "b";
 
     // Both should match, but with different lengths
-    var greedy = try Regex.compile(allocator, "a*b");
+    var greedy = try Regex.compile(allocator, std.testing.io, "a*b");
     defer greedy.deinit();
 
-    var lazy = try Regex.compile(allocator, "a*?b");
+    var lazy = try Regex.compile(allocator, std.testing.io, "a*?b");
     defer lazy.deinit();
 
     // Greedy matches all 100 'a's + 'b'

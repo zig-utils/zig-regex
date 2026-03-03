@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "UTF-8: literal matching" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "café");
+    var regex = try Regex.compile(allocator, std.testing.io, "café");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("café"));
@@ -14,7 +14,7 @@ test "UTF-8: literal matching" {
 
 test "UTF-8: emoji matching" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "Hello 👋 World");
+    var regex = try Regex.compile(allocator, std.testing.io, "Hello 👋 World");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("Hello 👋 World"));
@@ -22,7 +22,7 @@ test "UTF-8: emoji matching" {
 
 test "UTF-8: Chinese characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "你好");
+    var regex = try Regex.compile(allocator, std.testing.io, "你好");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("你好"));
@@ -31,7 +31,7 @@ test "UTF-8: Chinese characters" {
 
 test "UTF-8: mixed ASCII and Unicode" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "test-тест-テスト");
+    var regex = try Regex.compile(allocator, std.testing.io, "test-тест-テスト");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("test-тест-テスト"));
@@ -39,7 +39,7 @@ test "UTF-8: mixed ASCII and Unicode" {
 
 test "UTF-8: dot matches multi-byte character" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "c.fé");
+    var regex = try Regex.compile(allocator, std.testing.io, "c.fé");
     defer regex.deinit();
 
     // Currently .  matches one byte, not one character
@@ -49,7 +49,7 @@ test "UTF-8: dot matches multi-byte character" {
 
 test "UTF-8: alternation with Unicode" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "hello|你好|こんにちは");
+    var regex = try Regex.compile(allocator, std.testing.io, "hello|你好|こんにちは");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -60,7 +60,7 @@ test "UTF-8: alternation with Unicode" {
 test "UTF-8: character class range with multi-byte" {
     const allocator = std.testing.allocator;
     // Character classes currently only work with single-byte ASCII
-    var regex = try Regex.compile(allocator, "[a-z]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a-z]+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -79,7 +79,7 @@ test "UTF-8: character class range with multi-byte" {
 
 test "UTF-8: quantifiers with Unicode literals" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "あ+");
+    var regex = try Regex.compile(allocator, std.testing.io, "あ+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("あ"));
@@ -88,7 +88,7 @@ test "UTF-8: quantifiers with Unicode literals" {
 
 test "UTF-8: capture groups with Unicode" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(你好)(世界)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(你好)(世界)");
     defer regex.deinit();
 
     const result = try regex.find("你好世界");
@@ -106,7 +106,7 @@ test "UTF-8: capture groups with Unicode" {
 
 test "UTF-8: replacement with Unicode" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)@(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)@(\\w+)");
     defer regex.deinit();
 
     // ASCII works
@@ -117,7 +117,7 @@ test "UTF-8: replacement with Unicode" {
 
 test "UTF-8: anchors with Unicode" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^你好$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^你好$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("你好"));
@@ -127,7 +127,7 @@ test "UTF-8: anchors with Unicode" {
 
 test "UTF-8: non-capturing groups with Unicode" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:안녕|hello) (world|세계)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:안녕|hello) (world|세계)");
     defer regex.deinit();
 
     const result1 = try regex.find("hello world");
@@ -156,7 +156,7 @@ test "UTF-8: non-capturing groups with Unicode" {
 // Document current limitations
 test "UTF-8: known limitation - dot is byte-based" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^.$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^.$");
     defer regex.deinit();
 
     // Single ASCII character
@@ -170,7 +170,7 @@ test "UTF-8: known limitation - dot is byte-based" {
 
 test "UTF-8: known limitation - \\w is ASCII-only" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+");
     defer regex.deinit();
 
     // ASCII word characters work

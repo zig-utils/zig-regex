@@ -5,7 +5,6 @@ const common = @import("common.zig");
 /// Backtracking-based regex engine
 /// Supports: lazy quantifiers, lookahead/lookbehind, backreferences
 /// Trade-off: O(2^n) worst case, but supports features impossible in Thompson NFA
-
 /// Match result from backtracking engine
 pub const BacktrackMatch = struct {
     start: usize,

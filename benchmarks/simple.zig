@@ -1,8 +1,10 @@
 const std = @import("std");
+const Clock = std.Io.Clock;
 const Regex = @import("regex").Regex;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const io = init.io;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -11,11 +13,10 @@ pub fn main() !void {
     // Test 1: Literal matching
     {
         std.debug.print("Test 1: Literal matching...\n", .{});
-        var regex = try Regex.compile(allocator, "hello");
+        var regex = try Regex.compile(allocator, io, "hello");
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
-        const start = timer.read();
+        const start = Clock.awake.now(io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -23,8 +24,8 @@ pub fn main() !void {
             _ = try regex.isMatch("hello world");
         }
 
-        const elapsed = timer.read() - start;
-        const avg_ns = elapsed / iterations;
+        const elapsed = start.untilNow(io, .awake).toNanoseconds();
+        const avg_ns = @divExact(elapsed, iterations);
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
             @as(f64, @floatFromInt(elapsed)) / 1_000_000.0,
@@ -35,11 +36,10 @@ pub fn main() !void {
     // Test 2: Quantifiers
     {
         std.debug.print("Test 2: Quantifiers (a+)...\n", .{});
-        var regex = try Regex.compile(allocator, "a+");
+        var regex = try Regex.compile(allocator, init.io, "a+");
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
-        const start = timer.read();
+        const start = Clock.awake.now(init.io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -47,8 +47,8 @@ pub fn main() !void {
             _ = try regex.isMatch("aaaa");
         }
 
-        const elapsed = timer.read() - start;
-        const avg_ns = elapsed / iterations;
+        const elapsed = start.untilNow(init.io, .awake).toNanoseconds();
+        const avg_ns = @divExact(elapsed, iterations);
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
             @as(f64, @floatFromInt(elapsed)) / 1_000_000.0,
@@ -59,11 +59,10 @@ pub fn main() !void {
     // Test 3: Character classes
     {
         std.debug.print("Test 3: Digit matching (\\d+)...\n", .{});
-        var regex = try Regex.compile(allocator, "\\d+");
+        var regex = try Regex.compile(allocator, init.io, "\\d+");
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
-        const start = timer.read();
+        const start = Clock.awake.now(init.io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -71,8 +70,8 @@ pub fn main() !void {
             _ = try regex.isMatch("12345");
         }
 
-        const elapsed = timer.read() - start;
-        const avg_ns = elapsed / iterations;
+        const elapsed = start.untilNow(init.io, .awake).toNanoseconds();
+        const avg_ns = @divExact(elapsed, iterations);
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
             @as(f64, @floatFromInt(elapsed)) / 1_000_000.0,
@@ -83,11 +82,10 @@ pub fn main() !void {
     // Test 4: Case-insensitive
     {
         std.debug.print("Test 4: Case-insensitive matching...\n", .{});
-        var regex = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
+        var regex = try Regex.compileWithFlags(allocator, init.io, "hello", .{ .case_insensitive = true });
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
-        const start = timer.read();
+        const start = Clock.awake.now(init.io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -95,8 +93,8 @@ pub fn main() !void {
             _ = try regex.isMatch("HELLO");
         }
 
-        const elapsed = timer.read() - start;
-        const avg_ns = elapsed / iterations;
+        const elapsed = start.untilNow(init.io, .awake).toNanoseconds();
+        const avg_ns = @divExact(elapsed, iterations);
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
             @as(f64, @floatFromInt(elapsed)) / 1_000_000.0,

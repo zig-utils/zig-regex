@@ -5,7 +5,7 @@ const RegexError = @import("regex").RegexError;
 // Edge case: Empty input
 test "edge: empty input with star" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a*");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -13,7 +13,7 @@ test "edge: empty input with star" {
 
 test "edge: empty input with plus should fail" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch(""));
@@ -22,7 +22,7 @@ test "edge: empty input with plus should fail" {
 // Edge case: Single character patterns
 test "edge: single character literal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "x");
+    var regex = try Regex.compile(allocator, std.testing.io, "x");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("x"));
@@ -33,7 +33,7 @@ test "edge: single character literal" {
 // Edge case: Nested quantifiers behavior
 test "edge: star after plus" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+b*");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+b*");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -44,7 +44,7 @@ test "edge: star after plus" {
 // Edge case: Multiple alternations
 test "edge: multiple alternations" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a|b|c|d");
+    var regex = try Regex.compile(allocator, std.testing.io, "a|b|c|d");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -57,7 +57,7 @@ test "edge: multiple alternations" {
 // Edge case: Alternation with empty branch
 test "edge: alternation with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a*|b+");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*|b+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -68,7 +68,7 @@ test "edge: alternation with quantifiers" {
 // Edge case: Complex nested groups
 test "edge: nested groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "((a))");
+    var regex = try Regex.compile(allocator, std.testing.io, "((a))");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -77,7 +77,7 @@ test "edge: nested groups" {
 // Edge case: Character class edge cases
 test "edge: empty character class range" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[a]");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a]");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -86,7 +86,7 @@ test "edge: empty character class range" {
 
 test "edge: character class with single range" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[a-a]");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a-a]");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -95,7 +95,7 @@ test "edge: character class with single range" {
 
 test "edge: negated character class matching nothing in range" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[^a-z]");
+    var regex = try Regex.compile(allocator, std.testing.io, "[^a-z]");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("A"));
@@ -106,7 +106,7 @@ test "edge: negated character class matching nothing in range" {
 // Edge case: Anchors at different positions
 test "edge: start anchor not at beginning" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a^b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a^b");
     defer regex.deinit();
 
     // This should not match anything since ^ is not at the start
@@ -115,7 +115,7 @@ test "edge: start anchor not at beginning" {
 
 test "edge: end anchor not at end" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a$b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a$b");
     defer regex.deinit();
 
     // This should not match anything since $ is not at the end
@@ -125,7 +125,7 @@ test "edge: end anchor not at end" {
 // Edge case: Dot matching
 test "edge: dot with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ".*");
+    var regex = try Regex.compile(allocator, std.testing.io, ".*");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -136,7 +136,7 @@ test "edge: dot with quantifiers" {
 // Edge case: Escape sequences
 test "edge: escaped backslash" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\\\");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\\\");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("\\"));
@@ -145,7 +145,7 @@ test "edge: escaped backslash" {
 
 test "edge: escaped dot" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\.");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\.");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("."));
@@ -155,7 +155,7 @@ test "edge: escaped dot" {
 // Edge case: findAll edge cases
 test "edge: findAll with no matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "x");
+    var regex = try Regex.compile(allocator, std.testing.io, "x");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "aaabbb");
@@ -166,7 +166,7 @@ test "edge: findAll with no matches" {
 
 test "edge: findAll with overlapping potential matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "aaa");
@@ -186,7 +186,7 @@ test "edge: findAll with overlapping potential matches" {
 // Edge case: replace edge cases
 test "edge: replace with empty string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a");
+    var regex = try Regex.compile(allocator, std.testing.io, "a");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "banana", "");
@@ -197,7 +197,7 @@ test "edge: replace with empty string" {
 
 test "edge: replace in empty string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a");
+    var regex = try Regex.compile(allocator, std.testing.io, "a");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "", "x");
@@ -209,7 +209,7 @@ test "edge: replace in empty string" {
 // Edge case: split edge cases
 test "edge: split empty string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ",");
+    var regex = try Regex.compile(allocator, std.testing.io, ",");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "");
@@ -221,7 +221,7 @@ test "edge: split empty string" {
 
 test "edge: split with no delimiter found" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ",");
+    var regex = try Regex.compile(allocator, std.testing.io, ",");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "hello");
@@ -234,7 +234,7 @@ test "edge: split with no delimiter found" {
 // Edge case: Word boundaries
 test "edge: word boundary at start" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\bword");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\bword");
     defer regex.deinit();
 
     if (try regex.find("word here")) |match| {
@@ -248,7 +248,7 @@ test "edge: word boundary at start" {
 
 test "edge: word boundary at end" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "word\\b");
+    var regex = try Regex.compile(allocator, std.testing.io, "word\\b");
     defer regex.deinit();
 
     if (try regex.find("a word")) |match| {
@@ -263,7 +263,7 @@ test "edge: word boundary at end" {
 // Edge case: Character classes with special chars
 test "edge: whitespace character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\s+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\s+");
     defer regex.deinit();
 
     if (try regex.find("hello   world")) |match| {
@@ -277,7 +277,7 @@ test "edge: whitespace character class" {
 
 test "edge: digit character class at boundaries" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^\\d+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^\\d+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("123"));

@@ -21,7 +21,7 @@ test "fuzz: random valid patterns" {
             const char_choice = random.intRangeAtMost(u8, 0, 4);
             pattern_buf[j] = switch (char_choice) {
                 0 => 'a' + random.intRangeAtMost(u8, 0, 25), // a-z
-                1 => '0' + random.intRangeAtMost(u8, 0, 9),  // 0-9
+                1 => '0' + random.intRangeAtMost(u8, 0, 9), // 0-9
                 2 => '.', // wildcard
                 3 => '*', // quantifier
                 else => '+', // quantifier
@@ -129,18 +129,18 @@ test "fuzz: malformed patterns should return errors" {
     const allocator = std.testing.allocator;
 
     const bad_patterns = [_][]const u8{
-        "(abc",        // Unmatched paren
-        "abc)",        // Unmatched paren
-        "[abc",        // Unmatched bracket
-        "abc]",        // Unmatched bracket
-        "*",           // Quantifier without target
-        "+abc",        // Quantifier without target
-        "?abc",        // Quantifier without target
-        "{2,3}",       // Quantifier without target
-        "\\",          // Incomplete escape
-        "[z-a]",       // Invalid range
-        "{-1,5}",      // Invalid repetition
-        "{5,2}",       // Invalid repetition (min > max)
+        "(abc", // Unmatched paren
+        "abc)", // Unmatched paren
+        "[abc", // Unmatched bracket
+        "abc]", // Unmatched bracket
+        "*", // Quantifier without target
+        "+abc", // Quantifier without target
+        "?abc", // Quantifier without target
+        "{2,3}", // Quantifier without target
+        "\\", // Incomplete escape
+        "[z-a]", // Invalid range
+        "{-1,5}", // Invalid repetition
+        "{5,2}", // Invalid repetition (min > max)
     };
 
     for (bad_patterns) |pattern| {
@@ -180,7 +180,7 @@ test "fuzz: edge cases with empty strings" {
 test "fuzz: long input strings" {
     const allocator = std.testing.allocator;
 
-    var regex = try Regex.compile(allocator, "a*b+c?");
+    var regex = try Regex.compile(allocator, std.testing.io, "a*b+c?");
     defer regex.deinit();
 
     // Create progressively longer inputs

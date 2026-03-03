@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         break :blk stdin_alloc.?;
     };
 
-    var re = regex.Regex.compileWithFlags(allocator, pattern, .{
+    var re = regex.Regex.compileWithFlags(allocator,io, pattern, .{
         .case_insensitive = case_insensitive,
         .multiline = multiline,
     }) catch |err| {

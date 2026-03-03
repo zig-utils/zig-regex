@@ -57,7 +57,7 @@ pub const Transition = struct {
             .data = .{ .char_class = .{
                 .ranges = ranges_copy,
                 .negated = class.negated,
-            }},
+            } },
         };
     }
 

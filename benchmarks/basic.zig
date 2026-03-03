@@ -27,7 +27,7 @@ const Benchmark = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -36,7 +36,7 @@ pub fn main() !void {
 
     // Benchmark 1: Simple literal matching
     {
-        var regex = try Regex.compile(allocator, "hello");
+        var regex = try Regex.compile(allocator, init.io, "hello");
         defer regex.deinit();
         const input = "hello world";
 
@@ -50,7 +50,7 @@ pub fn main() !void {
 
     // Benchmark 2: Quantifier matching
     {
-        var regex = try Regex.compile(allocator, "a+b*c?");
+        var regex = try Regex.compile(allocator, init.io, "a+b*c?");
         defer regex.deinit();
         const input = "aaabbbbc";
 
@@ -64,7 +64,7 @@ pub fn main() !void {
 
     // Benchmark 3: Alternation
     {
-        var regex = try Regex.compile(allocator, "cat|dog|bird");
+        var regex = try Regex.compile(allocator, init.io, "cat|dog|bird");
         defer regex.deinit();
         const input = "dog";
 
@@ -78,7 +78,7 @@ pub fn main() !void {
 
     // Benchmark 4: Character class
     {
-        var regex = try Regex.compile(allocator, "[a-z]+");
+        var regex = try Regex.compile(allocator, init.io, "[a-z]+");
         defer regex.deinit();
         const input = "abcdefghijklmnop";
 
@@ -92,7 +92,7 @@ pub fn main() !void {
 
     // Benchmark 5: Digit matching
     {
-        var regex = try Regex.compile(allocator, "\\d{3}-\\d{4}");
+        var regex = try Regex.compile(allocator, init.io, "\\d{3}-\\d{4}");
         defer regex.deinit();
         const input = "555-1234";
 
@@ -106,7 +106,7 @@ pub fn main() !void {
 
     // Benchmark 6: Email-like pattern
     {
-        var regex = try Regex.compile(allocator, "\\w+@\\w+\\.\\w+");
+        var regex = try Regex.compile(allocator, init.io, "\\w+@\\w+\\.\\w+");
         defer regex.deinit();
         const input = "user@example.com";
 
@@ -120,7 +120,7 @@ pub fn main() !void {
 
     // Benchmark 7: Find operation
     {
-        var regex = try Regex.compile(allocator, "\\d+");
+        var regex = try Regex.compile(allocator, init.io, "\\d+");
         defer regex.deinit();
         const input = "The price is $123 and tax is $45";
 
@@ -137,7 +137,7 @@ pub fn main() !void {
 
     // Benchmark 8: Replace operation
     {
-        var regex = try Regex.compile(allocator, "\\d+");
+        var regex = try Regex.compile(allocator, init.io, "\\d+");
         defer regex.deinit();
         const input = "Call 555-1234 or 555-5678";
 
@@ -166,7 +166,7 @@ pub fn main() !void {
 
     // Benchmark 10: Complex pattern
     {
-        var regex = try Regex.compile(allocator, "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+        var regex = try Regex.compile(allocator, init.io, "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
         defer regex.deinit();
         const input = "test.user+tag@example.co.uk";
 
