@@ -10,7 +10,7 @@ const RegexError = @import("regex").RegexError;
 
 test "regression: $0 replacement expands to full match" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "abc 123 def", "[$0]");
@@ -20,7 +20,7 @@ test "regression: $0 replacement expands to full match" {
 
 test "regression: $0 replacement with captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)@(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)@(\\w+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "email: user@host ok", "match=$0,user=$1,host=$2");
@@ -30,7 +30,7 @@ test "regression: $0 replacement with captures" {
 
 test "regression: $0 in replaceAll" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "a b c", "[$0]");
@@ -42,7 +42,7 @@ test "regression: $0 in replaceAll" {
 
 test "regression: case-insensitive backreference" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "(\\w+) \\1", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "(\\w+) \\1", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello HELLO"));
@@ -52,7 +52,7 @@ test "regression: case-insensitive backreference" {
 
 test "regression: case-sensitive backreference rejects case mismatch" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+) \\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) \\1");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch("hello HELLO"));
@@ -63,19 +63,19 @@ test "regression: case-sensitive backreference rejects case mismatch" {
 
 test "regression: {10,5} is rejected as invalid" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "a{10,5}");
+    const result = Regex.compile(allocator, std.testing.io, "a{10,5}");
     try std.testing.expectError(RegexError.InvalidQuantifier, result);
 }
 
 test "regression: {5,3} is rejected" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "x{5,3}");
+    const result = Regex.compile(allocator, std.testing.io, "x{5,3}");
     try std.testing.expectError(RegexError.InvalidQuantifier, result);
 }
 
 test "regression: {3,3} is accepted (min == max)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{3,3}");
+    var regex = try Regex.compile(allocator, std.testing.io, "a{3,3}");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("aaa"));
@@ -86,7 +86,7 @@ test "regression: {3,3} is accepted (min == max)" {
 
 test "regression: {0,3} matches 0 to 3 occurrences" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a{0,3}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a{0,3}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -98,9 +98,9 @@ test "regression: {0,3} matches 0 to 3 occurrences" {
 
 test "regression: {0,1} is equivalent to ?" {
     const allocator = std.testing.allocator;
-    var regex1 = try Regex.compile(allocator, "^ab{0,1}c$");
+    var regex1 = try Regex.compile(allocator, std.testing.io, "^ab{0,1}c$");
     defer regex1.deinit();
-    var regex2 = try Regex.compile(allocator, "^ab?c$");
+    var regex2 = try Regex.compile(allocator, std.testing.io, "^ab?c$");
     defer regex2.deinit();
 
     const inputs = [_][]const u8{ "ac", "abc", "abbc", "" };
@@ -111,7 +111,7 @@ test "regression: {0,1} is equivalent to ?" {
 
 test "regression: {0,0} matches empty only" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a{0,0}b$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a{0,0}b$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("b"));
@@ -123,7 +123,7 @@ test "regression: {0,0} matches empty only" {
 test "regression: prefix optimization finds match after false prefix start" {
     const allocator = std.testing.allocator;
     // Pattern with prefix "ab" - but first "ab" at position 0 doesn't complete the full match
-    var regex = try Regex.compile(allocator, "abc\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "abc\\d+");
     defer regex.deinit();
 
     // "ab" appears at position 0, but "abc" + digits is only at position 5
@@ -141,7 +141,7 @@ test "regression: prefix optimization finds match after false prefix start" {
 test "regression: backtrack step counter resets between positions" {
     const allocator = std.testing.allocator;
     // This pattern uses backtracking via backreference.
-    var regex = try Regex.compile(allocator, "(\\w+) \\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) \\1");
     defer regex.deinit();
 
     // Verify basic backreference works
@@ -161,7 +161,7 @@ test "regression: backtrack step counter resets between positions" {
 
 test "regression: deinit on regex that was never used" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "test");
+    var regex = try Regex.compile(allocator, std.testing.io, "test");
     regex.deinit();
     // Should not crash - just testing that deinit works without any find/match calls
 }
@@ -169,12 +169,12 @@ test "regression: deinit on regex that was never used" {
 test "regression: double pattern compile and deinit" {
     const allocator = std.testing.allocator;
     {
-        var regex = try Regex.compile(allocator, "abc");
+        var regex = try Regex.compile(allocator, std.testing.io, "abc");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("abc"));
     }
     {
-        var regex = try Regex.compile(allocator, "def");
+        var regex = try Regex.compile(allocator, std.testing.io, "def");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("def"));
     }

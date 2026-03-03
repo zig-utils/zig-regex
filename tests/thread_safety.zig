@@ -28,7 +28,7 @@ test "concurrent matching with same regex" {
     const allocator = testing.allocator;
 
     // Compile a regex once
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     // Test inputs
@@ -73,7 +73,7 @@ test "concurrent matching with same regex" {
 test "concurrent find operations" {
     const allocator = testing.allocator;
 
-    var regex = try Regex.compile(allocator, "[0-9]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[0-9]+");
     defer regex.deinit();
 
     const Worker = struct {
@@ -114,7 +114,7 @@ test "concurrent find operations" {
 test "SharedRegex reference counting" {
     const allocator = testing.allocator;
 
-    var shared = try SharedRegex.init(allocator, "test");
+    var shared = try SharedRegex.init(allocator, testing.io, "test");
     defer shared.deinit();
 
     // Acquire multiple references
@@ -137,7 +137,7 @@ test "SharedRegex reference counting" {
 test "SharedRegex concurrent access" {
     const allocator = testing.allocator;
 
-    var shared = try SharedRegex.init(allocator, "\\d+");
+    var shared = try SharedRegex.init(allocator, testing.io, "\\d+");
     defer shared.deinit();
 
     const Worker = struct {
@@ -172,7 +172,7 @@ test "SharedRegex concurrent access" {
 test "RegexCache basic operations" {
     const allocator = testing.allocator;
 
-    var cache = RegexCache.init(allocator);
+    var cache = RegexCache.init(allocator, testing.io);
     defer cache.deinit();
 
     // Get and cache a pattern
@@ -195,7 +195,7 @@ test "thread-safe allocator with concurrent matching" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var regex = try Regex.compile(allocator, "test");
+    var regex = try Regex.compile(allocator, std.testing.io, "test");
     defer regex.deinit();
 
     const Worker = struct {
@@ -227,13 +227,13 @@ test "concurrent matching different patterns" {
     const allocator = gpa.allocator();
 
     // Compile multiple patterns
-    var regex1 = try Regex.compile(allocator, "\\d+");
+    var regex1 = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex1.deinit();
 
-    var regex2 = try Regex.compile(allocator, "[a-z]+");
+    var regex2 = try Regex.compile(allocator, std.testing.io, "[a-z]+");
     defer regex2.deinit();
 
-    var regex3 = try Regex.compile(allocator, "test");
+    var regex3 = try Regex.compile(allocator, std.testing.io, "test");
     defer regex3.deinit();
 
     const Worker = struct {
@@ -276,7 +276,7 @@ test "stress test: many threads many matches" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var regex = try Regex.compile(allocator, "test");
+    var regex = try Regex.compile(allocator, std.testing.io, "test");
     defer regex.deinit();
 
     const Worker = struct {

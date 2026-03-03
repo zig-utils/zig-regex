@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "non-capturing: basic non-capturing group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:\\d+)");
     defer regex.deinit();
 
     const result = try regex.find("123");
@@ -22,7 +22,7 @@ test "non-capturing: basic non-capturing group" {
 
 test "non-capturing: mixed capturing and non-capturing" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)@(?:\\w+)\\.(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)@(?:\\w+)\\.(\\w+)");
     defer regex.deinit();
 
     const result = try regex.find("user@example.com");
@@ -41,7 +41,7 @@ test "non-capturing: mixed capturing and non-capturing" {
 
 test "non-capturing: alternation in non-capturing group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:cat|dog) (\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:cat|dog) (\\w+)");
     defer regex.deinit();
 
     const result1 = try regex.find("cat food");
@@ -69,7 +69,7 @@ test "non-capturing: alternation in non-capturing group" {
 
 test "non-capturing: nested non-capturing groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:(?:a|b)(?:c|d))");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:(?:a|b)(?:c|d))");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("ac"));
@@ -82,7 +82,7 @@ test "non-capturing: nested non-capturing groups" {
 test "non-capturing: capture numbering with non-capturing groups" {
     const allocator = std.testing.allocator;
     // (a) (?:b) (c) - should have captures $1=a, $2=c (not $1=a, $2=b, $3=c)
-    var regex = try Regex.compile(allocator, "(a)(?:b)(c)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a)(?:b)(c)");
     defer regex.deinit();
 
     const result = try regex.find("abc");
@@ -100,7 +100,7 @@ test "non-capturing: capture numbering with non-capturing groups" {
 
 test "non-capturing: with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:\\d+)+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:\\d+)+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("123"));
@@ -110,7 +110,7 @@ test "non-capturing: with quantifiers" {
 test "non-capturing: complex pattern" {
     const allocator = std.testing.allocator;
     // Simplified pattern - removed [\w.] which has parsing issues
-    var regex = try Regex.compile(allocator, "(?:https?://)?([a-z]+)(?:/\\w+)*");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:https?://)?([a-z]+)(?:/\\w+)*");
     defer regex.deinit();
 
     const result1 = try regex.find("http://example/path/to/page");
@@ -138,7 +138,7 @@ test "non-capturing: complex pattern" {
 
 test "non-capturing: in replacement" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:Mr|Mrs|Ms) (\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:Mr|Mrs|Ms) (\\w+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "Hello Mr Smith", "$1");
@@ -149,7 +149,7 @@ test "non-capturing: in replacement" {
 
 test "non-capturing: multiple non-capturing with one capturing" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:a)(?:b)(c)(?:d)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:a)(?:b)(c)(?:d)");
     defer regex.deinit();
 
     const result = try regex.find("abcd");
@@ -166,7 +166,7 @@ test "non-capturing: multiple non-capturing with one capturing" {
 
 test "non-capturing: with character classes" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:[a-z]+)@(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:[a-z]+)@(\\w+)");
     defer regex.deinit();
 
     const result = try regex.find("user@example");
@@ -183,7 +183,7 @@ test "non-capturing: with character classes" {
 
 test "non-capturing: nested capturing inside non-capturing" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:(\\d+):(\\d+))");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:(\\d+):(\\d+))");
     defer regex.deinit();
 
     const result = try regex.find("12:30");
@@ -201,7 +201,7 @@ test "non-capturing: nested capturing inside non-capturing" {
 
 test "non-capturing: all groups non-capturing" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:a)(?:b)(?:c)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:a)(?:b)(?:c)");
     defer regex.deinit();
 
     const result = try regex.find("abc");
@@ -218,7 +218,7 @@ test "non-capturing: all groups non-capturing" {
 
 test "non-capturing: with anchors" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^(?:hello|hi) (\\w+)$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(?:hello|hi) (\\w+)$");
     defer regex.deinit();
 
     const result = try regex.find("hello world");
@@ -237,7 +237,7 @@ test "non-capturing: with anchors" {
 
 test "non-capturing: replaceAll with non-capturing groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:the|a) (\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:the|a) (\\w+)");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "the cat and a dog", "$1");
@@ -248,7 +248,7 @@ test "non-capturing: replaceAll with non-capturing groups" {
 
 test "non-capturing: empty non-capturing group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a(?:)b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a(?:)b");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("ab"));
@@ -258,7 +258,7 @@ test "non-capturing: verify capture count" {
     const allocator = std.testing.allocator;
 
     // Pattern with 3 non-capturing and 2 capturing groups
-    var regex = try Regex.compile(allocator, "(?:a)(b)(?:c)(d)(?:e)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:a)(b)(?:c)(d)(?:e)");
     defer regex.deinit();
 
     // Should only have 2 captures, not 5

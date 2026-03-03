@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "backreference: simple capture group replacement" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "hello", "$1!");
@@ -16,7 +16,7 @@ test "backreference: simple capture group replacement" {
 
 test "backreference: swap two words" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+) (\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) (\\w+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "hello world", "$2 $1");
@@ -27,7 +27,7 @@ test "backreference: swap two words" {
 
 test "backreference: repeat capture" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "test", "$1-$1");
@@ -38,7 +38,7 @@ test "backreference: repeat capture" {
 
 test "backreference: multiple captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d+)-(\\d+)-(\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d+)-(\\d+)-(\\d+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "2025-10-26", "$3/$2/$1");
@@ -49,7 +49,7 @@ test "backreference: multiple captures" {
 
 test "backreference: escaped dollar sign" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "100", "$$$1");
@@ -60,7 +60,7 @@ test "backreference: escaped dollar sign" {
 
 test "backreference: replaceAll with captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)@(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)@(\\w+)");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "user@example and admin@test", "$1 at $2");
@@ -71,7 +71,7 @@ test "backreference: replaceAll with captures" {
 
 test "backreference: extract and format phone numbers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d{3})-(\\d{3})-(\\d{4})");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d{3})-(\\d{3})-(\\d{4})");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "555-123-4567", "($1) $2-$3");
@@ -82,7 +82,7 @@ test "backreference: extract and format phone numbers" {
 
 test "backreference: reformat dates" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d{4})-(\\d{2})-(\\d{2})");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d{4})-(\\d{2})-(\\d{2})");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "2025-10-26 and 2024-12-31", "$2/$3/$1");
@@ -93,7 +93,7 @@ test "backreference: reformat dates" {
 
 test "backreference: wrap matches in tags" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "hello world", "<b>$1</b>");
@@ -104,7 +104,7 @@ test "backreference: wrap matches in tags" {
 
 test "backreference: invalid capture index" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)");
     defer regex.deinit();
 
     // Only one capture group, $2 should be treated as literal
@@ -116,7 +116,7 @@ test "backreference: invalid capture index" {
 
 test "backreference: nested captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "((\\w+)@(\\w+))");
+    var regex = try Regex.compile(allocator, std.testing.io, "((\\w+)@(\\w+))");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "user@example.com", "Email: $1 (user=$2, domain=$3)");
@@ -127,7 +127,7 @@ test "backreference: nested captures" {
 
 test "backreference: quote words" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\b(\\w+)\\b");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\b(\\w+)\\b");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "hello world", "'$1'");
@@ -138,7 +138,7 @@ test "backreference: quote words" {
 
 test "backreference: transform case context" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(Mr|Mrs|Ms) (\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(Mr|Mrs|Ms) (\\w+)");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "Hello Mr Smith", "$1. $2");
@@ -151,7 +151,7 @@ test "backreference: transform case context" {
 
 test "pattern backreference: basic \\1" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+) \\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) \\1");
     defer regex.deinit();
 
     // Should match repeated words
@@ -171,7 +171,7 @@ test "pattern backreference: basic \\1" {
 
 test "pattern backreference: multiple captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+) (\\w+) \\1 \\2");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) (\\w+) \\1 \\2");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foo bar foo bar"));
@@ -191,7 +191,7 @@ test "pattern backreference: multiple captures" {
 
 test "pattern backreference: with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d+)\\+\\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d+)\\+\\1");
     defer regex.deinit();
 
     // Match patterns like "5+5", "123+123"
@@ -202,7 +202,7 @@ test "pattern backreference: with quantifiers" {
 
 test "pattern backreference: HTML tag matching" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "<(\\w+)>.*</\\1>");
+    var regex = try Regex.compile(allocator, std.testing.io, "<(\\w+)>.*</\\1>");
     defer regex.deinit();
 
     // Match matching HTML tags
@@ -213,7 +213,7 @@ test "pattern backreference: HTML tag matching" {
 
 test "pattern backreference: case sensitive" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+) \\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) \\1");
     defer regex.deinit();
 
     // Backreferences should be case sensitive
@@ -223,7 +223,7 @@ test "pattern backreference: case sensitive" {
 
 test "pattern backreference: nested groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "((\\w)\\w)\\2");
+    var regex = try Regex.compile(allocator, std.testing.io, "((\\w)\\w)\\2");
     defer regex.deinit();
 
     // \\2 refers to second group (single char), so "aba" should match:
@@ -246,7 +246,7 @@ test "pattern backreference: nested groups" {
 
 test "pattern backreference: with alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a|b)\\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a|b)\\1");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("aa"));
@@ -257,7 +257,7 @@ test "pattern backreference: with alternation" {
 
 test "pattern backreference: multiple in same pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w)\\1\\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w)\\1\\1");
     defer regex.deinit();
 
     // Match three of the same character
@@ -269,7 +269,7 @@ test "pattern backreference: multiple in same pattern" {
 
 test "pattern backreference: findAll" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+) \\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+) \\1");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "foo foo bar bar baz qux");
@@ -288,7 +288,7 @@ test "pattern backreference: findAll" {
 
 test "pattern backreference: quoted strings" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(['\"]).*\\1");
+    var regex = try Regex.compile(allocator, std.testing.io, "(['\"]).*\\1");
     defer regex.deinit();
 
     // Match quoted strings with same quote type

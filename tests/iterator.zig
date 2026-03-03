@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "iterator: basic iteration" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     const text = "123 abc 456 def 789";
@@ -29,7 +29,7 @@ test "iterator: basic iteration" {
 
 test "iterator: empty input" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     const text = "";
@@ -41,7 +41,7 @@ test "iterator: empty input" {
 
 test "iterator: no matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     const text = "abc def";
@@ -53,7 +53,7 @@ test "iterator: no matches" {
 
 test "iterator: reset functionality" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+");
     defer regex.deinit();
 
     const text = "hello world";
@@ -72,7 +72,7 @@ test "iterator: reset functionality" {
 
 test "iterator: captures in iteration" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)@(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)@(\\w+)");
     defer regex.deinit();
 
     const text = "user@example and admin@test";
@@ -94,7 +94,7 @@ test "iterator: captures in iteration" {
 
 test "iterator: large input streaming" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     // Simulate processing large input without loading all matches
@@ -115,7 +115,7 @@ test "iterator: large input streaming" {
 
 test "iterator: manual loop pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[a-z]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a-z]+");
     defer regex.deinit();
 
     const text = "hello world test";
@@ -146,7 +146,7 @@ test "iterator: manual loop pattern" {
 
 test "iterator: memory efficiency" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+");
     defer regex.deinit();
 
     // Iterator should not allocate all matches at once
@@ -171,7 +171,7 @@ test "iterator: memory efficiency" {
 
 test "iterator: overlapping matches prevention" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w\\w");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w\\w");
     defer regex.deinit();
 
     const text = "abcd";

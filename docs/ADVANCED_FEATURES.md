@@ -386,35 +386,31 @@ zig build wasm
 ```javascript
 // Load WASM module
 const wasmModule = await WebAssembly.instantiateStreaming(
-    fetch('zig-regex.wasm')
+  fetch("zig-regex.wasm"),
 );
 
-const {
-    zig_regex_compile,
-    zig_regex_is_match,
-    zig_regex_free,
-    memory
-} = wasmModule.instance.exports;
+const { zig_regex_compile, zig_regex_is_match, zig_regex_free, memory } =
+  wasmModule.instance.exports;
 
 // Helper to convert JS string to WASM memory
 function stringToWasm(str) {
-    const bytes = new TextEncoder().encode(str + '\0');
-    const ptr = allocate(bytes.length);
-    new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
-    return ptr;
+  const bytes = new TextEncoder().encode(str + "\0");
+  const ptr = allocate(bytes.length);
+  new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+  return ptr;
 }
 
 // Compile regex
-const pattern = stringToWasm('\\d+');
+const pattern = stringToWasm("\\d+");
 const flags = 0; // No flags
 const errorPtr = allocate(4);
 const regex = zig_regex_compile(pattern, flags, errorPtr);
 
 // Test match
-const input = stringToWasm('hello123');
+const input = stringToWasm("hello123");
 const isMatch = zig_regex_is_match(regex, input, errorPtr);
 
-console.log('Match:', isMatch);
+console.log("Match:", isMatch);
 
 // Clean up
 zig_regex_free(regex);
@@ -476,7 +472,7 @@ Warnings (2):
 
 The library automatically chooses between two engines:
 
-- **Thompson NFA**: O(n*m) performance for basic patterns
+- **Thompson NFA**: O(n\*m) performance for basic patterns
 - **Backtracking Engine**: Supports advanced features (lazy quantifiers, lookahead, lookbehind, backreferences)
 
 ```zig

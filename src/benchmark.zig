@@ -26,7 +26,7 @@ pub fn benchmark(
     const avg_ns = elapsed_ns / iterations;
     const avg_us = avg_ns / 1000;
 
-    std.debug.print("{s}: {d} iterations, avg {d}μs per match\n", .{name, iterations, avg_us});
+    std.debug.print("{s}: {d} iterations, avg {d}μs per match\n", .{ name, iterations, avg_us });
 }
 
 pub fn benchmarkCompile(
@@ -47,5 +47,5 @@ pub fn benchmarkCompile(
     const avg_ns = elapsed_ns / iterations;
     const avg_us = avg_ns / 1000;
 
-    std.debug.print("{s}: {d} compilations, avg {d}μs per compile\n", .{name, iterations, avg_us});
+    std.debug.print("{s}: {d} compilations, avg {d}μs per compile\n", .{ name, iterations, avg_us });
 }

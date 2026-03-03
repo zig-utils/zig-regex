@@ -4,7 +4,7 @@ const debug = @import("regex").debug;
 const Parser = @import("regex").parser.Parser;
 const Optimizer = @import("regex").optimizer.Optimizer;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -25,7 +25,7 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         // Example 1: Show optimization info
-        var regex = Regex.compile(allocator, pattern) catch |err| {
+        var regex = Regex.compile(allocator,init.io, pattern) catch |err| {
             std.debug.print("  ❌ Compilation error: {}\n\n", .{err});
             continue;
         };
@@ -88,7 +88,7 @@ pub fn main() !void {
     std.debug.print("───────────────────────────────────────────────\n", .{});
 
     const test_pattern = "hello.*world";
-    var test_regex = try Regex.compile(allocator, test_pattern);
+    var test_regex = try Regex.compile(allocator,init.io, test_pattern);
     defer test_regex.deinit();
 
     const test_inputs = [_][]const u8{

@@ -3,7 +3,7 @@ const Regex = @import("regex").Regex;
 const Profiler = @import("regex").Profiler;
 const ScopedTimer = @import("regex").ScopedTimer;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -16,11 +16,11 @@ pub fn main() !void {
         std.debug.print("Example 1: Basic profiling\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var profiler = Profiler.init(allocator, true);
+        var profiler = Profiler.init(allocator, init.io, true);
 
         // Profile compilation
         profiler.startCompilation();
-        var regex = try Regex.compile(allocator, "hello.*world");
+        var regex = try Regex.compile(allocator, init.io, "hello.*world");
         profiler.endCompilation();
         defer regex.deinit();
 
@@ -48,13 +48,13 @@ pub fn main() !void {
         std.debug.print("Example 2: Scoped timers\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var profiler = Profiler.init(allocator, true);
+        var profiler = Profiler.init(allocator, init.io, true);
 
         {
             var timer = ScopedTimer.init(&profiler, .compilation);
             defer timer.deinit();
 
-            var regex = try Regex.compile(allocator, "[a-z]+@[a-z]+\\.[a-z]+");
+            var regex = try Regex.compile(allocator, init.io, "[a-z]+@[a-z]+\\.[a-z]+");
             regex.deinit();
         }
 
@@ -69,19 +69,19 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         const patterns = [_][]const u8{
-            "hello",           // Literal - should have prefix optimization
-            ".*hello",         // No prefix - slower
-            "hello.*world",    // Prefix optimization
+            "hello", // Literal - should have prefix optimization
+            ".*hello", // No prefix - slower
+            "hello.*world", // Prefix optimization
         };
 
         const test_text = ("some random text " ** 10) ++ "hello world";
 
         for (patterns) |pattern| {
-            var profiler = Profiler.init(allocator, true);
+            var profiler = Profiler.init(allocator, init.io, true);
 
             std.debug.print("\nPattern: \"{s}\"\n", .{pattern});
 
-            var regex = try Regex.compile(allocator, pattern);
+            var regex = try Regex.compile(allocator, init.io, pattern);
             defer regex.deinit();
 
             // Run multiple matches
@@ -94,8 +94,8 @@ pub fn main() !void {
             }
 
             const metrics = profiler.getMetrics();
-            const avg_ns = metrics.match_time_ns / iterations;
-            std.debug.print("Average match time: {d}μs ({d} iterations)\n", .{ avg_ns / 1000, iterations });
+            const avg_ns = @divExact(metrics.match_time_ns, iterations);
+            std.debug.print("Average match time: {d}μs ({d} iterations)\n", .{ @divExact(avg_ns, 1000), iterations });
         }
     }
 
@@ -105,12 +105,12 @@ pub fn main() !void {
         std.debug.print("Example 4: Memory tracking\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var profiler = Profiler.init(allocator, true);
+        var profiler = Profiler.init(allocator, init.io, true);
 
         const complex_pattern = "(a|b)+c(d|e)*f";
         std.debug.print("Pattern: \"{s}\"\n", .{complex_pattern});
 
-        var regex = try Regex.compile(allocator, complex_pattern);
+        var regex = try Regex.compile(allocator, init.io, complex_pattern);
         defer regex.deinit();
 
         // Simulate memory tracking (in real implementation, this would be integrated)
@@ -131,9 +131,9 @@ pub fn main() !void {
         const test_pattern = "hello";
 
         // Baseline
-        var baseline_profiler = Profiler.init(allocator, true);
+        var baseline_profiler = Profiler.init(allocator, init.io, true);
         {
-            var regex = try Regex.compile(allocator, baseline_pattern);
+            var regex = try Regex.compile(allocator, init.io, baseline_pattern);
             defer regex.deinit();
 
             var i: usize = 0;
@@ -145,9 +145,9 @@ pub fn main() !void {
         }
 
         // Test
-        var test_profiler = Profiler.init(allocator, true);
+        var test_profiler = Profiler.init(allocator, init.io, true);
         {
-            var regex = try Regex.compile(allocator, test_pattern);
+            var regex = try Regex.compile(allocator, init.io, test_pattern);
             defer regex.deinit();
 
             var i: usize = 0;
@@ -162,8 +162,8 @@ pub fn main() !void {
         const test_time = test_profiler.getMetrics().match_time_ns;
         const diff_percent = @as(f64, @floatFromInt(test_time)) / @as(f64, @floatFromInt(baseline_time)) * 100.0 - 100.0;
 
-        std.debug.print("\nBaseline time: {d}μs\n", .{baseline_time / 1000});
-        std.debug.print("Test time: {d}μs\n", .{test_time / 1000});
+        std.debug.print("\nBaseline time: {d}μs\n", .{@divExact(baseline_time, 1000)});
+        std.debug.print("Test time: {d}μs\n", .{@divExact(test_time, 1000)});
         std.debug.print("Difference: {d:.1}%\n", .{diff_percent});
 
         if (diff_percent > 10.0) {

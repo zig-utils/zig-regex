@@ -10,13 +10,13 @@ const RegexError = @import("regex").RegexError;
 
 test "parser: quantifier ? at start is rejected" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "?abc");
+    const result = Regex.compile(allocator, std.testing.io, "?abc");
     try std.testing.expectError(RegexError.UnexpectedCharacter, result);
 }
 
 test "parser: nested empty groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(())");
+    var regex = try Regex.compile(allocator, std.testing.io, "(())");
     defer regex.deinit();
     // Should compile without error
     try std.testing.expect(try regex.isMatch(""));
@@ -25,7 +25,7 @@ test "parser: nested empty groups" {
 test "parser: deeply nested groups" {
     const allocator = std.testing.allocator;
     // 20 levels of nesting - should be within limits
-    var regex = try Regex.compile(allocator, "((((((((((((((((((((a))))))))))))))))))))");
+    var regex = try Regex.compile(allocator, std.testing.io, "((((((((((((((((((((a))))))))))))))))))))");
     defer regex.deinit();
     try std.testing.expect(try regex.isMatch("a"));
 }
@@ -33,20 +33,20 @@ test "parser: deeply nested groups" {
 test "parser: consecutive quantifiers rejected by analyzer" {
     const allocator = std.testing.allocator;
     // a** parses as (a*)* which is rejected as nested quantifiers
-    const result = Regex.compile(allocator, "a**");
+    const result = Regex.compile(allocator, std.testing.io, "a**");
     try std.testing.expectError(RegexError.PatternTooComplex, result);
 }
 
 test "parser: quantifier on quantifier rejected by analyzer" {
     const allocator = std.testing.allocator;
     // a+* parses as (a+)* which is rejected as nested quantifiers
-    const result = Regex.compile(allocator, "a+*");
+    const result = Regex.compile(allocator, std.testing.io, "a+*");
     try std.testing.expectError(RegexError.PatternTooComplex, result);
 }
 
 test "parser: empty alternation branch is valid" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a|");
+    var regex = try Regex.compile(allocator, std.testing.io, "a|");
     defer regex.deinit();
     // "a|" means "a or empty string" - should match empty
     try std.testing.expect(try regex.isMatch("a"));
@@ -55,7 +55,7 @@ test "parser: empty alternation branch is valid" {
 
 test "parser: leading pipe alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "|a");
+    var regex = try Regex.compile(allocator, std.testing.io, "|a");
     defer regex.deinit();
     // "|a" means "empty string or a"
     try std.testing.expect(try regex.isMatch(""));
@@ -66,7 +66,7 @@ test "parser: leading pipe alternation" {
 
 test "parser: {0} means zero occurrences" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a{0}b$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a{0}b$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("b"));
@@ -75,7 +75,7 @@ test "parser: {0} means zero occurrences" {
 
 test "parser: {1} means exactly once" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a{1}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a{1}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -86,7 +86,7 @@ test "parser: {1} means exactly once" {
 test "parser: large but valid quantifier" {
     const allocator = std.testing.allocator;
     // {0,100} should be valid
-    var regex = try Regex.compile(allocator, "a{0,100}");
+    var regex = try Regex.compile(allocator, std.testing.io, "a{0,100}");
     defer regex.deinit();
     try std.testing.expect(try regex.isMatch(""));
 }
@@ -95,7 +95,7 @@ test "parser: large but valid quantifier" {
 
 test "parser: character class with escaped ]" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[\\]]");
+    var regex = try Regex.compile(allocator, std.testing.io, "[\\]]");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("]"));
@@ -105,7 +105,7 @@ test "parser: character class with escaped ]" {
 test "parser: character class with hyphen between ranges" {
     const allocator = std.testing.allocator;
     // Hyphen at start is literal, not range
-    var regex = try Regex.compile(allocator, "[-az]");
+    var regex = try Regex.compile(allocator, std.testing.io, "[-az]");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("-"));
@@ -116,7 +116,7 @@ test "parser: character class with hyphen between ranges" {
 
 test "parser: negated class with range" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[^0-9]+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[^0-9]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));
@@ -128,7 +128,7 @@ test "parser: negated class with range" {
 
 test "parser: tab and newline escapes" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\t");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\t");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("\t"));
@@ -137,7 +137,7 @@ test "parser: tab and newline escapes" {
 
 test "parser: carriage return escape" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\r\\n");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\r\\n");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("\r\n"));
@@ -145,7 +145,7 @@ test "parser: carriage return escape" {
 
 test "parser: escaped caret and dollar" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\^\\$");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\^\\$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("^$"));
@@ -156,7 +156,7 @@ test "parser: escaped caret and dollar" {
 
 test "compiler: alternation with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^(ab+|cd*)e$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(ab+|cd*)e$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abe"));
@@ -169,7 +169,7 @@ test "compiler: alternation with quantifiers" {
 
 test "compiler: character class in alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^([0-9]+|[a-z]+)$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^([0-9]+|[a-z]+)$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("123"));
@@ -180,7 +180,7 @@ test "compiler: character class in alternation" {
 
 test "compiler: optional group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^colou?r$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^colou?r$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("color"));
@@ -190,7 +190,7 @@ test "compiler: optional group" {
 
 test "compiler: optional group with parentheses" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^(un)?happy$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(un)?happy$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("happy"));
@@ -200,7 +200,7 @@ test "compiler: optional group with parentheses" {
 
 test "compiler: multiple capture groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d{4})-(\\d{2})-(\\d{2})");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d{4})-(\\d{2})-(\\d{2})");
     defer regex.deinit();
 
     if (try regex.find("Today is 2024-01-15!")) |match| {
@@ -220,7 +220,7 @@ test "compiler: multiple capture groups" {
 
 test "compiler: anchored pattern only tries position 0" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^abc");
+    var regex = try Regex.compile(allocator, std.testing.io, "^abc");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abcdef"));
@@ -230,7 +230,7 @@ test "compiler: anchored pattern only tries position 0" {
 
 test "compiler: end-anchored pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "abc$");
+    var regex = try Regex.compile(allocator, std.testing.io, "abc$");
     defer regex.deinit();
 
     if (try regex.find("xyzabc")) |match| {
@@ -244,7 +244,7 @@ test "compiler: end-anchored pattern" {
 
 test "compiler: both anchors" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^exact$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^exact$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("exact"));
@@ -257,13 +257,13 @@ test "compiler: both anchors" {
 
 test "compiler: password strength check" {
     const allocator = std.testing.allocator;
-    var has_digit = try Regex.compile(allocator, "\\d");
+    var has_digit = try Regex.compile(allocator, std.testing.io, "\\d");
     defer has_digit.deinit();
-    var has_lower = try Regex.compile(allocator, "[a-z]");
+    var has_lower = try Regex.compile(allocator, std.testing.io, "[a-z]");
     defer has_lower.deinit();
-    var has_upper = try Regex.compile(allocator, "[A-Z]");
+    var has_upper = try Regex.compile(allocator, std.testing.io, "[A-Z]");
     defer has_upper.deinit();
-    var min_length = try Regex.compile(allocator, ".{8,}");
+    var min_length = try Regex.compile(allocator, std.testing.io, ".{8,}");
     defer min_length.deinit();
 
     const password = "MyP4ssword";
@@ -280,7 +280,7 @@ test "compiler: password strength check" {
 
 test "compiler: CSV field extraction" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[^,]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "[^,]+");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "foo,bar,baz");
@@ -300,7 +300,7 @@ test "compiler: CSV field extraction" {
 
 test "compiler: whitespace normalization via replaceAll" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\s+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\s+");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "  hello   world  ", " ");
@@ -312,7 +312,7 @@ test "compiler: whitespace normalization via replaceAll" {
 
 test "compiler: pattern with only ^ anchor" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^");
+    var regex = try Regex.compile(allocator, std.testing.io, "^");
     defer regex.deinit();
 
     // ^ matches at position 0 of any string (matches zero-width)
@@ -322,7 +322,7 @@ test "compiler: pattern with only ^ anchor" {
 
 test "compiler: pattern with only $ anchor" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "$");
+    var regex = try Regex.compile(allocator, std.testing.io, "$");
     defer regex.deinit();
 
     // $ matches at end of any string (zero-width)
@@ -334,7 +334,7 @@ test "compiler: pattern with only $ anchor" {
 
 test "compiler: dot plus" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^.+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^.+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -344,7 +344,7 @@ test "compiler: dot plus" {
 
 test "compiler: dot question" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^.?$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^.?$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -354,7 +354,7 @@ test "compiler: dot question" {
 
 test "compiler: dot repeat" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^.{3}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^.{3}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));

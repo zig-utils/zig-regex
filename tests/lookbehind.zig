@@ -3,7 +3,7 @@ const Regex = @import("regex").Regex;
 
 test "positive lookbehind: basic (?<=...)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=foo)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=foo)bar");
     defer regex.deinit();
 
     // Should match "bar" only when preceded by "foo"
@@ -25,7 +25,7 @@ test "positive lookbehind: basic (?<=...)" {
 
 test "positive lookbehind: at start of pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=foo)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=foo)bar");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foobar"));
@@ -34,7 +34,7 @@ test "positive lookbehind: at start of pattern" {
 
 test "positive lookbehind: with alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=foo|baz)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=foo|baz)bar");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foobar"));
@@ -44,7 +44,7 @@ test "positive lookbehind: with alternation" {
 
 test "negative lookbehind: basic (?<!...)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<!foo)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<!foo)bar");
     defer regex.deinit();
 
     // Should match "bar" when NOT preceded by "foo"
@@ -62,7 +62,7 @@ test "negative lookbehind: basic (?<!...)" {
 
 test "negative lookbehind: at string start" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<!x)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<!x)bar");
     defer regex.deinit();
 
     // "bar" at start should match (nothing before it, so not preceded by 'x')
@@ -78,7 +78,7 @@ test "negative lookbehind: at string start" {
 
 test "lookbehind with literal characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=\\$)\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=\\$)\\d+");
     defer regex.deinit();
 
     // Match digits preceded by dollar sign
@@ -95,7 +95,7 @@ test "lookbehind with literal characters" {
 
 test "lookbehind: zero-width assertion" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=a)b");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=a)b");
     defer regex.deinit();
 
     if (try regex.find("ab")) |match| {
@@ -112,7 +112,7 @@ test "lookbehind: zero-width assertion" {
 
 test "combined lookahead and lookbehind" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=foo)bar(?=baz)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=foo)bar(?=baz)");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foobarbaz"));
@@ -132,7 +132,7 @@ test "combined lookahead and lookbehind" {
 
 test "lookbehind with capture groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=@)(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=@)(\\w+)");
     defer regex.deinit();
 
     if (try regex.find("@username")) |match| {
@@ -148,7 +148,7 @@ test "lookbehind with capture groups" {
 
 test "multiple lookbehinds" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=a)(?<=ab)c");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=a)(?<=ab)c");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));
@@ -157,7 +157,7 @@ test "multiple lookbehinds" {
 
 test "lookbehind in findAll" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=\\s)\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=\\s)\\w+");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "hello world foo bar");

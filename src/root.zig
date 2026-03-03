@@ -8,7 +8,7 @@ const std = @import("std");
 /// Example usage:
 /// ```zig
 /// const Regex = @import("regex").Regex;
-/// const regex = try Regex.compile(allocator, "\\d+");
+/// const regex = try Regex.compile(allocator, init.io, "\\d+");
 /// defer regex.deinit();
 /// if (try regex.find("abc123")) |match| {
 ///     std.debug.print("Found: {s}\n", .{match.slice});

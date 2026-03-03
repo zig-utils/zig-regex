@@ -11,7 +11,7 @@ const RegexError = @import("regex").RegexError;
 test "stress: empty alternation branch" {
     const allocator = std.testing.allocator;
     // Pattern like (|a) should match empty string or "a"
-    var regex = try Regex.compile(allocator, "^(|a)$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(|a)$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -21,7 +21,7 @@ test "stress: empty alternation branch" {
 
 test "stress: pattern that only matches empty string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -31,7 +31,7 @@ test "stress: pattern that only matches empty string" {
 
 test "stress: dot star matches everything" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ".*");
+    var regex = try Regex.compile(allocator, std.testing.io, ".*");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -41,7 +41,7 @@ test "stress: dot star matches everything" {
 
 test "stress: single dot" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^.$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^.$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -55,7 +55,7 @@ test "stress: single dot" {
 
 test "stress: {1,1} is same as no quantifier" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a{1,1}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a{1,1}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -65,7 +65,7 @@ test "stress: {1,1} is same as no quantifier" {
 
 test "stress: {2,} matches 2 or more" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a{2,}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a{2,}$");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch(""));
@@ -77,7 +77,7 @@ test "stress: {2,} matches 2 or more" {
 
 test "stress: exact repeat {5}" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^x{5}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^x{5}$");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch("xxxx"));
@@ -87,7 +87,7 @@ test "stress: exact repeat {5}" {
 
 test "stress: mixed quantifiers in sequence" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^a+b*c?d{2}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^a+b*c?d{2}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("add"));
@@ -101,7 +101,7 @@ test "stress: mixed quantifiers in sequence" {
 
 test "stress: character class with hyphen at start" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[-abc]+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[-abc]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("-"));
@@ -112,7 +112,7 @@ test "stress: character class with hyphen at start" {
 
 test "stress: character class with hyphen at end" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[abc-]+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[abc-]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("-"));
@@ -121,7 +121,7 @@ test "stress: character class with hyphen at end" {
 
 test "stress: negated character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[^abc]+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[^abc]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("xyz"));
@@ -132,7 +132,7 @@ test "stress: negated character class" {
 
 test "stress: character class with single char range" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[a-a]+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[a-a]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -142,7 +142,7 @@ test "stress: character class with single char range" {
 
 test "stress: overlapping ranges in character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^[a-zA-Z]+$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^[a-zA-Z]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("hello"));
@@ -154,20 +154,20 @@ test "stress: overlapping ranges in character class" {
 test "stress: shorthand classes \\d \\w \\s" {
     const allocator = std.testing.allocator;
     {
-        var regex = try Regex.compile(allocator, "^\\d+$");
+        var regex = try Regex.compile(allocator, std.testing.io, "^\\d+$");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("12345"));
         try std.testing.expect(!try regex.isMatch("abc"));
         try std.testing.expect(!try regex.isMatch(""));
     }
     {
-        var regex = try Regex.compile(allocator, "^\\w+$");
+        var regex = try Regex.compile(allocator, std.testing.io, "^\\w+$");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("hello_123"));
         try std.testing.expect(!try regex.isMatch("hello world"));
     }
     {
-        var regex = try Regex.compile(allocator, "^\\s+$");
+        var regex = try Regex.compile(allocator, std.testing.io, "^\\s+$");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("   "));
         try std.testing.expect(try regex.isMatch("\t\n"));
@@ -178,19 +178,19 @@ test "stress: shorthand classes \\d \\w \\s" {
 test "stress: negated shorthand classes \\D \\W \\S" {
     const allocator = std.testing.allocator;
     {
-        var regex = try Regex.compile(allocator, "^\\D+$");
+        var regex = try Regex.compile(allocator, std.testing.io, "^\\D+$");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("abc"));
         try std.testing.expect(!try regex.isMatch("123"));
     }
     {
-        var regex = try Regex.compile(allocator, "^\\W+$");
+        var regex = try Regex.compile(allocator, std.testing.io, "^\\W+$");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch(" !@#"));
         try std.testing.expect(!try regex.isMatch("abc"));
     }
     {
-        var regex = try Regex.compile(allocator, "^\\S+$");
+        var regex = try Regex.compile(allocator, std.testing.io, "^\\S+$");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("abc"));
         try std.testing.expect(!try regex.isMatch("a b"));
@@ -201,7 +201,7 @@ test "stress: negated shorthand classes \\D \\W \\S" {
 
 test "stress: ^ only matches at start" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^abc");
+    var regex = try Regex.compile(allocator, std.testing.io, "^abc");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abcdef"));
@@ -210,7 +210,7 @@ test "stress: ^ only matches at start" {
 
 test "stress: $ only matches at end" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "abc$");
+    var regex = try Regex.compile(allocator, std.testing.io, "abc$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("xyzabc"));
@@ -219,7 +219,7 @@ test "stress: $ only matches at end" {
 
 test "stress: ^$ on empty string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -228,7 +228,7 @@ test "stress: ^$ on empty string" {
 
 test "stress: word boundary \\b" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\bword\\b");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\bword\\b");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a word here"));
@@ -239,7 +239,7 @@ test "stress: word boundary \\b" {
 
 test "stress: non-word boundary \\B" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\Bword\\B");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\Bword\\B");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("swordwords"));
@@ -251,7 +251,7 @@ test "stress: non-word boundary \\B" {
 
 test "stress: alternation with different lengths" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^(a|bb|ccc)$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(a|bb|ccc)$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a"));
@@ -263,7 +263,7 @@ test "stress: alternation with different lengths" {
 
 test "stress: nested alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^(a(b|c)d|efg)$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(a(b|c)d|efg)$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abd"));
@@ -275,7 +275,7 @@ test "stress: nested alternation" {
 
 test "stress: NFA finds longest match for alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "cat|catfish");
+    var regex = try Regex.compile(allocator, std.testing.io, "cat|catfish");
     defer regex.deinit();
 
     if (try regex.find("catfish")) |match| {
@@ -292,7 +292,7 @@ test "stress: NFA finds longest match for alternation" {
 
 test "stress: capture group with alternation - only one branch matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a)|(b)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a)|(b)");
     defer regex.deinit();
 
     if (try regex.find("b")) |match| {
@@ -306,7 +306,7 @@ test "stress: capture group with alternation - only one branch matches" {
 
 test "stress: nested capture groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "((a)(b))");
+    var regex = try Regex.compile(allocator, std.testing.io, "((a)(b))");
     defer regex.deinit();
 
     if (try regex.find("ab")) |match| {
@@ -325,7 +325,7 @@ test "stress: nested capture groups" {
 
 test "stress: capture with quantifier" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a)+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(a)+");
     defer regex.deinit();
 
     if (try regex.find("aaa")) |match| {
@@ -341,7 +341,7 @@ test "stress: capture with quantifier" {
 
 test "stress: findAll with no matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "xyz");
+    var regex = try Regex.compile(allocator, std.testing.io, "xyz");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "abc def ghi");
@@ -358,7 +358,7 @@ test "stress: findAll with no matches" {
 
 test "stress: findAll adjacent matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "123");
@@ -378,7 +378,7 @@ test "stress: findAll adjacent matches" {
 
 test "stress: findAll non-overlapping" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "aa");
+    var regex = try Regex.compile(allocator, std.testing.io, "aa");
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "aaaa");
@@ -398,7 +398,7 @@ test "stress: findAll non-overlapping" {
 
 test "stress: replace with no match returns input" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "xyz");
+    var regex = try Regex.compile(allocator, std.testing.io, "xyz");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "hello world", "!");
@@ -408,7 +408,7 @@ test "stress: replace with no match returns input" {
 
 test "stress: replace with empty replacement" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\s+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\s+");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "hello world", "");
@@ -418,7 +418,7 @@ test "stress: replace with empty replacement" {
 
 test "stress: replaceAll removes all matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d");
     defer regex.deinit();
 
     const result = try regex.replaceAll(allocator, "a1b2c3", "");
@@ -428,7 +428,7 @@ test "stress: replaceAll removes all matches" {
 
 test "stress: replace with $$ escaped dollar" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "price");
+    var regex = try Regex.compile(allocator, std.testing.io, "price");
     defer regex.deinit();
 
     const result = try regex.replace(allocator, "the price is", "$$5");
@@ -440,7 +440,7 @@ test "stress: replace with $$ escaped dollar" {
 
 test "stress: split with no match returns whole string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ",");
+    var regex = try Regex.compile(allocator, std.testing.io, ",");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "hello");
@@ -452,7 +452,7 @@ test "stress: split with no match returns whole string" {
 
 test "stress: split on every character" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ",");
+    var regex = try Regex.compile(allocator, std.testing.io, ",");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "a,b,c");
@@ -466,7 +466,7 @@ test "stress: split on every character" {
 
 test "stress: split with regex separator" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\s*,\\s*");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\s*,\\s*");
     defer regex.deinit();
 
     const parts = try regex.split(allocator, "a , b , c");
@@ -482,7 +482,7 @@ test "stress: split with regex separator" {
 
 test "stress: escaped special characters" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\(\\)\\[\\]\\{\\}");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\(\\)\\[\\]\\{\\}");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("()[]{}"));
@@ -491,7 +491,7 @@ test "stress: escaped special characters" {
 
 test "stress: escaped dot matches literal dot" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a\\.b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a\\.b");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("a.b"));
@@ -500,7 +500,7 @@ test "stress: escaped dot matches literal dot" {
 
 test "stress: escaped backslash" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\\\");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\\\");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("\\"));
@@ -511,7 +511,7 @@ test "stress: escaped backslash" {
 
 test "stress: match at end of long input" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "needle");
+    var regex = try Regex.compile(allocator, std.testing.io, "needle");
     defer regex.deinit();
 
     // Build a long haystack with needle at the very end
@@ -531,7 +531,7 @@ test "stress: match at end of long input" {
 
 test "stress: no match in long input" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "needle");
+    var regex = try Regex.compile(allocator, std.testing.io, "needle");
     defer regex.deinit();
 
     var buf: [1024]u8 = undefined;
@@ -544,7 +544,7 @@ test "stress: no match in long input" {
 
 test "stress: multiline ^ matches after each newline" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "^\\w+", .{ .multiline = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^\\w+", .{ .multiline = true });
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "hello\nworld\nfoo");
@@ -567,7 +567,7 @@ test "stress: dot does not match newline by default - find first line" {
     // Without multiline, $ only matches at end of input
     // So .+ matches "hello" but $ doesn't match at position 5
     // Use multiline to match lines, or just test .+ without $
-    var regex = try Regex.compile(allocator, ".+");
+    var regex = try Regex.compile(allocator, std.testing.io, ".+");
     defer regex.deinit();
 
     if (try regex.find("hello\nworld")) |match| {
@@ -582,7 +582,7 @@ test "stress: dot does not match newline by default - find first line" {
 
 test "stress: dot_all makes dot match newline" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "^.+$", .{ .dot_all = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^.+$", .{ .dot_all = true });
     defer regex.deinit();
 
     if (try regex.find("hello\nworld")) |match| {
@@ -598,7 +598,7 @@ test "stress: dot_all makes dot match newline" {
 
 test "stress: case insensitive literal" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "hello", .{ .case_insensitive = true });
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("HELLO"));
@@ -610,38 +610,38 @@ test "stress: case insensitive literal" {
 
 test "stress: unmatched closing paren" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "abc)");
+    const result = Regex.compile(allocator, std.testing.io, "abc)");
     try std.testing.expectError(RegexError.UnmatchedParenthesis, result);
 }
 
 test "stress: unmatched opening paren" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "(abc");
+    const result = Regex.compile(allocator, std.testing.io, "(abc");
     try std.testing.expectError(RegexError.UnexpectedCharacter, result);
 }
 
 test "stress: unmatched bracket" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "[abc");
+    const result = Regex.compile(allocator, std.testing.io, "[abc");
     try std.testing.expectError(RegexError.UnexpectedCharacter, result);
 }
 
 test "stress: quantifier star at start" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "*abc");
+    const result = Regex.compile(allocator, std.testing.io, "*abc");
     try std.testing.expectError(RegexError.UnexpectedCharacter, result);
 }
 
 test "stress: quantifier plus at start" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "+abc");
+    const result = Regex.compile(allocator, std.testing.io, "+abc");
     try std.testing.expectError(RegexError.UnexpectedCharacter, result);
 }
 
 test "stress: empty character class" {
     const allocator = std.testing.allocator;
     // [] followed by ] - parser sees empty class then stray ]
-    if (Regex.compile(allocator, "[]")) |*r| {
+    if (Regex.compile(allocator, std.testing.io, "[]")) |*r| {
         var mut_r = r.*;
         mut_r.deinit();
     } else |_| {
@@ -653,7 +653,7 @@ test "stress: empty character class" {
 
 test "stress: greedy star matches longest" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a.*b");
+    var regex = try Regex.compile(allocator, std.testing.io, "a.*b");
     defer regex.deinit();
 
     if (try regex.find("aXXbYYb")) |match| {
@@ -669,7 +669,7 @@ test "stress: greedy star matches longest" {
 test "stress: complex pattern with multiple features" {
     const allocator = std.testing.allocator;
     // Email-like pattern with captures
-    var regex = try Regex.compile(allocator, "([a-zA-Z0-9.]+)@([a-zA-Z0-9]+)\\.([a-zA-Z]{2,})");
+    var regex = try Regex.compile(allocator, std.testing.io, "([a-zA-Z0-9.]+)@([a-zA-Z0-9]+)\\.([a-zA-Z]{2,})");
     defer regex.deinit();
 
     if (try regex.find("contact: user.name@example.com today")) |match| {
@@ -692,7 +692,7 @@ test "stress: compile many patterns sequentially" {
 
     var i: usize = 0;
     while (i < 100) : (i += 1) {
-        var regex = try Regex.compile(allocator, "test\\d+");
+        var regex = try Regex.compile(allocator, std.testing.io, "test\\d+");
         defer regex.deinit();
         try std.testing.expect(try regex.isMatch("test123"));
     }

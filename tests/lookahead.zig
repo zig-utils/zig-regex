@@ -3,7 +3,7 @@ const Regex = @import("regex").Regex;
 
 test "positive lookahead: basic (?=...)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?=bar)");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?=bar)");
     defer regex.deinit();
 
     // Should match "foo" only when followed by "bar"
@@ -24,7 +24,7 @@ test "positive lookahead: basic (?=...)" {
 
 test "positive lookahead: at end of string" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?=bar)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?=bar)bar");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foobar"));
@@ -40,7 +40,7 @@ test "positive lookahead: at end of string" {
 
 test "positive lookahead: with alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?=bar|baz)");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?=bar|baz)");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foobar"));
@@ -50,7 +50,7 @@ test "positive lookahead: with alternation" {
 
 test "negative lookahead: basic (?!...)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?!bar)");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?!bar)");
     defer regex.deinit();
 
     // Should match "foo" when NOT followed by "bar"
@@ -68,7 +68,7 @@ test "negative lookahead: basic (?!...)" {
 
 test "negative lookahead: with character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+(?!\\d)");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+(?!\\d)");
     defer regex.deinit();
 
     // Should match digits not followed by another digit
@@ -84,7 +84,7 @@ test "negative lookahead: with character class" {
 test "multiple lookaheads" {
     const allocator = std.testing.allocator;
     // Password validation: at least one digit AND at least one letter
-    var regex = try Regex.compile(allocator, "(?=.*\\d)(?=.*[a-z]).+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?=.*\\d)(?=.*[a-z]).+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc123"));
@@ -95,7 +95,7 @@ test "multiple lookaheads" {
 
 test "lookahead in alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?=foo)|(?=bar)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?=foo)|(?=bar)");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foo"));
@@ -104,7 +104,7 @@ test "lookahead in alternation" {
 
 test "lookahead with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a+(?=b+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "a+(?=b+)");
     defer regex.deinit();
 
     if (try regex.find("aaabbb")) |match| {
@@ -118,7 +118,7 @@ test "lookahead with quantifiers" {
 
 test "nested lookahead" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?=bar(?=baz))");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?=bar(?=baz))");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("foobarbaz"));
@@ -127,7 +127,7 @@ test "nested lookahead" {
 
 test "lookahead: zero-width assertion" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?=a)a");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?=a)a");
     defer regex.deinit();
 
     if (try regex.find("a")) |match| {
@@ -144,7 +144,7 @@ test "lookahead: zero-width assertion" {
 
 test "lookahead with capture groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)(?= world)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)(?= world)");
     defer regex.deinit();
 
     if (try regex.find("hello world")) |match| {

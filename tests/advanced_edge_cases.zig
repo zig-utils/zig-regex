@@ -10,7 +10,7 @@ const RegexError = @import("regex").RegexError;
 
 test "advanced: positive lookahead basic" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?=bar)");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?=bar)");
     defer regex.deinit();
 
     // "foobar" should match "foo" (lookahead is zero-width)
@@ -28,7 +28,7 @@ test "advanced: positive lookahead basic" {
 
 test "advanced: negative lookahead basic" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?!bar)");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?!bar)");
     defer regex.deinit();
 
     // "foobaz" should match "foo" (bar not following)
@@ -41,7 +41,7 @@ test "advanced: negative lookahead basic" {
 
 test "advanced: lookahead is zero-width" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "foo(?=bar)bar");
+    var regex = try Regex.compile(allocator, std.testing.io, "foo(?=bar)bar");
     defer regex.deinit();
 
     // Lookahead doesn't consume, so "bar" after it should match the same "bar"
@@ -52,7 +52,7 @@ test "advanced: lookahead is zero-width" {
 
 test "advanced: positive lookbehind" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=@)\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<=@)\\w+");
     defer regex.deinit();
 
     if (try regex.find("user@domain")) |match| {
@@ -66,7 +66,7 @@ test "advanced: positive lookbehind" {
 
 test "advanced: negative lookbehind" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<!\\d)\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<!\\d)\\w+");
     defer regex.deinit();
 
     if (try regex.find("abc")) |match| {
@@ -82,7 +82,7 @@ test "advanced: negative lookbehind" {
 
 test "advanced: backreference repeated word" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\b(\\w+)\\s+\\1\\b");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\b(\\w+)\\s+\\1\\b");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("the the"));
@@ -92,7 +92,7 @@ test "advanced: backreference repeated word" {
 
 test "advanced: backreference HTML tag matching" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "<(\\w+)>.*</\\1>");
+    var regex = try Regex.compile(allocator, std.testing.io, "<(\\w+)>.*</\\1>");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("<b>bold</b>"));
@@ -104,7 +104,7 @@ test "advanced: backreference HTML tag matching" {
 
 test "advanced: non-capturing group doesn't affect capture numbering" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:abc)(def)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:abc)(def)");
     defer regex.deinit();
 
     if (try regex.find("abcdef")) |match| {
@@ -121,7 +121,7 @@ test "advanced: non-capturing group doesn't affect capture numbering" {
 
 test "advanced: non-capturing with alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:cat|dog)fish");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:cat|dog)fish");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("catfish"));
@@ -131,7 +131,7 @@ test "advanced: non-capturing with alternation" {
 
 test "advanced: mixed capturing and non-capturing" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)(?:\\s+)(\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)(?:\\s+)(\\w+)");
     defer regex.deinit();
 
     if (try regex.find("hello world")) |match| {
@@ -149,7 +149,7 @@ test "advanced: mixed capturing and non-capturing" {
 
 test "advanced: named capture python style" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<year>\\d{4})-(?P<month>\\d{2})");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<year>\\d{4})-(?P<month>\\d{2})");
     defer regex.deinit();
 
     if (try regex.find("date: 2024-01 ok")) |match| {
@@ -166,7 +166,7 @@ test "advanced: named capture python style" {
 
 test "advanced: named capture angle bracket style" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<first>\\w+)\\s(?<last>\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<first>\\w+)\\s(?<last>\\w+)");
     defer regex.deinit();
 
     if (try regex.find("John Doe")) |match| {
@@ -184,7 +184,7 @@ test "advanced: named capture angle bracket style" {
 
 test "advanced: anchored pattern with captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^(\\w+)\\s+(\\w+)$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^(\\w+)\\s+(\\w+)$");
     defer regex.deinit();
 
     if (try regex.find("hello world")) |match| {
@@ -202,7 +202,7 @@ test "advanced: anchored pattern with captures" {
 
 test "advanced: case insensitive find with captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "(hello) (world)", .{ .case_insensitive = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "(hello) (world)", .{ .case_insensitive = true });
     defer regex.deinit();
 
     if (try regex.find("HELLO WORLD")) |match| {
@@ -221,7 +221,7 @@ test "advanced: case insensitive find with captures" {
 
 test "advanced: IPv4 address pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("192.168.1.1"));
@@ -231,7 +231,7 @@ test "advanced: IPv4 address pattern" {
 
 test "advanced: hex color pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "#[0-9a-fA-F]{6}");
+    var regex = try Regex.compile(allocator, std.testing.io, "#[0-9a-fA-F]{6}");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("#ff0000"));
@@ -241,7 +241,7 @@ test "advanced: hex color pattern" {
 
 test "advanced: semver pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\d+)\\.(\\d+)\\.(\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\d+)\\.(\\d+)\\.(\\d+)");
     defer regex.deinit();
 
     if (try regex.find("version 1.2.3-beta")) |match| {
@@ -259,7 +259,7 @@ test "advanced: semver pattern" {
 
 test "advanced: log line pattern" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\[(\\w+)\\]\\s+(.+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\[(\\w+)\\]\\s+(.+)");
     defer regex.deinit();
 
     if (try regex.find("[ERROR] Something went wrong")) |match| {
@@ -275,7 +275,7 @@ test "advanced: log line pattern" {
 
 test "advanced: URL extraction" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "https?://[a-zA-Z0-9._/-]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "https?://[a-zA-Z0-9._/-]+");
     defer regex.deinit();
 
     if (try regex.find("visit http://example.com/path today")) |match| {
@@ -291,7 +291,7 @@ test "advanced: URL extraction" {
 
 test "advanced: iterator over empty result" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "xyz");
+    var regex = try Regex.compile(allocator, std.testing.io, "xyz");
     defer regex.deinit();
 
     var iter = regex.iterator("hello world");
@@ -301,7 +301,7 @@ test "advanced: iterator over empty result" {
 
 test "advanced: iterator collects all matches" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     var iter = regex.iterator("a1b23c456");
@@ -320,7 +320,7 @@ test "advanced: iterator collects all matches" {
 
 test "advanced: multiline with captures" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compileWithFlags(allocator, "^(\\w+):", .{ .multiline = true });
+    var regex = try Regex.compileWithFlags(allocator, std.testing.io, "^(\\w+):", .{ .multiline = true });
     defer regex.deinit();
 
     const matches = try regex.findAll(allocator, "key1: val\nkey2: val");
@@ -343,7 +343,7 @@ test "advanced: multiline with captures" {
 
 test "advanced: match at very start of input" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+");
     defer regex.deinit();
 
     if (try regex.find("123abc")) |match| {
@@ -358,7 +358,7 @@ test "advanced: match at very start of input" {
 
 test "advanced: match consuming entire input" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+");
     defer regex.deinit();
 
     if (try regex.find("hello")) |match| {

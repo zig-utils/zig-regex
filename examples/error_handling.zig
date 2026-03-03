@@ -4,7 +4,7 @@ const ErrorContext = @import("regex").ErrorContext;
 const ErrorHelper = @import("regex").ErrorHelper;
 const RegexError = @import("regex").RegexError;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -13,11 +13,11 @@ pub fn main() !void {
 
     // Example 1: Invalid patterns with helpful error messages
     const invalid_patterns = [_][]const u8{
-        "abc(def",      // Unmatched parenthesis
-        "abc[def",      // Unmatched bracket
-        "abc+(",        // Invalid quantifier usage
-        "abc\\q",       // Invalid escape sequence
-        "[z-a]",        // Invalid character range
+        "abc(def", // Unmatched parenthesis
+        "abc[def", // Unmatched bracket
+        "abc+(", // Invalid quantifier usage
+        "abc\\q", // Invalid escape sequence
+        "[z-a]", // Invalid character range
         "(a(b(c(d(e(f(g(h(i(j(k(l(m(n(o(p(q", // Too many nested groups
     };
 
@@ -26,7 +26,7 @@ pub fn main() !void {
         std.debug.print("Testing pattern: \"{s}\"\n", .{pattern});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        if (Regex.compile(allocator, pattern)) |regex_value| {
+        if (Regex.compile(allocator, init.io, pattern)) |regex_value| {
             var regex = regex_value;
             defer regex.deinit();
             std.debug.print("✓ Pattern compiled successfully (unexpected)\n\n", .{});
@@ -53,7 +53,7 @@ pub fn main() !void {
     const user_pattern = "hello|world";
     std.debug.print("User provided pattern: \"{s}\"\n", .{user_pattern});
 
-    if (Regex.compile(allocator, user_pattern)) |regex_value| {
+    if (Regex.compile(allocator, init.io, user_pattern)) |regex_value| {
         var regex = regex_value;
         defer regex.deinit();
         std.debug.print("✓ Pattern compiled successfully\n", .{});
@@ -84,7 +84,7 @@ pub fn main() !void {
     const problematic_pattern = "abc[def";
     std.debug.print("Problematic pattern: \"{s}\"\n", .{problematic_pattern});
 
-    if (Regex.compile(allocator, problematic_pattern)) |regex_value| {
+    if (Regex.compile(allocator, init.io, problematic_pattern)) |regex_value| {
         var regex = regex_value;
         regex.deinit();
     } else |err| {
@@ -95,7 +95,7 @@ pub fn main() !void {
         const fixed_pattern = "abc[def]";
         std.debug.print("Fixed pattern: \"{s}\"\n", .{fixed_pattern});
 
-        if (Regex.compile(allocator, fixed_pattern)) |regex_value| {
+        if (Regex.compile(allocator, init.io, fixed_pattern)) |regex_value| {
             var regex = regex_value;
             defer regex.deinit();
             std.debug.print("✓ Fixed pattern compiles successfully!\n", .{});
@@ -119,7 +119,7 @@ pub fn main() !void {
 
     for (patterns_to_validate) |pattern| {
         std.debug.print("Validating: \"{s}\" ... ", .{pattern});
-        if (Regex.compile(allocator, pattern)) |regex_value| {
+        if (Regex.compile(allocator, init.io, pattern)) |regex_value| {
             var regex = regex_value;
             regex.deinit();
             std.debug.print("✓ Valid\n", .{});

@@ -43,7 +43,7 @@ const std = @import("std");
 /// var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 /// const allocator = gpa.allocator();
 ///
-/// const regex = try Regex.compile(allocator, "\\d+");
+/// const regex = try Regex.compile(allocator, init.io, "\\d+");
 /// defer regex.deinit();
 ///
 /// // Thread 1
@@ -115,12 +115,12 @@ pub fn SharedRegex(comptime Regex: type) type {
         allocator: std.mem.Allocator,
 
         /// Initialize a shared regex pattern
-        pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !*Self {
+        pub fn init(allocator: std.mem.Allocator, io: std.Io, pattern: []const u8) !*Self {
             const self = try allocator.create(Self);
             errdefer allocator.destroy(self);
 
             self.* = .{
-                .regex = try Regex.compile(allocator, pattern),
+                .regex = try Regex.compile(allocator, io, pattern),
                 .ref_count = std.atomic.Value(usize).init(1),
                 .allocator = allocator,
             };
@@ -198,11 +198,13 @@ pub fn RegexCache(comptime Regex: type) type {
         };
 
         cache: std.StringHashMap(Regex),
+        io: std.Io,
         allocator: std.mem.Allocator,
         initialized: bool = false,
 
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init(allocator: std.mem.Allocator, io: std.Io) Self {
             return .{
+                .io = io,
                 .cache = std.StringHashMap(Regex).init(allocator),
                 .allocator = allocator,
                 .initialized = true,
@@ -229,7 +231,7 @@ pub fn RegexCache(comptime Regex: type) type {
             }
 
             // Not in cache, compile and store
-            const regex = try Regex.compile(self.allocator, pattern);
+            const regex = try Regex.compile(self.allocator,self.io, pattern);
             errdefer {
                 var mut_regex = regex;
                 mut_regex.deinit();

@@ -1,15 +1,17 @@
 const std = @import("std");
+const Clock = std.Io.Clock;
 
 /// Performance profiling and metrics tracking for regex operations
 pub const Profiler = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     enabled: bool,
     metrics: Metrics,
-    start_time: ?std.time.Instant,
+    start_time: ?std.Io.Timestamp,
 
     pub const Metrics = struct {
-        compilation_time_ns: u64 = 0,
-        match_time_ns: u64 = 0,
+        compilation_time_ns: i96 = 0,
+        match_time_ns: i96 = 0,
         match_count: usize = 0,
         nfa_states_created: usize = 0,
         backtrack_count: usize = 0,
@@ -25,13 +27,8 @@ pub const Profiler = struct {
 
         pub fn format(
             self: Metrics,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
+            writer: *std.Io.Writer,
         ) !void {
-            _ = fmt;
-            _ = options;
-
             try writer.writeAll("\n=== Regex Performance Metrics ===\n");
             try writer.print("Compilation time: {d}μs\n", .{self.compilation_time_ns / 1000});
             try writer.print("Match time: {d}μs\n", .{self.match_time_ns / 1000});
@@ -49,41 +46,40 @@ pub const Profiler = struct {
         }
     };
 
-    pub fn init(allocator: std.mem.Allocator, enabled: bool) Profiler {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, enabled: bool) Profiler {
         return .{
+            .io = io,
             .allocator = allocator,
             .enabled = enabled,
             .metrics = Metrics{},
-            .start_time = if (enabled) std.time.Instant.now() catch null else null,
+            .start_time = if (enabled) Clock.awake.now(io) else null,
         };
     }
 
     /// Start timing a compilation phase
     pub fn startCompilation(self: *Profiler) void {
         if (!self.enabled) return;
-        self.start_time = std.time.Instant.now() catch null;
+        self.start_time = Clock.awake.now(self.io);
     }
 
     /// End timing a compilation phase
     pub fn endCompilation(self: *Profiler) void {
         if (!self.enabled) return;
         const start = self.start_time orelse return;
-        const now = std.time.Instant.now() catch return;
-        self.metrics.compilation_time_ns += now.since(start);
+        self.metrics.compilation_time_ns += start.untilNow(self.io, Clock.awake).toNanoseconds();
     }
 
     /// Start timing a match operation
     pub fn startMatch(self: *Profiler) void {
         if (!self.enabled) return;
-        self.start_time = std.time.Instant.now() catch null;
+        self.start_time = Clock.awake.now(self.io);
     }
 
     /// End timing a match operation
     pub fn endMatch(self: *Profiler) void {
         if (!self.enabled) return;
         const start = self.start_time orelse return;
-        const now = std.time.Instant.now() catch return;
-        self.metrics.match_time_ns += now.since(start);
+        self.metrics.match_time_ns += start.untilNow(self.io, .awake).toNanoseconds();
         self.metrics.match_count += 1;
     }
 
@@ -142,7 +138,7 @@ pub const Profiler = struct {
     /// Reset all metrics
     pub fn reset(self: *Profiler) void {
         self.metrics.reset();
-        self.start_time = if (self.enabled) std.time.Instant.now() catch null else null;
+        self.start_time = if (self.enabled) Clock.now(self.io) else null;
     }
 
     /// Print metrics to stderr
@@ -156,7 +152,7 @@ pub const Profiler = struct {
 pub const ScopedTimer = struct {
     profiler: *Profiler,
     timer_type: TimerType,
-    start: ?std.time.Instant,
+    start: ?std.Io.Timestamp,
 
     pub const TimerType = enum {
         compilation,
@@ -167,15 +163,14 @@ pub const ScopedTimer = struct {
         return .{
             .profiler = profiler,
             .timer_type = timer_type,
-            .start = if (profiler.enabled) std.time.Instant.now() catch null else null,
+            .start = if (profiler.enabled) Clock.awake.now(profiler.io) else null,
         };
     }
 
     pub fn deinit(self: *ScopedTimer) void {
         if (!self.profiler.enabled) return;
         const start = self.start orelse return;
-        const now = std.time.Instant.now() catch return;
-        const elapsed = now.since(start);
+        const elapsed = start.untilNow(self.profiler.io, Clock.awake).toNanoseconds();
         switch (self.timer_type) {
             .compilation => self.profiler.metrics.compilation_time_ns += elapsed,
             .match => {
@@ -188,7 +183,7 @@ pub const ScopedTimer = struct {
 
 test "profiler basic operations" {
     const allocator = std.testing.allocator;
-    var profiler = Profiler.init(allocator, true);
+    var profiler = Profiler.init(allocator, std.testing.io, true);
 
     profiler.startCompilation();
     // Do some work (just loop to consume time)
@@ -210,7 +205,7 @@ test "profiler basic operations" {
 
 test "scoped timer" {
     const allocator = std.testing.allocator;
-    var profiler = Profiler.init(allocator, true);
+    var profiler = Profiler.init(allocator, std.testing.io, true);
 
     {
         var timer = ScopedTimer.init(&profiler, .match);

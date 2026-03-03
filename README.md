@@ -21,29 +21,29 @@ zig-regex is a regular expression engine for Zig featuring Thompson NFA construc
 
 ### Core Regex Features
 
-| Feature | Syntax | Status |
-|---------|--------|--------|
-| **Literals** | `abc`, `123` | Stable |
-| **Quantifiers** | `*`, `+`, `?`, `{n}`, `{m,n}` | Stable |
-| **Alternation** | `a\|b\|c` | Stable |
-| **Character Classes** | `\d`, `\w`, `\s`, `\D`, `\W`, `\S` | Stable |
-| **Custom Classes** | `[abc]`, `[a-z]`, `[^0-9]` | Stable |
-| **Anchors** | `^`, `$`, `\b`, `\B` | Stable |
-| **Wildcards** | `.` | Stable |
-| **Capturing Groups** | `(...)` | Stable |
-| **Named Groups** | `(?P<name>...)`, `(?<name>...)` | Stable |
-| **Non-capturing** | `(?:...)` | Stable |
-| **Lookahead** | `(?=...)`, `(?!...)` | Stable |
-| **Lookbehind** | `(?<=...)`, `(?<!...)` | Stable |
-| **Backreferences** | `\1`, `\2` | Stable |
-| **Case-insensitive** | `compileWithFlags(..., .{.case_insensitive = true})` | Stable |
-| **Multiline** | `compileWithFlags(..., .{.multiline = true})` | Stable |
-| **Dot-all** | `compileWithFlags(..., .{.dot_matches_newline = true})` | Stable |
-| **Escaping** | `\\`, `\.`, `\n`, `\t`, `\r` | Stable |
+| Feature               | Syntax                                                  | Status |
+| --------------------- | ------------------------------------------------------- | ------ |
+| **Literals**          | `abc`, `123`                                            | Stable |
+| **Quantifiers**       | `*`, `+`, `?`, `{n}`, `{m,n}`                           | Stable |
+| **Alternation**       | `a\|b\|c`                                               | Stable |
+| **Character Classes** | `\d`, `\w`, `\s`, `\D`, `\W`, `\S`                      | Stable |
+| **Custom Classes**    | `[abc]`, `[a-z]`, `[^0-9]`                              | Stable |
+| **Anchors**           | `^`, `$`, `\b`, `\B`                                    | Stable |
+| **Wildcards**         | `.`                                                     | Stable |
+| **Capturing Groups**  | `(...)`                                                 | Stable |
+| **Named Groups**      | `(?P<name>...)`, `(?<name>...)`                         | Stable |
+| **Non-capturing**     | `(?:...)`                                               | Stable |
+| **Lookahead**         | `(?=...)`, `(?!...)`                                    | Stable |
+| **Lookbehind**        | `(?<=...)`, `(?<!...)`                                  | Stable |
+| **Backreferences**    | `\1`, `\2`                                              | Stable |
+| **Case-insensitive**  | `compileWithFlags(..., .{.case_insensitive = true})`    | Stable |
+| **Multiline**         | `compileWithFlags(..., .{.multiline = true})`           | Stable |
+| **Dot-all**           | `compileWithFlags(..., .{.dot_matches_newline = true})` | Stable |
+| **Escaping**          | `\\`, `\.`, `\n`, `\t`, `\r`                            | Stable |
 
 ### Advanced Features
 
-- **Hybrid Execution Engine**: Automatically selects between Thompson NFA (O(n*m)) and optimized backtracking
+- **Hybrid Execution Engine**: Automatically selects between Thompson NFA (O(n\*m)) and optimized backtracking
 - **AST Optimization**: Constant folding, dead code elimination, quantifier simplification
 - **NFA Optimization**: Epsilon transition removal, state merging, transition optimization
 - **Pattern Macros**: Composable, reusable pattern definitions
@@ -55,7 +55,7 @@ zig-regex is a regular expression engine for Zig featuring Thompson NFA construc
 ### Quality
 
 - **Zero Dependencies**: Only Zig standard library
-- **Linear Time Matching**: Thompson NFA guarantees O(n*m) worst-case
+- **Linear Time Matching**: Thompson NFA guarantees O(n\*m) worst-case
 - **Memory Safety**: Full control via Zig allocators, no hidden allocations, zero leaks
 - **500+ Tests**: Comprehensive test suite covering core features, edge cases, regressions, and stress tests
 
@@ -241,6 +241,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Acknowledgments
 
 Inspired by:
+
 - Ken Thompson's NFA construction algorithm
 - RE2 (Google's regex engine)
 - Rust's regex crate

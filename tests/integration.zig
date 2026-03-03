@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 test "integration: email validation - basic pattern" {
     const allocator = std.testing.allocator;
     // Simplified email pattern: word@word.word
-    var regex = try Regex.compile(allocator, "\\w+@\\w+\\.\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+@\\w+\\.\\w+");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("user@example.com"));
@@ -16,7 +16,7 @@ test "integration: email validation - basic pattern" {
 
 test "integration: email validation - extract from text" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\w+@\\w+\\.\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\w+@\\w+\\.\\w+");
     defer regex.deinit();
 
     const text = "Contact support@example.com for help";
@@ -33,7 +33,7 @@ test "integration: email validation - extract from text" {
 test "integration: URL extraction from text" {
     const allocator = std.testing.allocator;
     // Simplified: just match http:// or https:// followed by word.word
-    var regex = try Regex.compile(allocator, "https://\\w+\\.\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "https://\\w+\\.\\w+");
     defer regex.deinit();
 
     const text = "Visit https://example.com for more info.";
@@ -49,7 +49,7 @@ test "integration: URL extraction from text" {
 // Phone Number Tests
 test "integration: US phone number validation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^\\d{3}-\\d{3}-\\d{4}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^\\d{3}-\\d{3}-\\d{4}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("555-123-4567"));
@@ -60,7 +60,7 @@ test "integration: US phone number validation" {
 
 test "integration: extract phone numbers from text" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d{3}-\\d{3}-\\d{4}");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d{3}-\\d{3}-\\d{4}");
     defer regex.deinit();
 
     const text = "Call 555-123-4567 or 800-555-9876 for support.";
@@ -81,7 +81,7 @@ test "integration: extract phone numbers from text" {
 // Date/Time Patterns
 test "integration: ISO date format" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^\\d{4}-\\d{2}-\\d{2}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^\\d{4}-\\d{2}-\\d{2}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("2025-01-26"));
@@ -92,7 +92,7 @@ test "integration: ISO date format" {
 
 test "integration: time format HH:MM:SS" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "^\\d{2}:\\d{2}:\\d{2}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^\\d{2}:\\d{2}:\\d{2}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("14:30:45"));
@@ -106,7 +106,7 @@ test "integration: time format HH:MM:SS" {
 test "integration: extract log levels" {
     const allocator = std.testing.allocator;
     // Match INFO specifically (alternation with 4 options seems to cause overflow)
-    var regex = try Regex.compile(allocator, "INFO");
+    var regex = try Regex.compile(allocator, std.testing.io, "INFO");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("[INFO] Application started"));
@@ -115,7 +115,7 @@ test "integration: extract log levels" {
 
 test "integration: parse log timestamp and message" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
     defer regex.deinit();
 
     const log = "[2025-01-26 14:30:45] User login successful";
@@ -132,7 +132,7 @@ test "integration: parse log timestamp and message" {
 test "integration: IPv4 address matching" {
     const allocator = std.testing.allocator;
     // Simplified pattern (doesn't validate ranges)
-    var regex = try Regex.compile(allocator, "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
+    var regex = try Regex.compile(allocator, std.testing.io, "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("192.168.1.1"));
@@ -145,7 +145,7 @@ test "integration: IPv4 address matching" {
 test "integration: password strength - minimum length" {
     const allocator = std.testing.allocator;
     // Check if string has at least 8 characters (simplified - just check length differently)
-    var regex = try Regex.compile(allocator, ".{8}");
+    var regex = try Regex.compile(allocator, std.testing.io, ".{8}");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("password123")); // has 8+ chars
@@ -155,7 +155,7 @@ test "integration: password strength - minimum length" {
 
 test "integration: password contains digit" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("password1"));
@@ -167,7 +167,7 @@ test "integration: password contains digit" {
 test "integration: username alphanumeric with underscores" {
     const allocator = std.testing.allocator;
     // Simplified - removed anchors and large quantifier bound to avoid crash
-    var regex = try Regex.compile(allocator, "[a-zA-Z0-9_]{3}");
+    var regex = try Regex.compile(allocator, std.testing.io, "[a-zA-Z0-9_]{3}");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("user123"));
@@ -179,7 +179,7 @@ test "integration: username alphanumeric with underscores" {
 // Hashtag Extraction
 test "integration: extract hashtags from text" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "#\\w+");
+    var regex = try Regex.compile(allocator, std.testing.io, "#\\w+");
     defer regex.deinit();
 
     const tweet = "Loving #Zig programming! #opensource #systems";
@@ -202,7 +202,7 @@ test "integration: extract hashtags from text" {
 test "integration: match HTML tags" {
     const allocator = std.testing.allocator;
     // Match opening tags only (no closing tags with /)
-    var regex = try Regex.compile(allocator, "<[a-z]+>");
+    var regex = try Regex.compile(allocator, std.testing.io, "<[a-z]+>");
     defer regex.deinit();
 
     const html = "<div>content<span>text";
@@ -223,7 +223,7 @@ test "integration: match HTML tags" {
 // CSV Parsing
 test "integration: split CSV line" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, ",");
+    var regex = try Regex.compile(allocator, std.testing.io, ",");
     defer regex.deinit();
 
     const csv = "John,Doe,30,Engineer";
@@ -240,7 +240,7 @@ test "integration: split CSV line" {
 // Whitespace Normalization
 test "integration: replace multiple spaces with single space" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\s+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\s+");
     defer regex.deinit();
 
     const text = "This   has    too     many      spaces";
@@ -254,7 +254,7 @@ test "integration: replace multiple spaces with single space" {
 test "integration: extract markdown links" {
     const allocator = std.testing.allocator;
     // Simplified pattern - just find one link
-    var regex = try Regex.compile(allocator, "\\[\\w+\\]\\(https://\\w+\\.\\w+\\)");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\[\\w+\\]\\(https://\\w+\\.\\w+\\)");
     defer regex.deinit();
 
     const markdown = "Check [Zig](https://ziglang.org) for more info";
@@ -270,7 +270,7 @@ test "integration: extract markdown links" {
 // Version Number Extraction
 test "integration: semver version numbers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\d+\\.\\d+\\.\\d+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\d+\\.\\d+\\.\\d+");
     defer regex.deinit();
 
     const text = "Version 1.2.3 released. Upgrade from 1.0.0 required.";
@@ -291,7 +291,7 @@ test "integration: semver version numbers" {
 // Hex Color Codes
 test "integration: match hex color codes" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "#[0-9a-fA-F]{6}");
+    var regex = try Regex.compile(allocator, std.testing.io, "#[0-9a-fA-F]{6}");
     defer regex.deinit();
 
     const css = "color: #FF5733; background: #FFFFFF;";
@@ -312,7 +312,7 @@ test "integration: match hex color codes" {
 // Code Comment Extraction
 test "integration: extract single-line comments" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "//.*");
+    var regex = try Regex.compile(allocator, std.testing.io, "//.*");
     defer regex.deinit();
 
     const code = "const x = 5; // This is a comment";
@@ -328,7 +328,7 @@ test "integration: extract single-line comments" {
 // Environment Variable Format
 test "integration: match environment variables" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "\\$[A-Z_]+");
+    var regex = try Regex.compile(allocator, std.testing.io, "\\$[A-Z_]+");
     defer regex.deinit();
 
     const script = "export PATH=$HOME/bin:$PATH";

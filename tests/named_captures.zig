@@ -5,7 +5,7 @@ const Regex = @import("regex").Regex;
 
 test "named group: Python style (?P<name>...)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<word>\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<word>\\w+)");
     defer regex.deinit();
 
     if (try regex.find("hello")) |match| {
@@ -33,7 +33,7 @@ test "named group: Python style (?P<name>...)" {
 
 test "named group: .NET/Perl style (?<name>...)" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<digit>\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?<digit>\\d+)");
     defer regex.deinit();
 
     if (try regex.find("123")) |match| {
@@ -52,7 +52,7 @@ test "named group: .NET/Perl style (?<name>...)" {
 
 test "named group: multiple named groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<year>\\d{4})-(?P<month>\\d{2})-(?P<day>\\d{2})");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<year>\\d{4})-(?P<month>\\d{2})-(?P<day>\\d{2})");
     defer regex.deinit();
 
     if (try regex.find("2025-10-27")) |match| {
@@ -79,7 +79,7 @@ test "named group: multiple named groups" {
 
 test "named group: mixed with numbered groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(\\w+)@(?P<domain>\\w+\\.\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(\\w+)@(?P<domain>\\w+\\.\\w+)");
     defer regex.deinit();
 
     if (try regex.find("user@example.com")) |match| {
@@ -100,7 +100,7 @@ test "named group: mixed with numbered groups" {
 
 test "named group: non-existent name returns null" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<word>\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<word>\\w+)");
     defer regex.deinit();
 
     if (try regex.find("hello")) |match| {
@@ -119,7 +119,7 @@ test "named group: non-existent name returns null" {
 
 test "named group: with alternation" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<protocol>http|https)://(?P<host>[^/]+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<protocol>http|https)://(?P<host>[^/]+)");
     defer regex.deinit();
 
     if (try regex.find("https://example.com")) |match| {
@@ -141,7 +141,7 @@ test "named group: with alternation" {
 
 test "named group: with quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<tag><[^>]+>)(?P<content>.*)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<tag><[^>]+>)(?P<content>.*)");
     defer regex.deinit();
 
     if (try regex.find("<div>hello world</div>")) |match| {
@@ -163,7 +163,7 @@ test "named group: with quantifiers" {
 
 test "named group: nested groups" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<outer>(inner))");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<outer>(inner))");
     defer regex.deinit();
 
     if (try regex.find("inner")) |match| {
@@ -186,7 +186,7 @@ test "named group: nested groups" {
 
 test "named group: with non-capturing group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:prefix-)?(?P<name>\\w+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?:prefix-)?(?P<name>\\w+)");
     defer regex.deinit();
 
     if (try regex.find("prefix-test")) |match| {
@@ -206,7 +206,7 @@ test "named group: with non-capturing group" {
 
 test "named group: email parser example" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<user>[^@]+)@(?P<domain>[^@]+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<user>[^@]+)@(?P<domain>[^@]+)");
     defer regex.deinit();
 
     if (try regex.find("john.doe@example.com")) |match| {
@@ -228,7 +228,7 @@ test "named group: email parser example" {
 
 test "named group: IP address parser" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<a>\\d+)\\.(?P<b>\\d+)\\.(?P<c>\\d+)\\.(?P<d>\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<a>\\d+)\\.(?P<b>\\d+)\\.(?P<c>\\d+)\\.(?P<d>\\d+)");
     defer regex.deinit();
 
     if (try regex.find("192.168.1.1")) |match| {
@@ -256,7 +256,7 @@ test "named group: IP address parser" {
 
 test "named group: findAll preserves names" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?P<num>\\d+)");
+    var regex = try Regex.compile(allocator, std.testing.io, "(?P<num>\\d+)");
     defer regex.deinit();
 
     var matches = try regex.findAll(allocator, "123 456 789");
