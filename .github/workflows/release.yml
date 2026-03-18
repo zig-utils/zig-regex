@@ -73,3 +73,11 @@ jobs:
             artifacts/regex-darwin-x64
             artifacts/regex-darwin-arm64
             artifacts/regex-windows-x64.exe
+
+      - name: Publish to Pantry
+        uses: home-lang/pantry/packages/action@main
+        with:
+          publish: zig
+          install: 'false'
+        env:
+          PANTRY_TOKEN: ${{ secrets.PANTRY_TOKEN }}
