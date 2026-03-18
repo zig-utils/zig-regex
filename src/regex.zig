@@ -342,7 +342,8 @@ pub const Regex = struct {
 
                         for (result.captures) |cap| {
                             if (cap.matched) {
-                                try captures_list.append(allocator, input[cap.start..cap.end]);
+                                // Capture positions are relative to the sliced input (input[pos..])
+                                try captures_list.append(allocator, input[pos + cap.start .. pos + cap.end]);
                             } else {
                                 try captures_list.append(allocator, "");
                             }

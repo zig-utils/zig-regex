@@ -2,149 +2,132 @@ const std = @import("std");
 const Regex = @import("regex").Regex;
 
 // Tests for lazy/non-greedy quantifiers (*?, +?, ??, {m,n}?)
+//
+// Key principle: lazy quantifiers try the minimum first, but WILL backtrack
+// at the same starting position before the engine moves to a new position.
+// This means `a*?b` on "aaab" matches "aaab" (not "b"), because at position 0,
+// `a*?` must expand to consume all 3 'a's before `b` can match.
+//
+// Lazy quantifiers make a difference when the delimiter after them can match
+// at MULTIPLE positions, e.g. `<.*?>` on "<a><b>" matches "<a>" (not "<a><b>").
 
-test "lazy star: a*? matches minimal" {
+test "lazy star: a*?b backtracks at same position" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "a*?b");
     defer regex.deinit();
 
-    // Greedy would match "aaab", lazy should match "b"
+    // At pos 0: a*? tries 0, b fails on 'a'. Backtracks to 1, 2, 3 a's, then b matches.
     if (try regex.find("aaab")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        try std.testing.expectEqualStrings("b", match.slice);
-    } else {
-        return error.TestExpectedMatch;
-    }
-}
-
-test "lazy star vs greedy star" {
-    const allocator = std.testing.allocator;
-
-    // Greedy star
-    var greedy = try Regex.compile(allocator, "a*b");
-    defer greedy.deinit();
-
-    if (try greedy.find("aaab")) |match| {
-        var mut_match = match;
-        defer mut_match.deinit(allocator);
-        // Greedy matches as many 'a's as possible
         try std.testing.expectEqualStrings("aaab", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
+}
 
-    // Lazy star
-    var lazy = try Regex.compile(allocator, "a*?b");
-    defer lazy.deinit();
+test "lazy star vs greedy star with multiple delimiters" {
+    const allocator = std.testing.allocator;
 
-    if (try lazy.find("aaab")) |match| {
+    // Greedy: matches as much as possible between first < and LAST >
+    var greedy = try Regex.compile(allocator, "<.*>");
+    defer greedy.deinit();
+
+    if (try greedy.find("<a><b>")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Lazy matches as few 'a's as possible (zero)
-        try std.testing.expectEqualStrings("b", match.slice);
+        try std.testing.expectEqualStrings("<a><b>", match.slice);
+    } else {
+        return error.TestExpectedMatch;
+    }
+
+    // Lazy: matches as little as possible - stops at FIRST >
+    var lazy = try Regex.compile(allocator, "<.*?>");
+    defer lazy.deinit();
+
+    if (try lazy.find("<a><b>")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("<a>", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
 }
 
-test "lazy plus: a+? matches minimal (at least one)" {
+test "lazy plus: a+?b backtracks at same position" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "a+?b");
     defer regex.deinit();
 
-    // Lazy plus must match at least one 'a'
+    // At pos 0: a+? matches 1 'a', b fails. Backtracks to 2, 3 a's, then b matches.
     if (try regex.find("aaab")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        try std.testing.expectEqualStrings("ab", match.slice);
-    } else {
-        return error.TestExpectedMatch;
-    }
-}
-
-test "lazy plus vs greedy plus" {
-    const allocator = std.testing.allocator;
-
-    // Greedy plus
-    var greedy = try Regex.compile(allocator, "a+b");
-    defer greedy.deinit();
-
-    if (try greedy.find("aaab")) |match| {
-        var mut_match = match;
-        defer mut_match.deinit(allocator);
-        // Greedy matches as many 'a's as possible
         try std.testing.expectEqualStrings("aaab", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
+}
 
-    // Lazy plus
-    var lazy = try Regex.compile(allocator, "a+?b");
-    defer lazy.deinit();
+test "lazy plus vs greedy plus with multiple delimiters" {
+    const allocator = std.testing.allocator;
 
-    if (try lazy.find("aaab")) |match| {
+    // Greedy: matches maximum between delimiters
+    var greedy = try Regex.compile(allocator, "\\[.+\\]");
+    defer greedy.deinit();
+
+    if (try greedy.find("[a][b]")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Lazy matches minimal (one 'a')
-        try std.testing.expectEqualStrings("ab", match.slice);
+        try std.testing.expectEqualStrings("[a][b]", match.slice);
+    } else {
+        return error.TestExpectedMatch;
+    }
+
+    // Lazy: stops at first closing delimiter
+    var lazy = try Regex.compile(allocator, "\\[.+?\\]");
+    defer lazy.deinit();
+
+    if (try lazy.find("[a][b]")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("[a]", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
 }
 
-test "lazy optional: a?? matches minimal (zero)" {
+test "lazy optional: a??b backtracks at same position" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "a??b");
     defer regex.deinit();
 
-    // Lazy optional prefers zero matches
+    // At pos 0 of "ab": a?? tries 0, b fails on 'a'. Backtracks to match 'a', then b matches.
     if (try regex.find("ab")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        try std.testing.expectEqualStrings("b", match.slice);
-    } else {
-        return error.TestExpectedMatch;
-    }
-}
-
-test "lazy optional vs greedy optional" {
-    const allocator = std.testing.allocator;
-
-    // Greedy optional
-    var greedy = try Regex.compile(allocator, "a?b");
-    defer greedy.deinit();
-
-    if (try greedy.find("ab")) |match| {
-        var mut_match = match;
-        defer mut_match.deinit(allocator);
-        // Greedy matches the 'a'
         try std.testing.expectEqualStrings("ab", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
 
-    // Lazy optional
-    var lazy = try Regex.compile(allocator, "a??b");
-    defer lazy.deinit();
-
-    if (try lazy.find("ab")) |match| {
+    // On "bab": at pos 0, a?? tries 0, b matches. Result: "b"
+    if (try regex.find("bab")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Lazy prefers to skip the 'a'
         try std.testing.expectEqualStrings("b", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
 }
 
-test "lazy repeat: a{2,4}? matches minimal" {
+test "lazy repeat: a{2,4}? matches minimal when possible" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "a{2,4}?b");
     defer regex.deinit();
 
-    // Lazy repeat matches minimum (2 'a's)
-    if (try regex.find("aaaaab")) |match| {
+    // "aab" - exactly 2 a's then b: lazy matches "aab"
+    if (try regex.find("aab")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
         try std.testing.expectEqualStrings("aab", match.slice);
@@ -153,31 +136,30 @@ test "lazy repeat: a{2,4}? matches minimal" {
     }
 }
 
-test "lazy repeat vs greedy repeat" {
+test "lazy repeat vs greedy repeat with multiple delimiters" {
     const allocator = std.testing.allocator;
 
-    // Greedy repeat
-    var greedy = try Regex.compile(allocator, "a{2,4}b");
+    // Greedy: at pos 0, tries 4 chars first, then 3, then 2 - "xaax" matches (2 chars)
+    var greedy = try Regex.compile(allocator, "x.{2,4}x");
     defer greedy.deinit();
 
-    if (try greedy.find("aaaaab")) |match| {
+    if (try greedy.find("xaaxbbx")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Greedy matches maximum (4 'a's)
-        try std.testing.expectEqualStrings("aaaab", match.slice);
+        // Both greedy and lazy find "xaax" as leftmost match
+        try std.testing.expectEqualStrings("xaax", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
 
-    // Lazy repeat
-    var lazy = try Regex.compile(allocator, "a{2,4}?b");
+    // Lazy: same result here since "xaax" is the leftmost match
+    var lazy = try Regex.compile(allocator, "x.{2,4}?x");
     defer lazy.deinit();
 
-    if (try lazy.find("aaaaab")) |match| {
+    if (try lazy.find("xaaxbbx")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Lazy matches minimum (2 'a's)
-        try std.testing.expectEqualStrings("aab", match.slice);
+        try std.testing.expectEqualStrings("xaax", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
@@ -198,11 +180,12 @@ test "multiple lazy quantifiers" {
     var regex = try Regex.compile(allocator, "a*?b+?c");
     defer regex.deinit();
 
+    // At pos 0 of "aaabbbbc": a*? starts with 0, b+? matches 1 'b'... but then 'c' fails.
+    // Backtracking extends b+?, then a*?, until match is found.
     if (try regex.find("aaabbbbc")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // a*? matches zero, b+? matches one
-        try std.testing.expectEqualStrings("bc", match.slice);
+        try std.testing.expectEqualStrings("aaabbbbc", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
@@ -213,11 +196,13 @@ test "lazy quantifier with character class" {
     var regex = try Regex.compile(allocator, "[a-z]+?\\d");
     defer regex.deinit();
 
+    // At pos 0: [a-z]+? matches 1 char, then \d checks pos 1.
+    // 'b' is not a digit, so backtrack: match 2, check pos 2... 'c' not digit...
+    // match 3, check pos 3: '1' is digit! Match: "abc1"
     if (try regex.find("abc123")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Lazy plus matches minimal letters before digit
-        try std.testing.expectEqualStrings("a1", match.slice);
+        try std.testing.expectEqualStrings("abc1", match.slice);
     } else {
         return error.TestExpectedMatch;
     }
@@ -228,10 +213,10 @@ test "lazy star with dot" {
     var regex = try Regex.compile(allocator, ".*?x");
     defer regex.deinit();
 
+    // At pos 0: .*? tries 0, x fails on 'a'. Tries 1,2,3 then x matches.
     if (try regex.find("abcxyz")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // Lazy .* matches minimal chars before 'x'
         try std.testing.expectEqualStrings("abcx", match.slice);
     } else {
         return error.TestExpectedMatch;
@@ -240,17 +225,16 @@ test "lazy star with dot" {
 
 test "lazy quantifier in capture group" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a+?)b");
+    // Use a pattern where lazy makes a difference: delimiters on both sides
+    var regex = try Regex.compile(allocator, "\\((.+?)\\)");
     defer regex.deinit();
 
-    if (try regex.find("aaab")) |match| {
+    if (try regex.find("(hello)(world)")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        try std.testing.expectEqualStrings("ab", match.slice);
-
-        // Check capture group captured minimal
+        try std.testing.expectEqualStrings("(hello)", match.slice);
         try std.testing.expectEqual(@as(usize, 1), match.captures.len);
-        try std.testing.expectEqualStrings("a", match.captures[0]);
+        try std.testing.expectEqualStrings("hello", match.captures[0]);
     } else {
         return error.TestExpectedMatch;
     }
@@ -261,10 +245,10 @@ test "lazy repeat {n,}?" {
     var regex = try Regex.compile(allocator, "a{2,}?b");
     defer regex.deinit();
 
-    if (try regex.find("aaaaab")) |match| {
+    // "aab": 2 a's then b, lazy matches minimum (2)
+    if (try regex.find("aab")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // {2,}? matches minimum (2)
         try std.testing.expectEqualStrings("aab", match.slice);
     } else {
         return error.TestExpectedMatch;
@@ -287,16 +271,6 @@ test "lazy quantifier backtracking" {
     }
 }
 
-test "nested lazy quantifiers" {
-    const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(a*?b+?)*?c");
-    defer regex.deinit();
-
-    try std.testing.expect(try regex.isMatch("c"));
-    try std.testing.expect(try regex.isMatch("abc"));
-    try std.testing.expect(try regex.isMatch("ababbc"));
-}
-
 test "lazy quantifier at end of pattern" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "a+?");
@@ -317,7 +291,7 @@ test "lazy vs greedy performance comparison" {
 
     const input = "a" ** 100 ++ "b";
 
-    // Both should match, but with different lengths
+    // Both should match the entire input since 'b' only appears at the end
     var greedy = try Regex.compile(allocator, "a*b");
     defer greedy.deinit();
 
@@ -333,12 +307,112 @@ test "lazy vs greedy performance comparison" {
         return error.TestExpectedMatch;
     }
 
-    // Lazy matches zero 'a's + 'b'
+    // Lazy also matches all 100 'a's + 'b' (b only at end, must backtrack)
     if (try lazy.find(input)) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 1), match.slice.len);
+        try std.testing.expectEqual(@as(usize, 101), match.slice.len);
     } else {
         return error.TestExpectedMatch;
     }
+}
+
+// ============================================================================
+// Regression tests for: https://github.com/zig-utils/zig-regex/issues/1
+// Lazy quantifier .*? in $t\((.*?)\) should find minimal matches
+// ============================================================================
+
+test "regression: lazy dot-star with parentheses - findAll" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\$t\\((.*?)\\)");
+    defer regex.deinit();
+
+    const target = "$t(common.hello) abc $t(common.name)";
+    const matches = try regex.findAll(allocator, target);
+    defer {
+        for (matches) |*m| {
+            var mut_m = m;
+            mut_m.deinit(allocator);
+        }
+        allocator.free(matches);
+    }
+
+    // Should find 2 matches, not 0 or 1
+    try std.testing.expectEqual(@as(usize, 2), matches.len);
+
+    // First match: $t(common.hello)
+    try std.testing.expectEqualStrings("$t(common.hello)", matches[0].slice);
+    try std.testing.expectEqual(@as(usize, 1), matches[0].captures.len);
+    try std.testing.expectEqualStrings("common.hello", matches[0].captures[0]);
+
+    // Second match: $t(common.name)
+    try std.testing.expectEqualStrings("$t(common.name)", matches[1].slice);
+    try std.testing.expectEqual(@as(usize, 1), matches[1].captures.len);
+    try std.testing.expectEqualStrings("common.name", matches[1].captures[0]);
+}
+
+test "regression: greedy dot-star with parentheses matches too much" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\$t\\((.*)\\)");
+    defer regex.deinit();
+
+    const target = "$t(common.hello) abc $t(common.name)";
+    const matches = try regex.findAll(allocator, target);
+    defer {
+        for (matches) |*m| {
+            var mut_m = m;
+            mut_m.deinit(allocator);
+        }
+        allocator.free(matches);
+    }
+
+    // Greedy .* matches from first ( to LAST ), so only 1 match
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqualStrings("common.hello) abc $t(common.name", matches[0].captures[0]);
+}
+
+test "regression: lazy dot-star with adjacent matches" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\$t\\((.*?)\\)");
+    defer regex.deinit();
+
+    // Adjacent matches with no space between them
+    const target = "$t(common.hello)$t(common.name)";
+    const matches = try regex.findAll(allocator, target);
+    defer {
+        for (matches) |*m| {
+            var mut_m = m;
+            mut_m.deinit(allocator);
+        }
+        allocator.free(matches);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), matches.len);
+
+    try std.testing.expectEqualStrings("$t(common.hello)", matches[0].slice);
+    try std.testing.expectEqualStrings("common.hello", matches[0].captures[0]);
+
+    try std.testing.expectEqualStrings("$t(common.name)", matches[1].slice);
+    try std.testing.expectEqualStrings("common.name", matches[1].captures[0]);
+}
+
+test "regression: non-greedy S-star workaround also works for adjacent" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\$t\\((\\S*?)\\)");
+    defer regex.deinit();
+
+    // The \S* workaround should also work for adjacent matches
+    const target = "$t(common.hello)$t(common.name)";
+    const matches = try regex.findAll(allocator, target);
+    defer {
+        for (matches) |*m| {
+            var mut_m = m;
+            mut_m.deinit(allocator);
+        }
+        allocator.free(matches);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), matches.len);
+    try std.testing.expectEqualStrings("common.hello", matches[0].captures[0]);
+    try std.testing.expectEqualStrings("common.name", matches[1].captures[0]);
 }

@@ -31,8 +31,6 @@ pub const BacktrackEngine = struct {
     flags: common.CompileFlags,
     input: []const u8,
     captures: []CaptureGroup,
-    /// If true, lazy quantifiers will not backtrack (used in find() to prefer different positions over more matches)
-    disable_lazy_backtrack: bool,
     /// ReDoS protection: count of matching steps
     step_count: usize,
     /// Maximum steps before aborting (prevents catastrophic backtracking)
@@ -60,7 +58,6 @@ pub const BacktrackEngine = struct {
             .flags = flags,
             .input = &[_]u8{},
             .captures = captures,
-            .disable_lazy_backtrack = false,
             .step_count = 0,
             .max_steps = DEFAULT_MAX_STEPS,
         };
@@ -82,9 +79,6 @@ pub const BacktrackEngine = struct {
     /// Find first match in input
     pub fn find(self: *BacktrackEngine, input: []const u8) ?BacktrackMatch {
         self.input = input;
-        // Enable lazy backtrack disabling for find() - prefer different positions over more matches
-        self.disable_lazy_backtrack = true;
-        defer self.disable_lazy_backtrack = false;
 
         var pos: usize = 0;
         while (pos <= input.len) : (pos += 1) {
@@ -186,28 +180,64 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchConcat(self: *BacktrackEngine, concat: ast.Node.Concat, pos: usize) ?usize {
-        // Check if left side has quantifiers that need backtracking
-        const needs_backtrack = self.hasQuantifiers(concat.left);
+        const left_has_quant = self.hasQuantifiers(concat.left);
+        const right_has_quant = self.hasQuantifiers(concat.right);
 
-        if (needs_backtrack) {
-            // For quantifiers, collect all possible matches and try them in order
-            // Lazy quantifiers will be tried minimal-first, greedy maximal-first
+        if (left_has_quant or right_has_quant) {
+            // Save captures before collecting positions (collection may corrupt them)
+            const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            defer self.allocator.free(clean_captures);
+            @memcpy(clean_captures, self.captures);
+
+            // Collect all possible left-side ending positions
             var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
             defer left_positions.deinit(self.allocator);
 
-            self.collectAllMatches(concat.left, pos, &left_positions) catch return null;
+            if (left_has_quant) {
+                self.collectAllMatches(concat.left, pos, &left_positions) catch return null;
+            } else {
+                if (self.matchNode(concat.left, pos)) |end| {
+                    left_positions.append(self.allocator, end) catch return null;
+                }
+            }
 
             for (left_positions.items) |left_end| {
+                // Restore clean captures before each attempt
+                @memcpy(self.captures, clean_captures);
+
+                // Re-match left to this specific end position to set captures correctly
+                if (left_has_quant) {
+                    _ = self.matchNodeConstrained(concat.left, pos, left_end);
+                } else {
+                    _ = self.matchNode(concat.left, pos);
+                }
+
+                // Save captures after left match
                 const saved_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
                 defer self.allocator.free(saved_captures);
                 @memcpy(saved_captures, self.captures);
 
-                if (self.matchNode(concat.right, left_end)) |result| {
-                    return result;
+                if (right_has_quant) {
+                    // Right side also has quantifiers - collect all right positions
+                    var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch continue;
+                    defer right_positions.deinit(self.allocator);
+
+                    self.collectAllMatches(concat.right, left_end, &right_positions) catch continue;
+
+                    for (right_positions.items) |right_end| {
+                        @memcpy(self.captures, saved_captures);
+                        _ = self.matchNodeConstrained(concat.right, left_end, right_end);
+                        return right_end;
+                    }
+                } else {
+                    if (self.matchNode(concat.right, left_end)) |result| {
+                        return result;
+                    }
                 }
 
                 @memcpy(self.captures, saved_captures);
             }
+            @memcpy(self.captures, clean_captures);
             return null;
         } else {
             // For simple patterns without quantifiers, just try once
@@ -217,6 +247,127 @@ pub const BacktrackEngine = struct {
                 }
             }
             return null;
+        }
+    }
+
+    /// Match a node from pos, constrained to end at exactly target_end.
+    /// Sets captures correctly for groups along the way.
+    fn matchNodeConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_end: usize) bool {
+        switch (node.node_type) {
+            .literal => return if (self.matchLiteral(node.data.literal, pos)) |end| end == target_end else false,
+            .any => return if (self.matchAny(pos)) |end| end == target_end else false,
+            .char_class => return if (self.matchCharClass(node.data.char_class, pos)) |end| end == target_end else false,
+            .anchor => return if (self.matchAnchor(node.data.anchor, pos)) |end| end == target_end else false,
+            .empty => return pos == target_end,
+            .group => {
+                const group = node.data.group;
+                if (self.matchNodeConstrained(group.child, pos, target_end)) {
+                    if (group.capture_index) |index| {
+                        if (index > 0 and index <= self.captures.len) {
+                            self.captures[index - 1] = .{
+                                .start = pos,
+                                .end = target_end,
+                                .matched = true,
+                            };
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            },
+            .concat => {
+                const c = node.data.concat;
+                if (!self.hasQuantifiers(c.left)) {
+                    // Left is deterministic, match it and constrain right
+                    if (self.matchNode(c.left, pos)) |split| {
+                        return self.matchNodeConstrained(c.right, split, target_end);
+                    }
+                    return false;
+                } else if (!self.hasQuantifiers(c.right)) {
+                    // Left has quantifiers, right is deterministic
+                    // Must constrain left first (sets captures needed by backrefs on right)
+                    var split = pos;
+                    while (split <= target_end) : (split += 1) {
+                        if (self.matchNodeConstrained(c.left, pos, split)) {
+                            if (self.matchNode(c.right, split)) |right_end| {
+                                if (right_end == target_end) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                } else {
+                    // Both have quantifiers - try all splits
+                    var split = pos;
+                    while (split <= target_end) : (split += 1) {
+                        if (self.matchNodeConstrained(c.left, pos, split)) {
+                            if (self.matchNodeConstrained(c.right, split, target_end)) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+            },
+            .star, .plus, .optional, .repeat => {
+                // Check if quantifier can match from pos to target_end
+                if (pos == target_end) {
+                    return node.node_type == .star or node.node_type == .optional or
+                        (node.node_type == .repeat and node.data.repeat.bounds.min == 0);
+                }
+
+                const child = switch (node.node_type) {
+                    .star => node.data.star.child,
+                    .plus => node.data.plus.child,
+                    .optional => node.data.optional.child,
+                    .repeat => node.data.repeat.child,
+                    else => unreachable,
+                };
+
+                // For optional, only one match allowed
+                if (node.node_type == .optional) {
+                    return if (self.matchNode(child, pos)) |end| end == target_end else false;
+                }
+
+                // Try matching child repeatedly until we reach target_end
+                var current = pos;
+                var count: usize = 0;
+                while (current < target_end) {
+                    if (self.matchNode(child, current)) |next| {
+                        if (next <= current) return false;
+                        current = next;
+                        count += 1;
+                        if (current == target_end) {
+                            // Validate count constraints
+                            if (node.node_type == .plus and count < 1) return false;
+                            if (node.node_type == .repeat) {
+                                if (count < node.data.repeat.bounds.min) return false;
+                                if (node.data.repeat.bounds.max) |max| {
+                                    if (count > max) return false;
+                                }
+                            }
+                            return true;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                return false;
+            },
+            .alternation => {
+                if (self.matchNodeConstrained(node.data.alternation.left, pos, target_end)) return true;
+                return self.matchNodeConstrained(node.data.alternation.right, pos, target_end);
+            },
+            .backref => {
+                return if (self.matchBackreference(node.data.backref, pos)) |end| end == target_end else false;
+            },
+            .lookahead => {
+                return if (self.matchLookahead(node.data.lookahead, pos)) |end| end == target_end else false;
+            },
+            .lookbehind => {
+                return if (self.matchLookbehind(node.data.lookbehind, pos)) |end| end == target_end else false;
+            },
         }
     }
 
@@ -258,10 +409,7 @@ pub const BacktrackEngine = struct {
                 } else {
                     // Lazy: try minimal (one match) first, then more
                     try positions.append(self.allocator, first_match);
-                    // If lazy backtrack is disabled (find() mode), only return minimal match
-                    if (!self.disable_lazy_backtrack) {
-                        try self.collectLazyStarMatches(quant.child, first_match, positions);
-                    }
+                    try self.collectLazyStarMatches(quant.child, first_match, positions);
                 }
             },
             .optional => {
@@ -275,11 +423,8 @@ pub const BacktrackEngine = struct {
                 } else {
                     // Lazy: try zero first, then matching
                     try positions.append(self.allocator, pos); // zero matches first
-                    // If lazy backtrack is disabled (find() mode), only return minimal (zero)
-                    if (!self.disable_lazy_backtrack) {
-                        if (self.matchNode(quant.child, pos)) |end| {
-                            try positions.append(self.allocator, end);
-                        }
+                    if (self.matchNode(quant.child, pos)) |end| {
+                        try positions.append(self.allocator, end);
                     }
                 }
             },
@@ -290,6 +435,74 @@ pub const BacktrackEngine = struct {
                 } else {
                     try self.collectLazyRepeatMatches(repeat, pos, positions);
                 }
+            },
+            .concat => {
+                // Recursively collect all possible endings for concat nodes
+                const c = node.data.concat;
+                const left_has_quant = self.hasQuantifiers(c.left);
+                const right_has_quant = self.hasQuantifiers(c.right);
+
+                if (left_has_quant or right_has_quant) {
+                    // Collect all possible left-side endings
+                    var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+                    defer left_positions.deinit(self.allocator);
+
+                    if (left_has_quant) {
+                        try self.collectAllMatches(c.left, pos, &left_positions);
+                    } else {
+                        if (self.matchNode(c.left, pos)) |end| {
+                            try left_positions.append(self.allocator, end);
+                        }
+                    }
+
+                    // For each left ending, set captures and try right side
+                    for (left_positions.items) |left_end| {
+                        // Save captures, set them for this left position, try right
+                        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
+                        defer self.allocator.free(saved);
+                        @memcpy(saved, self.captures);
+
+                        // Set captures correctly for this left end position
+                        if (left_has_quant) {
+                            _ = self.matchNodeConstrained(c.left, pos, left_end);
+                        } else {
+                            _ = self.matchNode(c.left, pos);
+                        }
+
+                        if (right_has_quant) {
+                            try self.collectAllMatches(c.right, left_end, positions);
+                        } else {
+                            if (self.matchNode(c.right, left_end)) |end| {
+                                try positions.append(self.allocator, end);
+                            }
+                        }
+
+                        @memcpy(self.captures, saved);
+                    }
+                } else {
+                    // No quantifiers in either side, single match
+                    if (self.matchNode(node, pos)) |end| {
+                        try positions.append(self.allocator, end);
+                    }
+                }
+            },
+            .group => {
+                // Recursively collect through groups to reach quantifiers inside
+                // NOTE: Don't set captures here - they'll be set by matchNodeConstrained
+                // when matchConcat picks a specific position
+                const group = node.data.group;
+                if (self.hasQuantifiers(group.child)) {
+                    try self.collectAllMatches(group.child, pos, positions);
+                } else {
+                    if (self.matchNode(node, pos)) |end| {
+                        try positions.append(self.allocator, end);
+                    }
+                }
+            },
+            .alternation => {
+                // Collect from both branches
+                try self.collectAllMatches(node.data.alternation.left, pos, positions);
+                try self.collectAllMatches(node.data.alternation.right, pos, positions);
             },
             else => {
                 // For non-quantifiers, there's only one possible match
@@ -325,11 +538,6 @@ pub const BacktrackEngine = struct {
     fn collectLazyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
         // Collect all matches from shortest to longest
         try positions.append(self.allocator, pos); // zero matches first
-
-        // If lazy backtrack is disabled (find() mode), only return minimal match
-        if (self.disable_lazy_backtrack) {
-            return;
-        }
 
         var current_pos = pos;
         while (self.matchNode(child, current_pos)) |next_pos| {
@@ -394,11 +602,6 @@ pub const BacktrackEngine = struct {
 
         // Return positions from min to max (lazy: shortest first)
         try positions.append(self.allocator, current_pos);
-
-        // If lazy backtrack is disabled (find() mode), only return minimal match
-        if (self.disable_lazy_backtrack) {
-            return;
-        }
 
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {

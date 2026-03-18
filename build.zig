@@ -312,9 +312,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_string_anchors_tests.step);
     test_step.dependOn(&run_multiline_dotall_tests.step);
     test_step.dependOn(&run_named_captures_tests.step);
-    // Temporarily disabled - lazy quantifiers need backtracking engine
-    // test_step.dependOn(&run_lazy_quantifiers_tests.step);
-    _ = run_lazy_quantifiers_tests;
+    test_step.dependOn(&run_lazy_quantifiers_tests.step);
     // Temporarily disabled - fuzz tests need refinement
     // test_step.dependOn(&run_fuzz_tests.step);
 
