@@ -1,0 +1,9 @@
+{
+  "name": "zig-regex",
+  "version": "0.1.0",
+  "scripts": {
+    "release": "pantry release patch --yes",
+    "release:minor": "pantry release minor --yes",
+    "release:major": "pantry release major --yes"
+  }
+}
