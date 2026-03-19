@@ -1,5 +1,5 @@
 .{
-    .name = .@"zig-regex",
+    .name = .zig_regex,
     .version = "0.1.1",
     .fingerprint = 0x4204f8ca194fd46e,
     .minimum_zig_version = "0.16.0",
