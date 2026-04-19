@@ -3,11 +3,7 @@ const Regex = @import("regex").Regex;
 const SharedRegex = @import("regex").SharedRegex;
 const RegexCache = @import("regex").RegexCache;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("\n=== Regex Thread Safety Examples ===\n\n", .{});
 
     // Example 1: Basic concurrent matching
@@ -17,7 +13,7 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         // Compile once
-        var regex = try Regex.compile(allocator, "\\d+");
+        var regex = try Regex.compile(init.gpa, "\\d+");
         defer regex.deinit();
 
         const Worker = struct {
@@ -63,7 +59,7 @@ pub fn main() !void {
         std.debug.print("Example 2: SharedRegex with reference counting\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var shared = try SharedRegex.init(allocator, "test");
+        var shared = try SharedRegex.init(init.gpa, "test");
         defer shared.deinit();
 
         const Worker = struct {
@@ -128,7 +124,7 @@ pub fn main() !void {
         var threads: [thread_count]std.Thread = undefined;
 
         for (&threads, 0..) |*thread, i| {
-            thread.* = try std.Thread.spawn(.{}, Worker.run, .{ allocator, i });
+            thread.* = try std.Thread.spawn(.{}, Worker.run, .{ init.gpa, i });
         }
 
         for (threads) |thread| {
@@ -144,12 +140,12 @@ pub fn main() !void {
         std.debug.print("Example 4: Performance with concurrent matching\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var regex = try Regex.compile(allocator, "test");
+        var regex = try Regex.compile(init.gpa, "test");
         defer regex.deinit();
 
         const Worker = struct {
-            fn run(r: *const Regex) usize {
-                var timer = std.time.Timer.start() catch return 0;
+            fn run(r: *const Regex, io: std.Io) i64 {
+                const start = std.Io.Timestamp.now(io, .real);
 
                 var count: usize = 0;
                 var i: usize = 0;
@@ -159,37 +155,40 @@ pub fn main() !void {
                     } else |_| {}
                 }
 
-                const elapsed_ms = timer.read() / 1_000_000;
-                return elapsed_ms;
+                const end = std.Io.Timestamp.now(io, .real);
+                const elapsed = start.durationTo(end);
+                return elapsed.toMilliseconds();
             }
         };
 
         // Sequential baseline
-        const sequential_time = Worker.run(&regex);
+        const sequential_time = Worker.run(&regex, init.io);
         std.debug.print("Sequential: 10,000 matches in {d}ms\n", .{sequential_time});
 
         // Parallel execution
         const thread_count = 4;
         var threads: [thread_count]std.Thread = undefined;
-        var times: [thread_count]usize = undefined;
+        var times: [thread_count]i64 = undefined;
 
         const ParallelWorker = struct {
-            fn run(r: *const Regex, time_ptr: *usize) void {
-                time_ptr.* = Worker.run(r);
+            fn run(r: *const Regex, io: std.Io, time_ptr: *i64) void {
+                time_ptr.* = Worker.run(r, io);
             }
         };
 
-        var parallel_timer = try std.time.Timer.start();
+        // TODO: there is probably a better/correct-er way to do this with io
+        const start = std.Io.Timestamp.now(init.io, .real);
 
         for (&threads, 0..) |*thread, i| {
-            thread.* = try std.Thread.spawn(.{}, ParallelWorker.run, .{ &regex, &times[i] });
+            thread.* = try std.Thread.spawn(.{}, ParallelWorker.run, .{ &regex, init.io, &times[i] });
         }
 
         for (threads) |thread| {
             thread.join();
         }
 
-        const total_parallel = parallel_timer.read() / 1_000_000;
+        const end = std.Io.Timestamp.now(init.io, .real);
+        const total_parallel = start.durationTo(end).toMilliseconds();
 
         std.debug.print("Parallel ({d} threads): 40,000 matches in {d}ms\n", .{ thread_count, total_parallel });
         std.debug.print("Individual thread times: ", .{});
@@ -206,13 +205,13 @@ pub fn main() !void {
         std.debug.print("Example 5: Multiple patterns with concurrent access\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var email_regex = try Regex.compile(allocator, "[a-z]+@[a-z]+\\.[a-z]+");
+        var email_regex = try Regex.compile(init.gpa, "[a-z]+@[a-z]+\\.[a-z]+");
         defer email_regex.deinit();
 
-        var phone_regex = try Regex.compile(allocator, "\\d{3}-\\d{4}");
+        var phone_regex = try Regex.compile(init.gpa, "\\d{3}-\\d{4}");
         defer phone_regex.deinit();
 
-        var url_regex = try Regex.compile(allocator, "https?://");
+        var url_regex = try Regex.compile(init.gpa, "https?://");
         defer url_regex.deinit();
 
         const Worker = struct {
