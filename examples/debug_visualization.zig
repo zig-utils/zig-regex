@@ -4,11 +4,7 @@ const debug = @import("regex").debug;
 const Parser = @import("regex").parser.Parser;
 const Optimizer = @import("regex").optimizer.Optimizer;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("\n=== Regex Debugging and Analysis Examples ===\n\n", .{});
 
     const patterns = [_][]const u8{
@@ -25,7 +21,7 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         // Example 1: Show optimization info
-        var regex = Regex.compile(allocator, pattern) catch |err| {
+        var regex = Regex.compile(init.gpa, pattern) catch |err| {
             std.debug.print("  ❌ Compilation error: {}\n\n", .{err});
             continue;
         };
@@ -54,15 +50,15 @@ pub fn main() !void {
 
         // Example 2: Pattern analysis
         {
-            var parser = Parser.init(allocator, pattern) catch continue;
+            var parser = Parser.init(init.gpa, pattern) catch continue;
             var tree = parser.parse() catch continue;
             defer tree.deinit();
 
-            var opt = Optimizer.init(allocator);
+            var opt = Optimizer.init(init.gpa);
             var opt_info = try opt.analyze(tree.root);
-            defer opt_info.deinit(allocator);
+            defer opt_info.deinit(init.gpa);
 
-            var analyzer = debug.PatternAnalyzer.init(allocator);
+            var analyzer = debug.PatternAnalyzer.init(init.gpa);
             var analysis = try analyzer.analyze(pattern, &tree, &opt_info);
             defer analysis.deinit();
 
@@ -88,7 +84,7 @@ pub fn main() !void {
     std.debug.print("───────────────────────────────────────────────\n", .{});
 
     const test_pattern = "hello.*world";
-    var test_regex = try Regex.compile(allocator, test_pattern);
+    var test_regex = try Regex.compile(init.gpa, test_pattern);
     defer test_regex.deinit();
 
     const test_inputs = [_][]const u8{
