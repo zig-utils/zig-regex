@@ -1,17 +1,13 @@
 const std = @import("std");
 const Regex = @import("regex").Regex;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("\n=== Zig Regex Examples ===\n\n", .{});
 
     // Example 1: Simple literal matching
     {
         std.debug.print("Example 1: Literal matching\n", .{});
-        var regex = try Regex.compile(allocator, "hello");
+        var regex = try Regex.compile(init.gpa, "hello");
         defer regex.deinit();
 
         const matches = try regex.isMatch("hello");
@@ -22,7 +18,7 @@ pub fn main() !void {
     // Example 2: Alternation
     {
         std.debug.print("Example 2: Alternation (cat|dog)\n", .{});
-        var regex = try Regex.compile(allocator, "cat|dog");
+        var regex = try Regex.compile(init.gpa, "cat|dog");
         defer regex.deinit();
 
         std.debug.print("  'cat' matches: {}\n", .{try regex.isMatch("cat")});
@@ -34,7 +30,7 @@ pub fn main() !void {
     // Example 3: Star quantifier
     {
         std.debug.print("Example 3: Star quantifier (a*)\n", .{});
-        var regex = try Regex.compile(allocator, "a*");
+        var regex = try Regex.compile(init.gpa, "a*");
         defer regex.deinit();
 
         std.debug.print("  '' matches: {}\n", .{try regex.isMatch("")});
@@ -46,12 +42,12 @@ pub fn main() !void {
     // Example 4: Finding matches
     {
         std.debug.print("Example 4: Finding matches\n", .{});
-        var regex = try Regex.compile(allocator, "world");
+        var regex = try Regex.compile(init.gpa, "world");
         defer regex.deinit();
 
         if (try regex.find("hello world")) |match_result| {
             var mut_match = match_result;
-            defer mut_match.deinit(allocator);
+            defer mut_match.deinit(init.gpa);
             std.debug.print("  Found '{s}' at position {d}-{d}\n", .{ match_result.slice, match_result.start, match_result.end });
         }
         std.debug.print("\n", .{});
@@ -60,11 +56,11 @@ pub fn main() !void {
     // Example 5: Replace
     {
         std.debug.print("Example 5: Replace\n", .{});
-        var regex = try Regex.compile(allocator, "world");
+        var regex = try Regex.compile(init.gpa, "world");
         defer regex.deinit();
 
-        const result = try regex.replace(allocator, "hello world", "Zig");
-        defer allocator.free(result);
+        const result = try regex.replace(init.gpa, "hello world", "Zig");
+        defer init.gpa.free(result);
 
         std.debug.print("  Replaced: '{s}'\n", .{result});
         std.debug.print("\n", .{});

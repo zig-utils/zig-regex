@@ -6,11 +6,7 @@ const Composer = @import("regex").Composer;
 const Lint = @import("regex").Lint;
 const ComplexityAnalyzer = @import("regex").ComplexityAnalyzer;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     std.debug.print("\n=== Advanced Regex Features Examples ===\n\n", .{});
 
     // Example 1: Builder API - Type-safe pattern construction
@@ -19,7 +15,7 @@ pub fn main() !void {
         std.debug.print("Example 1: Builder API for Type-Safe Construction\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var builder = Builder.init(allocator);
+        var builder = Builder.init(init.gpa);
         defer builder.deinit();
 
         // Build a pattern for email validation
@@ -35,11 +31,11 @@ pub fn main() !void {
         _ = try builder.endOfLine();
 
         const pattern = try builder.build();
-        defer allocator.free(pattern);
+        defer init.gpa.free(pattern);
 
         std.debug.print("Built pattern: {s}\n", .{pattern});
 
-        var regex = try Regex.compile(allocator, pattern);
+        var regex = try Regex.compile(init.gpa, pattern);
         defer regex.deinit();
 
         const test_emails = [_][]const u8{
@@ -64,21 +60,21 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         // Use predefined patterns
-        const email_pattern = try Patterns.email(allocator);
-        defer allocator.free(email_pattern);
+        const email_pattern = try Patterns.email(init.gpa);
+        defer init.gpa.free(email_pattern);
 
-        const url_pattern = try Patterns.url(allocator);
-        defer allocator.free(url_pattern);
+        const url_pattern = try Patterns.url(init.gpa);
+        defer init.gpa.free(url_pattern);
 
-        const phone_pattern = try Patterns.phoneUS(allocator);
-        defer allocator.free(phone_pattern);
+        const phone_pattern = try Patterns.phoneUS(init.gpa);
+        defer init.gpa.free(phone_pattern);
 
         std.debug.print("Email pattern: {s}\n", .{email_pattern});
         std.debug.print("URL pattern: {s}\n", .{url_pattern});
         std.debug.print("Phone pattern: {s}\n\n", .{phone_pattern});
 
         // Test phone number pattern
-        var phone_regex = try Regex.compile(allocator, phone_pattern);
+        var phone_regex = try Regex.compile(init.gpa, phone_pattern);
         defer phone_regex.deinit();
 
         const test_phones = [_][]const u8{
@@ -103,7 +99,7 @@ pub fn main() !void {
         std.debug.print("Example 3: Pattern Composition\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var composer = Composer.init(allocator);
+        var composer = Composer.init(init.gpa);
         defer composer.deinit();
 
         // Compose multiple patterns with OR
@@ -112,11 +108,11 @@ pub fn main() !void {
         _ = try composer.add("bird");
 
         const alternatives = try composer.alternatives();
-        defer allocator.free(alternatives);
+        defer init.gpa.free(alternatives);
 
         std.debug.print("Composed pattern (OR): {s}\n", .{alternatives});
 
-        var regex = try Regex.compile(allocator, alternatives);
+        var regex = try Regex.compile(init.gpa, alternatives);
         defer regex.deinit();
 
         const test_strings = [_][]const u8{
@@ -145,7 +141,7 @@ pub fn main() !void {
         const problematic_pattern = "(a+)+b";
         std.debug.print("Analyzing pattern: \"{s}\"\n\n", .{problematic_pattern});
 
-        var lint = Lint.init(allocator, problematic_pattern);
+        var lint = Lint.init(init.gpa, problematic_pattern);
         defer lint.deinit();
 
         try lint.analyze();
@@ -157,7 +153,7 @@ pub fn main() !void {
         const good_pattern = "^[a-z]+$";
         std.debug.print("Analyzing pattern: \"{s}\"\n\n", .{good_pattern});
 
-        var lint2 = Lint.init(allocator, good_pattern);
+        var lint2 = Lint.init(init.gpa, good_pattern);
         defer lint2.deinit();
 
         try lint2.analyze();
@@ -198,7 +194,7 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         // Build a complex pattern using the builder
-        var builder = Builder.init(allocator);
+        var builder = Builder.init(init.gpa);
         defer builder.deinit();
 
         std.debug.print("Building a URL validator:\n", .{});
@@ -215,13 +211,13 @@ pub fn main() !void {
         _ = try builder.endOfLine();
 
         const url_pattern_built = try builder.build();
-        defer allocator.free(url_pattern_built);
+        defer init.gpa.free(url_pattern_built);
 
         std.debug.print("Built pattern: {s}\n\n", .{url_pattern_built});
 
         // Lint the pattern
         std.debug.print("Linting the pattern:\n", .{});
-        var lint = Lint.init(allocator, url_pattern_built);
+        var lint = Lint.init(init.gpa, url_pattern_built);
         defer lint.deinit();
 
         try lint.analyze();
@@ -232,7 +228,7 @@ pub fn main() !void {
         std.debug.print("Complexity: {s} (score: {d})\n\n", .{ @tagName(complexity.getLevel()), complexity.complexity_score });
 
         // Test the pattern
-        var regex = try Regex.compile(allocator, url_pattern_built);
+        var regex = try Regex.compile(init.gpa, url_pattern_built);
         defer regex.deinit();
 
         const test_urls = [_][]const u8{
@@ -257,7 +253,7 @@ pub fn main() !void {
         std.debug.print("Example 7: Complex Pattern with Builder\n", .{});
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
-        var builder = Builder.init(allocator);
+        var builder = Builder.init(init.gpa);
         defer builder.deinit();
 
         // Build a pattern for matching IPv4 addresses
@@ -301,11 +297,11 @@ pub fn main() !void {
         _ = try builder.endOfLine();
 
         const ipv4_pattern = try builder.build();
-        defer allocator.free(ipv4_pattern);
+        defer init.gpa.free(ipv4_pattern);
 
         std.debug.print("Built pattern: {s}\n\n", .{ipv4_pattern});
 
-        var regex = try Regex.compile(allocator, ipv4_pattern);
+        var regex = try Regex.compile(init.gpa, ipv4_pattern);
         defer regex.deinit();
 
         const test_ips = [_][]const u8{
