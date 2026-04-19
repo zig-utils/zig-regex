@@ -192,13 +192,13 @@ test "profiler basic operations" {
     const io = std.testing.io;
     var profiler = Profiler.init(allocator, io, true);
 
-    profiler.startCompilation();
+    profiler.startCompilation(io);
     // Do some work (just loop to consume time)
     var i: usize = 0;
     while (i < 1000) : (i += 1) {
         _ = i * i;
     }
-    profiler.endCompilation();
+    profiler.endCompilation(io);
 
     profiler.recordStateCreation(5);
     profiler.recordBacktrack();
@@ -216,8 +216,8 @@ test "scoped timer" {
     var profiler = Profiler.init(allocator, io, true);
 
     {
-        var timer = ScopedTimer.init(&profiler, .match);
-        defer timer.deinit();
+        var timer = ScopedTimer.init(&profiler, io, .match);
+        defer timer.deinit(io);
         // Do some work
         var i: usize = 0;
         while (i < 1000) : (i += 1) {
