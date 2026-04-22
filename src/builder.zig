@@ -29,7 +29,7 @@ pub const Builder = struct {
     pub fn init(allocator: std.mem.Allocator) Builder {
         return .{
             .allocator = allocator,
-            .parts = std.ArrayList([]const u8){},
+            .parts = std.ArrayList([]const u8).empty,
         };
     }
 
@@ -304,7 +304,7 @@ pub const Composer = struct {
     pub fn init(allocator: std.mem.Allocator) Composer {
         return .{
             .allocator = allocator,
-            .patterns = std.ArrayList([]const u8){},
+            .patterns = std.ArrayList([]const u8).empty,
         };
     }
 

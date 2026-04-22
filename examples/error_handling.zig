@@ -5,7 +5,7 @@ const ErrorHelper = @import("regex").ErrorHelper;
 const RegexError = @import("regex").RegexError;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

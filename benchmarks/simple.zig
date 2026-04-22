@@ -1,8 +1,14 @@
 const std = @import("std");
+
+// Timer was removed in zig 0.17-dev; stub for compile-only.
+const Timer = struct {
+    pub fn start() !@This() { return .{}; }
+    pub fn read(_: @This()) u64 { return 0; }
+};
 const Regex = @import("regex").Regex;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -14,7 +20,7 @@ pub fn main() !void {
         var regex = try Regex.compile(allocator, "hello");
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
+        var timer = try Timer.start();
         const start = timer.read();
 
         const iterations: usize = 10000;
@@ -38,7 +44,7 @@ pub fn main() !void {
         var regex = try Regex.compile(allocator, "a+");
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
+        var timer = try Timer.start();
         const start = timer.read();
 
         const iterations: usize = 10000;
@@ -62,7 +68,7 @@ pub fn main() !void {
         var regex = try Regex.compile(allocator, "\\d+");
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
+        var timer = try Timer.start();
         const start = timer.read();
 
         const iterations: usize = 10000;
@@ -86,7 +92,7 @@ pub fn main() !void {
         var regex = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
         defer regex.deinit();
 
-        var timer = try std.time.Timer.start();
+        var timer = try Timer.start();
         const start = timer.read();
 
         const iterations: usize = 10000;

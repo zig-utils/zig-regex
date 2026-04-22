@@ -191,7 +191,7 @@ test "RegexCache basic operations" {
 
 test "thread-safe allocator with concurrent matching" {
     // Use thread-safe allocator for concurrent access
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -222,7 +222,7 @@ test "thread-safe allocator with concurrent matching" {
 }
 
 test "concurrent matching different patterns" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -272,7 +272,7 @@ test "concurrent matching different patterns" {
 }
 
 test "stress test: many threads many matches" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

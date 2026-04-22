@@ -40,7 +40,7 @@ const std = @import("std");
 /// const Regex = @import("regex").Regex;
 ///
 /// // Compile once, use from multiple threads
-/// var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+/// var gpa: std.heap.DebugAllocator(.{}) = .init;
 /// const allocator = gpa.allocator();
 ///
 /// const regex = try Regex.compile(allocator, "\\d+");

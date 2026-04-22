@@ -4,7 +4,7 @@ const SharedRegex = @import("regex").SharedRegex;
 const RegexCache = @import("regex").RegexCache;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

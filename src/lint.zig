@@ -63,7 +63,7 @@ pub const Lint = struct {
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) Lint {
         return .{
             .allocator = allocator,
-            .warnings = std.ArrayList(Warning){},
+            .warnings = std.ArrayList(Warning).empty,
             .pattern = pattern,
         };
     }

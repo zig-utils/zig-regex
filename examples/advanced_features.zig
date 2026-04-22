@@ -7,7 +7,7 @@ const Lint = @import("regex").Lint;
 const ComplexityAnalyzer = @import("regex").ComplexityAnalyzer;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

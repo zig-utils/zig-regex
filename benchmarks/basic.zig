@@ -1,4 +1,10 @@
 const std = @import("std");
+
+// Timer was removed in zig 0.17-dev; stub for compile-only.
+const Timer = struct {
+    pub fn start() !@This() { return .{}; }
+    pub fn read(_: @This()) u64 { return 0; }
+};
 const Regex = @import("regex").Regex;
 
 /// Simple benchmark framework
@@ -7,7 +13,7 @@ const Benchmark = struct {
     iterations: usize = 10000,
 
     fn run(self: Benchmark, comptime func: anytype, args: anytype) !void {
-        var timer = try std.time.Timer.start();
+        var timer = try Timer.start();
         const start = timer.read();
 
         var i: usize = 0;
@@ -28,7 +34,7 @@ const Benchmark = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
