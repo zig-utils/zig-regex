@@ -16,9 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: '0.17.0-dev.56+a8226cd53'
 
       - name: Build
         run: zig build
@@ -39,9 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: '0.17.0-dev.56+a8226cd53'
 
       - name: Build (${{ matrix.target }})
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
