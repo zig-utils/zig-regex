@@ -121,6 +121,9 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
+    // c_api.zig uses std.heap.c_allocator which needs libc linked at
+    // test time (refAllDecls pulls it in even though lib users might not).
+    mod_tests.root_module.link_libc = true;
 
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
