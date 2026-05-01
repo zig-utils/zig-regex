@@ -49,6 +49,7 @@ pub const Match = struct {
 ```
 
 **Methods:**
+
 - `deinit(allocator: std.mem.Allocator)` - Free capture group memory
 
 ---
@@ -64,12 +65,14 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex
 ```
 
 **Parameters:**
+
 - `allocator` - Memory allocator for the regex and its internal structures
 - `pattern` - The regex pattern string
 
 **Returns:** `Regex` or error
 
 **Errors:**
+
 - `RegexError.EmptyPattern` - Pattern string is empty
 - `RegexError.InvalidPattern` - Syntax error in pattern
 - `RegexError.UnexpectedCharacter` - Invalid character in pattern
@@ -80,6 +83,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex
 - `RegexError.UnmatchedBracket` - Unbalanced brackets
 
 **Example:**
+
 ```zig
 const allocator = std.heap.page_allocator;
 var regex = try Regex.compile(allocator, "\\d{3}-\\d{4}");
@@ -99,6 +103,7 @@ pub fn compileWithFlags(
 ```
 
 **Parameters:**
+
 - `allocator` - Memory allocator
 - `pattern` - The regex pattern string
 - `flags` - Compilation flags (see [Flags](#flags))
@@ -106,6 +111,7 @@ pub fn compileWithFlags(
 **Returns:** `Regex` or error
 
 **Example:**
+
 ```zig
 var regex = try Regex.compileWithFlags(
     allocator,
@@ -124,6 +130,7 @@ pub fn deinit(self: *Regex) void
 ```
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, "pattern");
 defer regex.deinit(); // Always call deinit when done
@@ -142,11 +149,13 @@ pub fn isMatch(self: *const Regex, input: []const u8) !bool
 ```
 
 **Parameters:**
+
 - `input` - The string to search in
 
 **Returns:** `true` if match found, `false` otherwise
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, "\\d+");
 defer regex.deinit();
@@ -169,11 +178,13 @@ pub fn find(self: *const Regex, input: []const u8) !?Match
 ```
 
 **Parameters:**
+
 - `input` - The string to search in
 
 **Returns:** `Match` if found, `null` otherwise
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, "\\d+");
 defer regex.deinit();
@@ -200,19 +211,21 @@ pub fn findAll(
 ```
 
 **Parameters:**
+
 - `allocator` - Allocator for the results array
 - `input` - The string to search in
 
 **Returns:** Array of `Match` objects (caller owns, must free)
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, "\\d+");
 defer regex.deinit();
 
 const matches = try regex.findAll(allocator, "Call 555-1234 or 555-5678");
 defer {
-    for (matches) |*match| {
+    for (matches) |_match| {
         var mut_match = match;
         mut_match.deinit(allocator);
     }
@@ -239,7 +252,7 @@ Replace the first match with a replacement string.
 
 ```zig
 pub fn replace(
-    self: *const Regex,
+    self: _const Regex,
     allocator: std.mem.Allocator,
     input: []const u8,
     replacement: []const u8
@@ -247,6 +260,7 @@ pub fn replace(
 ```
 
 **Parameters:**
+
 - `allocator` - Allocator for the result string
 - `input` - The input string
 - `replacement` - The replacement string
@@ -254,6 +268,7 @@ pub fn replace(
 **Returns:** New string with first match replaced (caller owns, must free)
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, "\\d+");
 defer regex.deinit();
@@ -278,6 +293,7 @@ pub fn replaceAll(
 ```
 
 **Parameters:**
+
 - `allocator` - Allocator for the result string
 - `input` - The input string
 - `replacement` - The replacement string
@@ -285,6 +301,7 @@ pub fn replaceAll(
 **Returns:** New string with all matches replaced (caller owns, must free)
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, "\\d+");
 defer regex.deinit();
@@ -312,12 +329,14 @@ pub fn split(
 ```
 
 **Parameters:**
+
 - `allocator` - Allocator for the results array
 - `input` - The string to split
 
 **Returns:** Array of string slices (caller owns array, must free)
 
 **Example:**
+
 ```zig
 var regex = try Regex.compile(allocator, ",");
 defer regex.deinit();
@@ -357,6 +376,7 @@ pub const CompileFlags = packed struct {
 When `true`, the pattern matches both uppercase and lowercase letters.
 
 **Example:**
+
 ```zig
 var regex = try Regex.compileWithFlags(
     allocator,
@@ -397,6 +417,7 @@ pub const RegexError = error{
 ```
 
 **Error Handling Example:**
+
 ```zig
 const regex = Regex.compile(allocator, "[invalid") catch |err| {
     switch (err) {
@@ -428,7 +449,7 @@ const regex = Regex.compile(allocator, "[invalid") catch |err| {
 
 ### Quantifiers
 
-- `*` - Zero or more (greedy)
+- `_` - Zero or more (greedy)
 - `+` - One or more (greedy)
 - `?` - Zero or one (optional)
 - `{n}` - Exactly n times
@@ -466,7 +487,7 @@ const regex = Regex.compile(allocator, "[invalid") catch |err| {
 
 - `\\` - Literal backslash
 - `\.` - Literal dot
-- `\*` - Literal asterisk
+- `\_` - Literal asterisk
 - `\+` - Literal plus
 - `\?` - Literal question mark
 - `\n` - Newline

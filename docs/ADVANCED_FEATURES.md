@@ -128,7 +128,7 @@ pub fn main() !void {
 
 // Quantifiers
 .oneOrMore()            // + (greedy)
-.zeroOrMore()           // * (greedy)
+.zeroOrMore()           // _ (greedy)
 .optional()             // ? (greedy)
 .repeatExact(n)         // {n}
 .repeatAtLeast(n)       // {n,}
@@ -203,8 +203,8 @@ The C API provides a stable ABI for using zig-regex from other languages.
 ### C Header (c_api.h)
 
 ```c
-#include <stddef.h>
-#include <stdbool.h>
+# include <stddef.h>
+# include <stdbool.h>
 
 typedef struct ZigRegex ZigRegex;
 typedef struct ZigMatch ZigMatch;
@@ -234,56 +234,56 @@ typedef enum {
 } ZigRegexError;
 
 // Compile a regex
-ZigRegex* zig_regex_compile(const char* pattern, ZigRegexFlags flags, ZigRegexError* error_code);
+ZigRegex_ zig_regex_compile(const char_ pattern, ZigRegexFlags flags, ZigRegexError_ error_code);
 
 // Free a regex
-void zig_regex_free(ZigRegex* regex);
+void zig_regex_free(ZigRegex_ regex);
 
 // Test if pattern matches
-bool zig_regex_is_match(ZigRegex* regex, const char* input, ZigRegexError* error_code);
+bool zig_regex_is_match(ZigRegex_ regex, const char_ input, ZigRegexError_ error_code);
 
 // Find first match
-ZigMatch* zig_regex_find(ZigRegex* regex, const char* input, ZigRegexError* error_code);
+ZigMatch_ zig_regex_find(ZigRegex_ regex, const char_ input, ZigRegexError_ error_code);
 
 // Get match info
-ZigRegexError zig_match_get_info(ZigMatch* match, ZigMatchInfo* info);
+ZigRegexError zig_match_get_info(ZigMatch_ match, ZigMatchInfo_ info);
 
 // Get matched text
-size_t zig_match_get_text(ZigMatch* match, char* buffer, size_t buffer_len);
+size_t zig_match_get_text(ZigMatch_ match, char_ buffer, size_t buffer_len);
 
 // Get capture group
-size_t zig_match_get_capture(ZigMatch* match, size_t capture_index, char* buffer, size_t buffer_len);
+size_t zig_match_get_capture(ZigMatch_ match, size_t capture_index, char_ buffer, size_t buffer_len);
 
 // Free match
-void zig_match_free(ZigMatch* match);
+void zig_match_free(ZigMatch_ match);
 
 // Find all matches
-ZigMatchArray* zig_regex_find_all(ZigRegex* regex, const char* input, ZigRegexError* error_code);
+ZigMatchArray_ zig_regex_find_all(ZigRegex_ regex, const char_ input, ZigRegexError_ error_code);
 
 // Get array length
-size_t zig_match_array_len(ZigMatchArray* matches);
+size_t zig_match_array_len(ZigMatchArray_ matches);
 
 // Get match from array
-ZigMatch* zig_match_array_get(ZigMatchArray* matches, size_t index);
+ZigMatch_ zig_match_array_get(ZigMatchArray_ matches, size_t index);
 
 // Free match array
-void zig_match_array_free(ZigMatchArray* matches);
+void zig_match_array_free(ZigMatchArray_ matches);
 
 // Replace first match
-size_t zig_regex_replace(ZigRegex* regex, const char* input, const char* replacement,
-                         char* buffer, size_t buffer_len, ZigRegexError* error_code);
+size_t zig_regex_replace(ZigRegex_ regex, const char_ input, const char_ replacement,
+                         char_ buffer, size_t buffer_len, ZigRegexError_ error_code);
 
 // Get library version
-const char* zig_regex_version();
+const char_ zig_regex_version();
 ```
 
 ### C Usage Example
 
 ```c
-#include "c_api.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+# include "c_api.h"
+# include <stdio.h>
+# include <stdlib.h>
+# include <string.h>
 
 int main() {
     ZigRegexFlags flags = {
@@ -296,15 +296,15 @@ int main() {
     ZigRegexError error;
 
     // Compile regex
-    ZigRegex* regex = zig_regex_compile("\\d{3}-\\d{3}-\\d{4}", flags, &error);
+    ZigRegex_ regex = zig_regex_compile("\\d{3}-\\d{3}-\\d{4}", flags, &error);
     if (!regex) {
         fprintf(stderr, "Failed to compile regex: %d\n", error);
         return 1;
     }
 
     // Test match
-    const char* input = "Call me at 555-123-4567";
-    ZigMatch* match = zig_regex_find(regex, input, &error);
+    const char_ input = "Call me at 555-123-4567";
+    ZigMatch_ match = zig_regex_find(regex, input, &error);
 
     if (match) {
         // Get match info
@@ -466,8 +466,8 @@ The linter can detect:
 Warnings (2):
   [WARNING] at position 0: Nested quantifiers detected - can cause catastrophic backtracking
     Suggestion: Consider simplifying the pattern or using atomic groups
-  [WARNING] at position 0: Greedy wildcard quantifier (.* or .+) can be slow
-    Suggestion: Consider using lazy quantifier (.*? or .+?) or being more specific
+  [WARNING] at position 0: Greedy wildcard quantifier (._ or .+) can be slow
+    Suggestion: Consider using lazy quantifier (._? or .+?) or being more specific
 ```
 
 ## Performance Features

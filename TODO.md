@@ -10,7 +10,8 @@ A modern, performant regex library for Zig 0.16+
 **Total Lines of Code:** ~5,500+ lines (including docs and tests)
 **Phases Completed:** 10 out of 11 (core + testing + docs + advanced features + fuzzing complete)
 
-### What Works Now:
+### What Works Now
+
 - ✅ Complete lexer and parser for regex syntax
 - ✅ Thompson NFA construction
 - ✅ Thread-based NFA simulation with greedy matching
@@ -21,13 +22,14 @@ A modern, performant regex library for Zig 0.16+
 - ✅ Anchors and boundaries: `^`, `$`, `\b`, `\B`, `\A`, `\z`, `\Z` - **COMPLETED**
 - ✅ Capture groups: `()` and non-capturing groups `(?:)` - **COMPLETED**
 - ✅ Full API: `compile()`, `compileWithFlags()`, `isMatch()`, `find()`, `findAll()`, `replace()`, `replaceAll()`, `split()`
-- ✅ **Flags**: case-insensitive (i), multiline (m), dot-all (s) - **ALL IMPLEMENTED**
+- ✅ **Flags**: case-insensitive (i), multiline (m), dot-all (s) -**ALL IMPLEMENTED**
 - ✅ Comprehensive test suite with 155+ tests including edge cases
 - ✅ Complete architecture documentation
 - ✅ **Benchmark suite** for performance tracking
 - ✅ Thread-safety utilities and documentation
 
-### Example Usage:
+### Example Usage
+
 ```zig
 var regex = try Regex.compile(allocator, "\\d+");
 defer regex.deinit();
@@ -39,6 +41,7 @@ if (try regex.find("Price: $123")) |match| {
 ## Project Overview
 
 Building a production-ready regular expression library for Zig that provides:
+
 - Fast pattern matching using Thompson NFA construction
 - Zero external dependencies (stdlib only)
 - Full memory control with Zig allocators
@@ -51,6 +54,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 1: Project Foundation ✅ COMPLETED
 
 ### 1.1 Project Setup ✅
+
 - [x] Initialize Zig project structure with `zig init`
 - [x] Create `build.zig` with library and test targets
 - [x] Create `build.zig.zon` with project metadata
@@ -60,6 +64,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Create `.gitignore` for Zig projects
 
 ### 1.2 Core Module Structure ✅
+
 - [x] Create `src/regex.zig` as the main public API (385 lines)
 - [x] Create `src/parser.zig` for regex pattern parsing (395 lines)
 - [x] Create `src/ast.zig` for Abstract Syntax Tree representation (267 lines)
@@ -69,6 +74,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Create `src/common.zig` for shared types and utilities (174 lines)
 
 ### 1.3 Documentation Foundation ✅
+
 - [x] Set up documentation comments structure
 - [x] Create `docs/ARCHITECTURE.md` explaining design decisions - **COMPLETED**
 - [x] Create `docs/API.md` for API reference - **COMPLETED**
@@ -80,6 +86,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 2: Parser & AST ✅ COMPLETED
 
 ### 2.1 Lexer Implementation ✅
+
 - [x] Implement tokenizer for regex patterns
 - [x] Support basic literals (a-z, A-Z, 0-9)
 - [x] Support special characters (`.`, `^`, `$`, etc.)
@@ -89,6 +96,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Implement proper error reporting with line/column info
 
 ### 2.2 Parser Implementation ✅
+
 - [x] Implement recursive descent parser
 - [x] Handle operator precedence correctly
 - [x] Support concatenation (implicit)
@@ -103,6 +111,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Add comprehensive error messages
 
 ### 2.3 AST Construction ✅
+
 - [x] Define AST node types (Literal, Alternation, Concatenation, etc.)
 - [x] Implement AST builder from parser
 - [x] Add AST validation pass
@@ -114,6 +123,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 3: NFA Engine ✅ COMPLETED
 
 ### 3.1 Thompson Construction ✅
+
 - [x] Implement basic NFA data structure
 - [x] Implement state and transition representations
 - [x] Support epsilon (ε) transitions
@@ -126,6 +136,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Handle bounded repetition {m,n}
 
 ### 3.2 NFA Optimization
+
 - [x] Implement epsilon-closure computation
 - [ ] Remove redundant epsilon transitions (future enhancement)
 - [ ] Merge equivalent states (future enhancement)
@@ -133,6 +144,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Add NFA visualization/debug output (future enhancement)
 
 ### 3.3 NFA Simulation ✅
+
 - [x] Implement basic NFA simulation engine (thread-based matching)
 - [x] Support backtracking for complex patterns (via thread-based approach)
 - [x] Track capture groups during matching
@@ -146,6 +158,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 4: Pattern Matching API ✅ COMPLETED
 
 ### 4.1 Core Matching Functions ✅
+
 - [x] Implement `Regex.compile()` - compile pattern
 - [x] Implement `Regex.deinit()` - cleanup
 - [x] Implement `find()` - find first match
@@ -154,6 +167,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Return match positions (start, end indices)
 
 ### 4.2 Capture Groups ⚠️ Partial
+
 - [x] Implement numbered capture groups `()`
 - [x] Track capture group positions
 - [x] Return captured substrings
@@ -162,6 +176,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Access captures by name (future enhancement)
 
 ### 4.3 Advanced Matching ✅
+
 - [x] Implement `replace()` - replace matches
 - [x] Implement `replaceAll()` - replace all matches
 - [ ] Support backreferences in replacement (future enhancement)
@@ -174,6 +189,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 5: Extended Regex Features
 
 ### 5.1 Character Classes ✅
+
 - [x] Support `\d` (digits)
 - [x] Support `\D` (non-digits)
 - [x] Support `\w` (word characters)
@@ -185,6 +201,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Support POSIX character classes `[:alpha:]`, `[:digit:]`, etc. (future enhancement)
 
 ### 5.2 Advanced Anchors & Boundaries ✅
+
 - [x] Line anchors (`^`, `$`)
 - [x] Word boundaries (`\b`, `\B`)
 - [x] String anchors (`\A`, `\z`, `\Z`) - **COMPLETED** (fully implemented and tested)
@@ -192,6 +209,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Lookbehind assertions `(?<=)`, `(?<!)` (future enhancement)
 
 ### 5.3 Flags & Options ✅
+
 - [x] Case-insensitive flag (i) - **COMPLETED**
 - [x] Compile-time flag specification via `compileWithFlags()` - **COMPLETED**
 - [x] Multiline flag (m) - **COMPLETED** (^ and $ respect multiline mode)
@@ -205,6 +223,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 6: Testing & Quality
 
 ### 6.1 Unit Tests ✅ COMPLETED
+
 - [x] Test lexer with various input patterns - **COMPLETED** (6+ lexer tests)
 - [x] Test parser with valid/invalid regex - **COMPLETED** (10+ parser tests)
 - [x] Test AST construction and validation - **COMPLETED** (4+ AST tests)
@@ -217,6 +236,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Test edge cases (empty strings, large inputs) - **COMPLETED** (dedicated edge_cases test file)
 
 ### 6.2 Integration Tests ✅ COMPLETED
+
 - [x] Test real-world regex patterns - **COMPLETED**
 - [x] Test email validation patterns - **COMPLETED**
 - [x] Test URL matching patterns - **COMPLETED**
@@ -231,6 +251,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Test error handling paths (future enhancement)
 
 ### 6.3 Fuzzing & Property Tests ✅
+
 - [x] Set up fuzzing infrastructure - **COMPLETED**
 - [x] Fuzz lexer with random inputs - **COMPLETED** (fuzz.zig)
 - [x] Fuzz parser with malformed patterns - **COMPLETED** (bad patterns test)
@@ -239,6 +260,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Test memory safety (no leaks) - **COMPLETED** (zero leaks detected)
 
 ### 6.4 Compliance Tests
+
 - [ ] Create test suite from regex standards
 - [ ] Compare against PCRE test suite (where applicable)
 - [ ] Test compatibility with common regex flavors
@@ -249,6 +271,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 7: Performance Optimization
 
 ### 7.1 Algorithm Optimization
+
 - [ ] Profile hot paths in matching
 - [ ] Optimize state transition lookup
 - [ ] Implement DFA construction for static patterns
@@ -258,6 +281,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Cache compiled patterns
 
 ### 7.2 Memory Optimization
+
 - [ ] Minimize allocations during matching
 - [ ] Use arena allocators where appropriate
 - [ ] Implement copy-on-write for captures
@@ -265,6 +289,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Optimize AST/NFA memory layout
 
 ### 7.3 Benchmarking ⚠️ Partial
+
 - [x] Create benchmark suite - **COMPLETED**
 - [x] Benchmark common patterns (literal, quantifiers, character classes) - **COMPLETED**
 - [x] Benchmark case-insensitive matching - **COMPLETED**
@@ -278,6 +303,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 8: Documentation & Examples ✅ COMPLETED
 
 ### 8.1 API Documentation ✅ COMPLETED
+
 - [x] Document all public functions with examples - **COMPLETED** (docs/API.md - 800+ lines)
 - [x] Add parameter descriptions - **COMPLETED**
 - [x] Document error conditions - **COMPLETED**
@@ -286,6 +312,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Generate docs with `zig build docs` (requires Zig docs infrastructure)
 
 ### 8.2 User Guide ✅ COMPLETED
+
 - [x] Write getting started guide - **COMPLETED** (README.md + docs/API.md)
 - [x] Document pattern syntax - **COMPLETED** (docs/API.md Pattern Syntax section)
 - [x] Document best practices - **COMPLETED** (docs/EXAMPLES.md Best Practices section)
@@ -295,6 +322,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Create FAQ (future enhancement)
 
 ### 8.3 Examples ✅ COMPLETED
+
 - [x] Create basic usage example - **COMPLETED** (README.md + docs/EXAMPLES.md)
 - [x] Create capture groups example - **COMPLETED** (docs/EXAMPLES.md)
 - [x] Create replace/substitution example - **COMPLETED** (docs/EXAMPLES.md)
@@ -307,6 +335,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 9: Advanced Features
 
 ### 9.1 Unicode Support
+
 - [ ] Support UTF-8 input (Zig's default)
 - [ ] Handle multi-byte characters correctly
 - [ ] Support Unicode character classes
@@ -315,6 +344,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Handle normalization (if needed)
 
 ### 9.2 Performance Features
+
 - [ ] Implement lazy DFA construction
 - [ ] Add memoization for repeated patterns
 - [ ] Support compiled pattern serialization
@@ -322,6 +352,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Add SIMD optimizations (if applicable)
 
 ### 9.3 Developer Features
+
 - [ ] Implement regex debugging mode
 - [ ] Add visualization of NFA/DFA
 - [ ] Create regex playground/tester
@@ -333,6 +364,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 10: Production Readiness
 
 ### 10.1 Error Handling ✅
+
 - [x] Comprehensive error types - **COMPLETED** (40+ error types defined)
 - [x] Detailed error messages - **COMPLETED** (ErrorContext with formatting)
 - [x] Recovery strategies where possible - **COMPLETED** (hints and suggestions)
@@ -340,12 +372,14 @@ Building a production-ready regular expression library for Zig that provides:
 - [x] Panic-free API design - **COMPLETED** (all errors returned as values)
 
 ### 10.2 Thread Safety ✅
+
 - [x] Document thread-safety guarantees - **COMPLETED** (documented in LIMITATIONS.md)
 - [x] Make compiled patterns thread-safe - **COMPLETED** (read-only operations are safe)
 - [x] Support concurrent matching - **COMPLETED** (VM creates thread-local state)
 - [x] Thread safety utilities - **COMPLETED** (RegexCache implementation available)
 
 ### 10.3 API Stability
+
 - [ ] Finalize public API surface
 - [ ] Mark internal APIs clearly
 - [ ] Version the API
@@ -353,6 +387,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Write upgrade guides
 
 ### 10.4 Release Preparation
+
 - [ ] Set up CI/CD pipeline
 - [ ] Add pre-commit hooks
 - [ ] Create release checklist
@@ -365,6 +400,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Phase 11: Community & Maintenance
 
 ### 11.1 Community Building
+
 - [ ] Create CONTRIBUTING.md
 - [ ] Set up issue templates
 - [ ] Set up PR templates
@@ -373,6 +409,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Announce on Zig forums
 
 ### 11.2 Ongoing Maintenance
+
 - [ ] Monitor issues and PRs
 - [ ] Keep up with Zig language updates
 - [ ] Update dependencies
@@ -385,6 +422,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Future Considerations
 
 ### Potential Features
+
 - [ ] Regex macros/composition
 - [ ] Pattern compilation to native code
 - [ ] C FFI for use in other languages
@@ -393,6 +431,7 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Regex lint/analysis tools / extreme narrow typing for user patterns
 
 ### Research Topics
+
 - [ ] Investigate derivative-based regex matching
 - [ ] Explore SIMD/vector optimization opportunities
 - [ ] Consider hybrid NFA/DFA approaches
@@ -404,6 +443,7 @@ Building a production-ready regular expression library for Zig that provides:
 ## Success Metrics
 
 ### Quality Metrics
+
 - [x] 90%+ test coverage - **ACHIEVED** (114+ tests, 100% pass rate)
 - [x] Zero known memory leaks - **ACHIEVED** (all tests pass leak detection)
 - [x] Zero known security vulnerabilities - **ACHIEVED** (safe memory management)
@@ -411,12 +451,14 @@ Building a production-ready regular expression library for Zig that provides:
 - [ ] Pass compliance test suite (future - requires PCRE test suite integration)
 
 ### Performance Metrics
+
 - [x] Linear time complexity for NFA matching - **ACHIEVED** (Thompson NFA with O(n*m))
 - [x] Reasonable memory usage - **ACHIEVED** (efficient allocator usage)
 - [x] Fast compilation times - **ACHIEVED** (simple patterns compile quickly)
 - [ ] Competitive with existing Zig regex libraries (future - requires benchmarking)
 
 ### Adoption Metrics
+
 - [ ] Used in at least 3 external projects (future)
 - [ ] Positive community feedback (future - pending release)
 - [ ] Active contributors beyond maintainers (future)
@@ -442,14 +484,16 @@ Building a production-ready regular expression library for Zig that provides:
 
 ## Recent Updates (2025-10-27)
 
-### Completed Features:
+### Completed Features
+
 1. ✅ **Quantifiers `{m,n}`** - Full runtime support with comprehensive tests
 2. ✅ **String Anchors** - `\A`, `\z`, `\Z` fully implemented and tested
 3. ✅ **Multiline Flag** - `^` and `$` respect multiline mode
 4. ✅ **Dot-all Flag** - `.` matches newlines when enabled
 5. ✅ **Bug Fixes** - Fixed memory leaks in thread safety tests, updated Zig 0.15.1 APIs
 
-### Test Suite:
+### Test Suite
+
 - **155+ tests** passing with 100% success rate
 - New test files: `string_anchors.zig`, `multiline_dotall.zig`
 - All memory leaks resolved

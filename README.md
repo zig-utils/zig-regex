@@ -183,7 +183,7 @@ regex '\d+' 'hello 123 world'
 
 # Find all matches
 regex -g '\d+' 'hello 123 world 456'
-# Output:
+# Output
 # 123
 # 456
 
@@ -241,6 +241,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Acknowledgments
 
 Inspired by:
+
 - Ken Thompson's NFA construction algorithm
 - RE2 (Google's regex engine)
 - Rust's regex crate

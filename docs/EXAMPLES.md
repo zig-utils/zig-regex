@@ -102,7 +102,7 @@ defer regex.deinit();
 const text = "Contact us at support@example.com or sales@example.org";
 const emails = try regex.findAll(allocator, text);
 defer {
-    for (emails) |*match| {
+    for (emails) |_match| {
         var mut_match = match;
         mut_match.deinit(allocator);
     }
@@ -139,7 +139,7 @@ pub fn main() !void {
     const text = "Visit https://example.com or http://test.org for more info.";
     const urls = try regex.findAll(allocator, text);
     defer {
-        for (urls) |*match| {
+        for (urls) |_match| {
             var mut_match = match;
             mut_match.deinit(allocator);
         }
@@ -196,7 +196,7 @@ defer regex.deinit();
 const text = "Call 555-123-4567 or 555-987-6543 for assistance.";
 const phones = try regex.findAll(allocator, text);
 defer {
-    for (phones) |*match| {
+    for (phones) |_match| {
         var mut_match = match;
         mut_match.deinit(allocator);
     }
@@ -244,7 +244,7 @@ defer regex.deinit();
 const text = "Hello, world! This is a test.";
 const words = try regex.findAll(allocator, text);
 defer {
-    for (words) |*match| {
+    for (words) |_match| {
         var mut_match = match;
         mut_match.deinit(allocator);
     }
@@ -294,7 +294,7 @@ defer regex.deinit();
 const config = "host=localhost port=8080 debug=true";
 const matches = try regex.findAll(allocator, config);
 defer {
-    for (matches) |*match| {
+    for (matches) |_match| {
         var mut_match = match;
         mut_match.deinit(allocator);
     }
@@ -510,7 +510,7 @@ defer regex.deinit();
 const tweet = "Loving #Zig programming! #opensource #systems";
 const hashtags = try regex.findAll(allocator, tweet);
 defer {
-    for (hashtags) |*match| {
+    for (hashtags) |_match| {
         var mut_match = match;
         mut_match.deinit(allocator);
     }

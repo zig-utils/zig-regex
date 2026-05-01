@@ -144,7 +144,7 @@ These patterns may be slower:
    - Exponential state growth possible
    - More threads in simulation
 
-3. **Long patterns**: `very_long_literal_string`
+3. **Long patterns**: `very*long*literal*string`
    - More characters to compare
    - Larger NFA structures
 
@@ -160,14 +160,18 @@ var regex = try Regex.compile(allocator, pattern);
 defer regex.deinit();
 
 for (inputs) |input| {
-    _ = try regex.isMatch(input);
+
+    * = try regex.isMatch(input);
+
 }
 
 // Bad: Compile repeatedly
 for (inputs) |input| {
     var regex = try Regex.compile(allocator, pattern);
     defer regex.deinit();
-    _ = try regex.isMatch(input);
+
+    * = try regex.isMatch(input);
+
 }
 ```
 
@@ -183,8 +187,8 @@ if (try regex.isMatch(input)) {
 
 // Less efficient: Extract match when not needed
 if (try regex.find(input)) |match| {
-    var mut_match = match;
-    defer mut_match.deinit(allocator);
+    var mut*match = match;
+    defer mut*match.deinit(allocator);
     // Not using match data...
 }
 ```
@@ -235,10 +239,12 @@ var regex = try Regex.compile(allocator, "(\\d)(\\d)(\\d)+");
 
 ```
 Pattern: "\\d{3}-\\d{4}"
+
   - Compilation: ~2 KB
   - NFA storage: ~1 KB (persistent)
   - VM execution: ~500 bytes per match attempt
   - Match result: ~100 bytes + captures
+
 ```
 
 ### Memory Optimization
@@ -255,11 +261,13 @@ Pattern: "\\d{3}-\\d{4}"
 ### vs. Backtracking Engines (PCRE, Python re)
 
 **Advantages:**
+
 - ✅ **No catastrophic backtracking** - Always linear time
 - ✅ **Predictable performance** - O(n×m) guaranteed
 - ✅ **Memory safe** - No stack overflow on deep recursion
 
 **Trade-offs:**
+
 - ❌ **Slower on simple patterns** - More overhead for simple cases
 - ❌ **No backreferences** - Not currently supported
 - ❌ **No look-around** - Not currently supported
@@ -267,10 +275,12 @@ Pattern: "\\d{3}-\\d{4}"
 ### vs. DFA Engines (RE2, ripgrep)
 
 **Similarities:**
+
 - ✅ **Linear time** - Both guarantee O(n×m)
 - ✅ **No backtracking** - Deterministic matching
 
 **Trade-offs:**
+
 - ❌ **NFA simulation** - We don't build full DFA (saves memory)
 - ❌ **Capture groups** - Our approach is simpler for captures
 - ✅ **Memory usage** - Lower than full DFA construction
@@ -329,11 +339,11 @@ const Regex = @import("regex").Regex;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer * = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Your pattern
-    var regex = try Regex.compile(allocator, "your_pattern");
+    var regex = try Regex.compile(allocator, "your*pattern");
     defer regex.deinit();
 
     // Timing
@@ -343,14 +353,16 @@ pub fn main() !void {
     const iterations: usize = 10000;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        _ = try regex.isMatch("your input");
+
+        * = try regex.isMatch("your input");
+
     }
 
     const elapsed = timer.read() - start;
-    const avg_ns = elapsed / iterations;
-    const avg_us = @as(f64, @floatFromInt(avg_ns)) / 1000.0;
+    const avg*ns = elapsed / iterations;
+    const avg*us = @as(f64, @floatFromInt(avg*ns)) / 1000.0;
 
-    std.debug.print("Average: {d:.2} µs/op\n", .{avg_us});
+    std.debug.print("Average: {d:.2} µs/op\n", .{avg*us});
 }
 ```
 
@@ -410,6 +422,7 @@ CSV splitting (100,000 rows):       ~300ms total
 ```
 
 These are estimates. Actual performance depends on:
+
 - Pattern complexity
 - Input characteristics
 - Hardware specifications
