@@ -330,6 +330,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // The findAll-quadratic regression test uses libc's monotonic clock for a
+    // time bound (Zig 0.16 std.time has no Timer/nanoTimestamp).
+    regression_tests.root_module.link_libc = true;
     const run_regression_tests = b.addRunArtifact(regression_tests);
     test_step.dependOn(&run_regression_tests.step);
 
