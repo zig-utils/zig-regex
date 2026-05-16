@@ -157,7 +157,17 @@ pub const PatternAnalyzer = struct {
             // Child contains quantifier: (a+)+, (a*b+)*, etc.
             // Use lower penalty for simple atomic patterns like (?:\d+)+
             // These are less dangerous than true nested quantifiers like (a+)+
-            if (self.isAtomicGroup(child)) {
+            //
+            // Bounded outer quantifiers (`?`, small `{n,m}`) cannot drive
+            // exponential backtracking even when their child contains a
+            // quantifier — the outer can match at most a fixed number of
+            // times. Patterns like `(seq2-([a-z]+))?` were previously
+            // (and incorrectly) rejected as PatternTooComplex; they're
+            // safe. See zig-utils/zig-regex#3.
+            if (self.outerIsBounded(node)) {
+                // Mild bump only — bounded by a small constant.
+                self.explosion_factor *= 2.0;
+            } else if (self.isAtomicGroup(child)) {
                 // Atomic patterns like character classes are less dangerous
                 self.explosion_factor *= 100.0; // MEDIUM risk instead of CRITICAL
                 try self.addIssue("MEDIUM: Quantifier on atomic group with quantifiers (potential for slow matching)");
@@ -213,6 +223,26 @@ pub const PatternAnalyzer = struct {
         _ = self;
         return switch (node.node_type) {
             .star, .plus, .optional, .repeat => true,
+            else => false,
+        };
+    }
+
+    /// True when the outer quantifier on `node` is bounded by a small
+    /// constant — i.e. `?` (0..1), or a `{n,m}` repeat with a small `m`.
+    /// Bounded outers can't drive exponential backtracking even when they
+    /// wrap a quantifier-bearing child, so the analyser skips the
+    /// "nested quantifier" critical penalty for them.
+    fn outerIsBounded(self: *PatternAnalyzer, node: *ast.Node) bool {
+        _ = self;
+        return switch (node.node_type) {
+            .optional => true,
+            .repeat => blk: {
+                const r = node.data.repeat;
+                const max = r.bounds.max orelse break :blk false;
+                // 10 is generous — patterns with `{0,10}` outers have
+                // a fixed small number of paths regardless of inner shape.
+                break :blk max <= 10;
+            },
             else => false,
         };
     }
@@ -493,6 +523,29 @@ test "analyzer: complex URL pattern - part" {
 
     // This should not be critical
     try std.testing.expect(result.risk_level != .critical);
+}
+
+test "analyzer: bounded outer optional with inner quantifier is not critical (#3)" {
+    // Regression for zig-utils/zig-regex#3:
+    // `seq1-(seq2-([a-zA-Z0-9]+))?` was being rejected as PatternTooComplex
+    // because the outer `?` wraps a group that contains the inner `+`.
+    // An outer `?` matches at most once — it cannot drive exponential
+    // backtracking — so this should compile fine.
+    const allocator = std.testing.allocator;
+    const parser = @import("parser.zig");
+
+    var p = try parser.Parser.init(allocator, "seq1-(seq2-([a-zA-Z0-9]+))?");
+    var tree = try p.parse();
+    defer tree.deinit();
+
+    var result = try analyzePattern(allocator, tree.root);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.risk_level != .critical);
+    try std.testing.expect(result.risk_level != .high);
+
+    // And the validate path should accept it under any non-trivial limit.
+    try analyzeAndValidate(allocator, tree.root, .medium);
 }
 
 test "analyzer: full URL pattern" {
