@@ -227,6 +227,17 @@ pub const VM = struct {
             next_threads.clearRetainingCapacity();
 
             pos += 1;
+
+            // No live threads remain. matchAt only ever seeds the start-state
+            // thread (at start_pos), and threads can only be spawned by cloning
+            // existing ones, so once the set is empty no further match can
+            // begin from this start_pos — the longest match found so far
+            // (last_match) is final. Without this break the loop walks every
+            // remaining byte doing nothing; because findAll restarts matchAt
+            // per match, that dead-walk is what makes findAll O(n^2). Any
+            // accepting state reached on the consumed input was already
+            // recorded by the accept check at the top of the loop.
+            if (current_threads.items.len == 0) break;
         }
 
         // Return the last (longest) match we found
