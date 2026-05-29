@@ -3,11 +3,14 @@ const compiler = @import("compiler.zig");
 const common = @import("common.zig");
 const ast = @import("ast.zig");
 
-/// Capture information for a matched group
+/// Capture information for a matched group. `matched` is false for a group
+/// that did not participate in the match (e.g. an unmatched optional `(x)?`),
+/// distinguishing it from a group that matched the empty string.
 pub const Capture = struct {
     start: usize,
     end: usize,
     text: []const u8,
+    matched: bool = false,
 };
 
 /// Result of a successful match
@@ -147,15 +150,20 @@ pub const VM = struct {
                         self.allocator.free(prev.captures);
                     }
 
-                    // Save this match (might be overwritten by a longer match)
+                    // Save this match (might be overwritten by a longer match).
+                    // Every capture slot is initialized — a group that did not
+                    // participate stays `matched=false` (rather than holding
+                    // uninitialized memory).
                     var captures = try self.allocator.alloc(Capture, self.num_captures);
                     for (0..self.num_captures) |i| {
+                        captures[i] = Capture{ .start = 0, .end = 0, .text = "", .matched = false };
                         if (thread.capture_starts[i]) |cap_start| {
                             if (thread.capture_ends[i]) |cap_end| {
                                 captures[i] = Capture{
                                     .start = cap_start,
                                     .end = cap_end,
                                     .text = input[cap_start..cap_end],
+                                    .matched = true,
                                 };
                             }
                         }

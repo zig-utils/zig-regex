@@ -18,6 +18,10 @@ pub const Match = struct {
     end: usize,
     /// Captured groups (if any)
     captures: []const []const u8 = &.{},
+    /// Per-capture participation flag, parallel to `captures`: false for a group
+    /// that did not match (an unmatched optional), so a caller can distinguish
+    /// it from a group that matched the empty string. Empty when not provided.
+    captures_present: []const bool = &.{},
 
     pub fn init(slice: []const u8, start: usize, end: usize) Match {
         return .{
@@ -29,6 +33,7 @@ pub const Match = struct {
 
     pub fn deinit(self: *Match, allocator: std.mem.Allocator) void {
         allocator.free(self.captures);
+        if (self.captures_present.len != 0) allocator.free(self.captures_present);
     }
 };
 
@@ -199,9 +204,12 @@ pub const Regex = struct {
         // Convert VM result to Match
         var captures_list = try std.ArrayList([]const u8).initCapacity(self.allocator, result.captures.len);
         errdefer captures_list.deinit(self.allocator);
+        const present = try self.allocator.alloc(bool, result.captures.len);
+        errdefer self.allocator.free(present);
 
-        for (result.captures) |cap| {
+        for (result.captures, 0..) |cap, i| {
             try captures_list.append(self.allocator, cap.text);
+            present[i] = cap.matched;
         }
 
         const captures = try captures_list.toOwnedSlice(self.allocator);
@@ -211,6 +219,7 @@ pub const Regex = struct {
             .start = result.start,
             .end = result.end,
             .captures = captures,
+            .captures_present = present,
         };
 
         // Free the VM result (but not the capture text which is from input)
@@ -223,8 +232,11 @@ pub const Regex = struct {
     fn buildBacktrackMatch(self: *const Regex, input: []const u8, result: backtrack.BacktrackMatch) !Match {
         var captures_list = try std.ArrayList([]const u8).initCapacity(self.allocator, result.captures.len);
         errdefer captures_list.deinit(self.allocator);
+        const present = try self.allocator.alloc(bool, result.captures.len);
+        errdefer self.allocator.free(present);
 
-        for (result.captures) |cap| {
+        for (result.captures, 0..) |cap, i| {
+            present[i] = cap.matched;
             if (cap.matched) {
                 try captures_list.append(self.allocator, input[cap.start..cap.end]);
             } else {
@@ -239,6 +251,7 @@ pub const Regex = struct {
             .start = result.start,
             .end = result.end,
             .captures = captures,
+            .captures_present = present,
         };
     }
 
