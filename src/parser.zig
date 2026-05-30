@@ -48,6 +48,13 @@ pub const Lexer = struct {
     input: []const u8,
     pos: usize,
     start_pos: usize,
+    /// UTF-8 continuation bytes queued by a multi-byte escape (`\u{...}`,
+    /// `\uHHHH`): the engine matches byte-by-byte over UTF-8 input, so a code
+    /// point above U+007F is emitted as its UTF-8 byte sequence — the first byte
+    /// is returned immediately and the rest are drained here on later `next()`s.
+    pending: [3]u8 = undefined,
+    pending_len: u8 = 0,
+    pending_pos: u8 = 0,
 
     pub fn init(input: []const u8) Lexer {
         return .{
@@ -100,15 +107,112 @@ pub const Lexer = struct {
                 // Backreference \1, \2, etc.
                 return self.makeToken(.backref, c - '0');
             },
-            '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$' => {
+            'f' => self.makeToken(.escape_char, 0x0C), // form feed
+            'v' => self.makeToken(.escape_char, 0x0B), // vertical tab
+            '0' => self.makeToken(.escape_char, 0x00), // NUL (Annex B: \0 not followed by a digit)
+            'x' => self.parseHexEscape(), // \xHH → one byte
+            'c' => blk: {
+                // \cX control escape: the control letter's code mod 32.
+                const x = self.peek() orelse break :blk RegexError.InvalidEscapeSequence;
+                if (std.ascii.isAlphabetic(x)) {
+                    _ = self.advance();
+                    break :blk self.makeToken(.escape_char, x % 32);
+                }
+                break :blk self.makeToken(.literal, 'c'); // not a control letter: literal 'c'
+            },
+            'u' => self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
+            '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$', '/' => {
                 // Literal escape of special characters
                 return self.makeToken(.literal, c);
             },
-            else => RegexError.InvalidEscapeSequence,
+            // IdentityEscape (Annex B / non-Unicode): an unrecognized `\X` matches
+            // the literal `X` rather than being a syntax error, matching how web
+            // JavaScript engines treat e.g. `\-`, `\ `, `\<`.
+            else => self.makeToken(.literal, c),
         };
     }
 
+    /// `\xHH`: two hex digits → a single byte (`\x` with fewer than two hex
+    /// digits is an IdentityEscape of `x`, per Annex B).
+    fn parseHexEscape(self: *Lexer) Token {
+        const save = self.pos;
+        const h1 = self.peekHex(0);
+        const h2 = self.peekHex(1);
+        if (h1 != null and h2 != null) {
+            self.pos += 2;
+            return self.makeToken(.escape_char, h1.? * 16 + h2.?);
+        }
+        self.pos = save;
+        return self.makeToken(.literal, 'x');
+    }
+
+    /// `\uHHHH` or `\u{H...}`: a code point, emitted as its UTF-8 bytes (the
+    /// first byte is returned; continuation bytes are queued in `pending`). A
+    /// malformed escape is an IdentityEscape of `u`.
+    fn parseUnicodeEscape(self: *Lexer) Token {
+        const save = self.pos;
+        var cp: u32 = 0;
+        if (self.peek() == '{') {
+            self.pos += 1; // consume '{'
+            var n: usize = 0;
+            while (self.peekHex(0)) |d| {
+                cp = cp * 16 + d;
+                self.pos += 1;
+                n += 1;
+                if (cp > 0x10FFFF) break;
+            }
+            if (n == 0 or self.peek() != '}' or cp > 0x10FFFF) {
+                self.pos = save;
+                return self.makeToken(.literal, 'u');
+            }
+            self.pos += 1; // consume '}'
+        } else {
+            var i: usize = 0;
+            while (i < 4) : (i += 1) {
+                const d = self.peekHex(i) orelse {
+                    self.pos = save;
+                    return self.makeToken(.literal, 'u');
+                };
+                cp = cp * 16 + d;
+            }
+            self.pos += 4;
+        }
+        return self.emitCodepoint(@intCast(cp));
+    }
+
+    /// The hex value of the digit at `self.pos + offset`, or null.
+    fn peekHex(self: *Lexer, offset: usize) ?u8 {
+        if (self.pos + offset >= self.input.len) return null;
+        return switch (self.input[self.pos + offset]) {
+            '0'...'9' => |d| d - '0',
+            'a'...'f' => |d| d - 'a' + 10,
+            'A'...'F' => |d| d - 'A' + 10,
+            else => null,
+        };
+    }
+
+    /// Encode `cp` to UTF-8, return its first byte as a literal token, and queue
+    /// any continuation bytes (drained by subsequent `next()` calls).
+    fn emitCodepoint(self: *Lexer, cp: u21) Token {
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &buf) catch return self.makeToken(.literal, 'u');
+        self.pending_len = 0;
+        self.pending_pos = 0;
+        var i: usize = 1;
+        while (i < n) : (i += 1) {
+            self.pending[self.pending_len] = buf[i];
+            self.pending_len += 1;
+        }
+        return self.makeToken(.literal, buf[0]);
+    }
+
     pub fn next(self: *Lexer) !Token {
+        // Drain any queued UTF-8 continuation bytes from a multi-byte escape.
+        if (self.pending_pos < self.pending_len) {
+            const b = self.pending[self.pending_pos];
+            self.pending_pos += 1;
+            return Token{ .token_type = .literal, .value = b, .span = common.Span.init(self.start_pos, self.pos) };
+        }
         self.start_pos = self.pos;
 
         const c = self.advance() orelse {
