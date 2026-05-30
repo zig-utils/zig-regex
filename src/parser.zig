@@ -769,6 +769,31 @@ pub const Parser = struct {
     }
 
     /// Parse character class [...]
+    /// Append a shorthand class's ranges into a character-class range list. A
+    /// non-negated class contributes its ranges directly; a negated one (`\D`,
+    /// `\S`, `\W`) contributes the complement over the byte range [0, 255].
+    fn appendClassRanges(self: *Parser, ranges: *std.ArrayList(common.CharRange), cc: common.CharClass) !void {
+        if (!cc.negated) {
+            for (cc.ranges) |r| try ranges.append(self.allocator, r);
+            return;
+        }
+        // Sort a copy of the source ranges, then emit the gaps over [0, 255].
+        var tmp: [16]common.CharRange = undefined;
+        const n = @min(cc.ranges.len, tmp.len);
+        @memcpy(tmp[0..n], cc.ranges[0..n]);
+        std.mem.sort(common.CharRange, tmp[0..n], {}, struct {
+            fn lt(_: void, a: common.CharRange, b: common.CharRange) bool {
+                return a.start < b.start;
+            }
+        }.lt);
+        var next: u16 = 0;
+        for (tmp[0..n]) |r| {
+            if (r.start > next) try ranges.append(self.allocator, common.CharRange.init(@intCast(next), @intCast(r.start - 1)));
+            if (@as(u16, r.end) + 1 > next) next = @as(u16, r.end) + 1;
+        }
+        if (next <= 255) try ranges.append(self.allocator, common.CharRange.init(@intCast(next), 255));
+    }
+
     fn parseCharClass(self: *Parser) !*ast.Node {
         const start = self.current_token.span.start;
         try self.advance(); // consume [
@@ -783,6 +808,23 @@ pub const Parser = struct {
         defer ranges.deinit(self.allocator);
 
         while (self.peek() != .rbracket and self.peek() != .eof) {
+            // A `\d`/`\D`/`\w`/`\W`/`\s`/`\S` shorthand inside a class expands to
+            // its character ranges (a negated shorthand contributes the complement
+            // over the byte range).
+            const shorthand: ?common.CharClass = switch (self.peek()) {
+                .escape_d => common.CharClasses.digit,
+                .escape_D => common.CharClasses.non_digit,
+                .escape_w => common.CharClasses.word,
+                .escape_W => common.CharClasses.non_word,
+                .escape_s => common.CharClasses.whitespace,
+                .escape_S => common.CharClasses.non_whitespace,
+                else => null,
+            };
+            if (shorthand) |cc| {
+                try self.appendClassRanges(&ranges, cc);
+                try self.advance();
+                continue;
+            }
             // Check for POSIX character class [:name:]
             // We need to look ahead in the raw input, not the tokenized stream
             const current_pos = self.lexer.pos;
