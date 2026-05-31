@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
+const unicode = @import("unicode.zig");
 const RegexError = @import("errors.zig").RegexError;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
@@ -34,6 +35,8 @@ pub const TokenType = enum {
     escape_Z, // \Z - end of text (before final newline)
     escape_char, // \n, \t, etc.
     backref, // \1, \2, etc.
+    escape_p, // \p{...} — Unicode property (value = @intFromEnum(property))
+    escape_P, // \P{...} — negated Unicode property
     eof,
 };
 
@@ -121,6 +124,8 @@ pub const Lexer = struct {
                 break :blk self.makeToken(.literal, 'c'); // not a control letter: literal 'c'
             },
             'u' => self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
+            'p' => self.parsePropertyEscape(false),
+            'P' => self.parsePropertyEscape(true),
             '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$', '/' => {
                 // Literal escape of special characters
                 return self.makeToken(.literal, c);
@@ -134,6 +139,34 @@ pub const Lexer = struct {
 
     /// `\xHH`: two hex digits → a single byte (`\x` with fewer than two hex
     /// digits is an IdentityEscape of `x`, per Annex B).
+    /// `\p{Name}` / `\P{Name}` — a Unicode property escape. Resolves a
+    /// General_Category name (short or long, optionally `gc=Name`) to the
+    /// `UnicodeProperty` enum and emits its ordinal in the token value. Without a
+    /// `{...}` body, `\p` is an IdentityEscape of `p` (non-Unicode mode). An
+    /// unknown / unsupported property name is a syntax error.
+    fn parsePropertyEscape(self: *Lexer, negated: bool) !Token {
+        if (self.peek() != '{') return self.makeToken(.literal, if (negated) 'P' else 'p');
+        _ = self.advance(); // consume '{'
+        const start = self.pos;
+        while (self.peek()) |c| {
+            if (c == '}') break;
+            _ = self.advance();
+        }
+        if (self.peek() != '}') return RegexError.InvalidEscapeSequence;
+        var name = self.input[start..self.pos];
+        _ = self.advance(); // consume '}'
+        // `gc=Name` / `General_Category=Name` selects a General_Category; any
+        // other `lhs=rhs` form (Script=, scx=, a binary property) is unsupported.
+        if (std.mem.indexOfScalar(u8, name, '=')) |eq_i| {
+            const lhs = name[0..eq_i];
+            if (!std.mem.eql(u8, lhs, "gc") and !std.mem.eql(u8, lhs, "General_Category"))
+                return RegexError.InvalidEscapeSequence;
+            name = name[eq_i + 1 ..];
+        }
+        const prop = unicode.UnicodeProperty.fromString(name) orelse return RegexError.InvalidEscapeSequence;
+        return self.makeToken(if (negated) .escape_P else .escape_p, @intFromEnum(prop));
+    }
+
     fn parseHexEscape(self: *Lexer) Token {
         const save = self.pos;
         const h1 = self.peekHex(0);
@@ -564,6 +597,11 @@ pub const Parser = struct {
                 const index = token.value; // 1-based capture group index
                 return ast.Node.createBackreference(self.allocator, index, null, span);
             },
+            .escape_p, .escape_P => {
+                try self.advance();
+                const prop: unicode.UnicodeProperty = @enumFromInt(token.value);
+                return ast.Node.createUnicodeProperty(self.allocator, prop, token.token_type == .escape_P, span);
+            },
             .lparen => {
                 // SECURITY: Check nesting depth to prevent stack overflow
                 self.nesting_depth += 1;
@@ -764,7 +802,7 @@ pub const Parser = struct {
             .rbracket, .caret, .backslash,
             .escape_d, .escape_D, .escape_w, .escape_W,
             .escape_s, .escape_S, .escape_b, .escape_B,
-            .escape_A, .escape_z, .escape_Z, .backref, .eof => null,
+            .escape_A, .escape_z, .escape_Z, .backref, .escape_p, .escape_P, .eof => null,
         };
     }
 

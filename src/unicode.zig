@@ -139,48 +139,26 @@ pub const GeneralCategory = enum {
     Cn, // Other, not assigned
 };
 
-/// Get the Unicode General Category for a codepoint
-/// This is a simplified implementation covering common ranges
+const gc_data = @import("unicode_gc_data.zig");
+
+/// Get the Unicode General Category for a codepoint, via a binary search over
+/// the generated `UnicodeData.txt` range table. Code points outside every
+/// listed range are unassigned (`Cn`).
 pub fn getGeneralCategory(cp: Codepoint) GeneralCategory {
-    // ASCII fast path
-    if (cp < 0x80) {
-        if (cp >= 'A' and cp <= 'Z') return .Lu;
-        if (cp >= 'a' and cp <= 'z') return .Ll;
-        if (cp >= '0' and cp <= '9') return .Nd;
-        if (cp == ' ' or cp == '\t' or cp == '\n' or cp == '\r') return .Zs;
-        if (cp <= 0x1F or cp == 0x7F) return .Cc;
-        // Punctuation and symbols
-        if ((cp >= 0x21 and cp <= 0x2F) or (cp >= 0x3A and cp <= 0x40) or
-            (cp >= 0x5B and cp <= 0x60) or (cp >= 0x7B and cp <= 0x7E))
-        {
-            // Simplified: treat all as punctuation
-            return .Po;
+    const ranges = gc_data.gc_ranges;
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (cp < r.start) {
+            hi = mid;
+        } else if (cp > r.end) {
+            lo = mid + 1;
+        } else {
+            return r.cat;
         }
-        return .Cn;
     }
-
-    // Latin-1 Supplement (0x80-0xFF)
-    if (cp <= 0xFF) {
-        if (cp >= 0xC0 and cp <= 0xD6) return .Lu;
-        if (cp >= 0xD8 and cp <= 0xDE) return .Lu;
-        if (cp >= 0xE0 and cp <= 0xF6) return .Ll;
-        if (cp >= 0xF8 and cp <= 0xFF) return .Ll;
-        if (cp >= 0x80 and cp <= 0x9F) return .Cc;
-        if (cp == 0xA0) return .Zs;
-        return .Po; // Simplified for other Latin-1 symbols
-    }
-
-    // Basic Multilingual Plane (BMP) ranges
-    // This is a simplified categorization
-    if (cp >= 0x0100 and cp <= 0x017F) return .Ll; // Latin Extended-A (simplified)
-    if (cp >= 0x0180 and cp <= 0x024F) return .Ll; // Latin Extended-B (simplified)
-    if (cp >= 0x0370 and cp <= 0x03FF) return .Ll; // Greek (simplified)
-    if (cp >= 0x0400 and cp <= 0x04FF) return .Ll; // Cyrillic (simplified)
-    if (cp >= 0x0600 and cp <= 0x06FF) return .Lo; // Arabic
-    if (cp >= 0x4E00 and cp <= 0x9FFF) return .Lo; // CJK Unified Ideographs
-    if (cp >= 0xAC00 and cp <= 0xD7AF) return .Lo; // Hangul Syllables
-
-    // Default to unassigned for anything else
     return .Cn;
 }
 
@@ -307,37 +285,92 @@ pub const UnicodeProperty = enum {
 
     pub fn fromString(s: []const u8) ?UnicodeProperty {
         const map = std.StaticStringMap(UnicodeProperty).initComptime(.{
-            .{ "Letter", .Letter }, .{ "L", .L },
-            .{ "Lowercase_Letter", .Lowercase_Letter }, .{ "Ll", .Ll },
-            .{ "Uppercase_Letter", .Uppercase_Letter }, .{ "Lu", .Lu },
-            .{ "Number", .Number }, .{ "N", .N },
-            .{ "Decimal_Number", .Decimal_Number }, .{ "Nd", .Nd },
-            .{ "Punctuation", .Punctuation }, .{ "P", .P },
-            .{ "Symbol", .Symbol }, .{ "S", .S },
-            .{ "Separator", .Separator }, .{ "Z", .Z },
-            .{ "Space_Separator", .Space_Separator }, .{ "Zs", .Zs },
-            .{ "Control", .Control }, .{ "Cc", .Cc },
+            .{ "Letter", .Letter },                       .{ "L", .L },
+            .{ "Lowercase_Letter", .Lowercase_Letter },   .{ "Ll", .Ll },
+            .{ "Uppercase_Letter", .Uppercase_Letter },   .{ "Lu", .Lu },
+            .{ "Titlecase_Letter", .Titlecase_Letter },   .{ "Lt", .Lt },
+            .{ "Modifier_Letter", .Modifier_Letter },     .{ "Lm", .Lm },
+            .{ "Other_Letter", .Other_Letter },           .{ "Lo", .Lo },
+            .{ "Mark", .Mark },                           .{ "M", .M },
+            .{ "Combining_Mark", .Mark },
+            .{ "Nonspacing_Mark", .Nonspacing_Mark },     .{ "Mn", .Mn },
+            .{ "Spacing_Mark", .Spacing_Mark },           .{ "Mc", .Mc },
+            .{ "Enclosing_Mark", .Enclosing_Mark },       .{ "Me", .Me },
+            .{ "Number", .Number },                       .{ "N", .N },
+            .{ "Decimal_Number", .Decimal_Number },       .{ "Nd", .Nd },
+            .{ "Letter_Number", .Letter_Number },         .{ "Nl", .Nl },
+            .{ "Other_Number", .Other_Number },           .{ "No", .No },
+            .{ "Punctuation", .Punctuation },             .{ "P", .P },
+            .{ "Connector_Punctuation", .Connector_Punctuation }, .{ "Pc", .Pc },
+            .{ "Dash_Punctuation", .Dash_Punctuation },   .{ "Pd", .Pd },
+            .{ "Open_Punctuation", .Open_Punctuation },   .{ "Ps", .Ps },
+            .{ "Close_Punctuation", .Close_Punctuation }, .{ "Pe", .Pe },
+            .{ "Initial_Punctuation", .Initial_Punctuation }, .{ "Pi", .Pi },
+            .{ "Final_Punctuation", .Final_Punctuation }, .{ "Pf", .Pf },
+            .{ "Other_Punctuation", .Other_Punctuation }, .{ "Po", .Po },
+            .{ "Symbol", .Symbol },                       .{ "S", .S },
+            .{ "Math_Symbol", .Math_Symbol },             .{ "Sm", .Sm },
+            .{ "Currency_Symbol", .Currency_Symbol },     .{ "Sc", .Sc },
+            .{ "Modifier_Symbol", .Modifier_Symbol },     .{ "Sk", .Sk },
+            .{ "Other_Symbol", .Other_Symbol },           .{ "So", .So },
+            .{ "Separator", .Separator },                 .{ "Z", .Z },
+            .{ "Space_Separator", .Space_Separator },     .{ "Zs", .Zs },
+            .{ "Line_Separator", .Line_Separator },       .{ "Zl", .Zl },
+            .{ "Paragraph_Separator", .Paragraph_Separator }, .{ "Zp", .Zp },
+            .{ "Other", .Other },                         .{ "C", .C },
+            .{ "Control", .Control },                     .{ "Cc", .Cc },
+            .{ "cntrl", .Cc },
+            .{ "Format", .Format },                       .{ "Cf", .Cf },
+            .{ "Surrogate", .Surrogate },                 .{ "Cs", .Cs },
+            .{ "Private_Use", .Private_Use },             .{ "Co", .Co },
+            .{ "Unassigned", .Not_Assigned },             .{ "Cn", .Cn },
         });
         return map.get(s);
     }
 };
 
-/// Check if codepoint matches a Unicode property
+/// Check if codepoint matches a Unicode General_Category property (a single
+/// category like `Lu`, or a super-category like `L`/`N`/`P`/…).
 pub fn matchesProperty(cp: Codepoint, property: UnicodeProperty) bool {
+    const c = getGeneralCategory(cp);
     return switch (property) {
-        .Letter, .L => isLetter(cp),
-        .Lowercase_Letter, .Ll => isInCategory(cp, .Ll),
-        .Uppercase_Letter, .Lu => isInCategory(cp, .Lu),
-        .Number, .N => isDigit(cp),
-        .Decimal_Number, .Nd => isInCategory(cp, .Nd),
-        .Punctuation, .P => blk: {
-            const cat = getGeneralCategory(cp);
-            break :blk cat == .Pc or cat == .Pd or cat == .Ps or
-                cat == .Pe or cat == .Pi or cat == .Pf or cat == .Po;
-        },
-        .Space_Separator, .Zs => isInCategory(cp, .Zs),
-        .Control, .Cc => isInCategory(cp, .Cc),
-        else => false,
+        .Letter, .L => c == .Lu or c == .Ll or c == .Lt or c == .Lm or c == .Lo,
+        .Lowercase_Letter, .Ll => c == .Ll,
+        .Uppercase_Letter, .Lu => c == .Lu,
+        .Titlecase_Letter, .Lt => c == .Lt,
+        .Modifier_Letter, .Lm => c == .Lm,
+        .Other_Letter, .Lo => c == .Lo,
+        .Mark, .M => c == .Mn or c == .Mc or c == .Me,
+        .Nonspacing_Mark, .Mn => c == .Mn,
+        .Spacing_Mark, .Mc => c == .Mc,
+        .Enclosing_Mark, .Me => c == .Me,
+        .Number, .N => c == .Nd or c == .Nl or c == .No,
+        .Decimal_Number, .Nd => c == .Nd,
+        .Letter_Number, .Nl => c == .Nl,
+        .Other_Number, .No => c == .No,
+        .Punctuation, .P => c == .Pc or c == .Pd or c == .Ps or c == .Pe or c == .Pi or c == .Pf or c == .Po,
+        .Connector_Punctuation, .Pc => c == .Pc,
+        .Dash_Punctuation, .Pd => c == .Pd,
+        .Open_Punctuation, .Ps => c == .Ps,
+        .Close_Punctuation, .Pe => c == .Pe,
+        .Initial_Punctuation, .Pi => c == .Pi,
+        .Final_Punctuation, .Pf => c == .Pf,
+        .Other_Punctuation, .Po => c == .Po,
+        .Symbol, .S => c == .Sm or c == .Sc or c == .Sk or c == .So,
+        .Math_Symbol, .Sm => c == .Sm,
+        .Currency_Symbol, .Sc => c == .Sc,
+        .Modifier_Symbol, .Sk => c == .Sk,
+        .Other_Symbol, .So => c == .So,
+        .Separator, .Z => c == .Zs or c == .Zl or c == .Zp,
+        .Space_Separator, .Zs => c == .Zs,
+        .Line_Separator, .Zl => c == .Zl,
+        .Paragraph_Separator, .Zp => c == .Zp,
+        .Other, .C => c == .Cc or c == .Cf or c == .Cs or c == .Co or c == .Cn,
+        .Control, .Cc => c == .Cc,
+        .Format, .Cf => c == .Cf,
+        .Surrogate, .Cs => c == .Cs,
+        .Private_Use, .Co => c == .Co,
+        .Not_Assigned, .Cn => c == .Cn,
     };
 }
 

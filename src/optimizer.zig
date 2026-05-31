@@ -110,7 +110,7 @@ pub const Optimizer = struct {
                 return true;
             },
             // Any of these stop prefix collection
-            .alternation, .star, .plus, .optional, .repeat, .any, .char_class, .backref => false,
+            .alternation, .star, .plus, .optional, .repeat, .any, .char_class, .backref, .unicode_property => false,
             // Lookahead/lookbehind don't consume input
             .lookahead, .lookbehind => true,
             .empty => true,
@@ -156,6 +156,7 @@ pub const Optimizer = struct {
                 // Conservative estimate: 0 minimum
                 return 0;
             },
+            .unicode_property => 1, // one code point (≥ 1 byte)
             .anchor, .empty => 0,
         };
     }
@@ -203,6 +204,7 @@ pub const Optimizer = struct {
                 // Backreferences have unbounded max length
                 return null;
             },
+            .unicode_property => 4, // up to a 4-byte UTF-8 code point
             .anchor, .empty => 0,
         };
     }

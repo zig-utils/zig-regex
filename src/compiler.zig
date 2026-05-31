@@ -202,7 +202,7 @@ pub const Compiler = struct {
             .anchor => try self.compileAnchor(node.data.anchor),
             .empty => try self.compileEmpty(),
             // These features require backtracking engine
-            .lookahead, .lookbehind, .backref => @import("errors.zig").RegexError.NotImplemented,
+            .lookahead, .lookbehind, .backref, .unicode_property => @import("errors.zig").RegexError.NotImplemented,
         };
     }
 

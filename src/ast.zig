@@ -33,6 +33,8 @@ pub const NodeType = enum {
     lookbehind,
     /// Backreference \1, \2, etc.
     backref,
+    /// Unicode property escape `\p{...}` / `\P{...}`
+    unicode_property,
 };
 
 /// Anchor types
@@ -89,6 +91,12 @@ pub const Node = struct {
         lookahead: Assertion,
         lookbehind: Assertion,
         backref: Backreference,
+        unicode_property: UnicodeProp,
+    };
+
+    pub const UnicodeProp = struct {
+        property: @import("unicode.zig").UnicodeProperty,
+        negated: bool = false,
     };
 
     pub const Concat = struct {
@@ -277,6 +285,16 @@ pub const Node = struct {
         node.* = .{
             .node_type = .backref,
             .data = .{ .backref = .{ .index = index, .name = name } },
+            .span = span,
+        };
+        return node;
+    }
+
+    pub fn createUnicodeProperty(allocator: std.mem.Allocator, property: @import("unicode.zig").UnicodeProperty, negated: bool, span: common.Span) !*Node {
+        const node = try allocator.create(Node);
+        node.* = .{
+            .node_type = .unicode_property,
+            .data = .{ .unicode_property = .{ .property = property, .negated = negated } },
             .span = span,
         };
         return node;

@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
+const unicode_mod = @import("unicode.zig");
 
 /// Backtracking-based regex engine
 /// Supports: lazy quantifiers, lookahead/lookbehind, backreferences
@@ -119,7 +120,7 @@ pub const BacktrackEngine = struct {
     /// Check if a node can match empty string
     pub fn canMatchEmpty(self: *BacktrackEngine, node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .any, .char_class, .backref => false,
+            .literal, .any, .char_class, .backref, .unicode_property => false,
             .empty, .anchor, .lookahead, .lookbehind => true,
             .concat => self.canMatchEmpty(node.data.concat.left) and self.canMatchEmpty(node.data.concat.right),
             .alternation => self.canMatchEmpty(node.data.alternation.left) or self.canMatchEmpty(node.data.alternation.right),
@@ -155,7 +156,18 @@ pub const BacktrackEngine = struct {
             .lookahead => self.matchLookahead(node.data.lookahead, pos),
             .lookbehind => self.matchLookbehind(node.data.lookbehind, pos),
             .backref => self.matchBackreference(node.data.backref, pos),
+            .unicode_property => self.matchUnicodeProperty(node.data.unicode_property, pos),
         };
+    }
+
+    /// `\p{...}` / `\P{...}` — decode the UTF-8 code point at `pos`, test the
+    /// General_Category property, and consume the whole code point on a match.
+    fn matchUnicodeProperty(self: *BacktrackEngine, up: ast.Node.UnicodeProp, pos: usize) ?usize {
+        if (pos >= self.input.len) return null;
+        const dec = unicode_mod.decodeUtf8(self.input[pos..]) catch return null;
+        const matched = unicode_mod.matchesProperty(dec.codepoint, up.property);
+        if (matched == up.negated) return null;
+        return pos + dec.len;
     }
 
     fn matchLiteral(self: *BacktrackEngine, c: u8, pos: usize) ?usize {
@@ -257,6 +269,7 @@ pub const BacktrackEngine = struct {
             .literal => return if (self.matchLiteral(node.data.literal, pos)) |end| end == target_end else false,
             .any => return if (self.matchAny(pos)) |end| end == target_end else false,
             .char_class => return if (self.matchCharClass(node.data.char_class, pos)) |end| end == target_end else false,
+            .unicode_property => return if (self.matchUnicodeProperty(node.data.unicode_property, pos)) |end| end == target_end else false,
             .anchor => return if (self.matchAnchor(node.data.anchor, pos)) |end| end == target_end else false,
             .empty => return pos == target_end,
             .group => {

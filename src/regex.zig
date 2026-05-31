@@ -661,7 +661,7 @@ pub const Regex = struct {
 fn requiresBacktracking(node: *ast.Node) bool {
     switch (node.node_type) {
         // These features require backtracking
-        .lookahead, .lookbehind, .backref => return true,
+        .lookahead, .lookbehind, .backref, .unicode_property => return true,
 
         // Check for lazy quantifiers
         .star, .plus, .optional => {
