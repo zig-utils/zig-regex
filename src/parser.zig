@@ -692,11 +692,23 @@ pub const Parser = struct {
                         } else if (self.current_token.value == 'i' or self.current_token.value == 'm' or
                             self.current_token.value == 's' or self.current_token.value == '-')
                         {
-                            // Inline modifiers `(?ims-ims:...)`: a non-capturing
-                            // group whose body matches under the adjusted flags.
+                            // Inline modifiers: `(?ims-ims:...)` scopes a group
+                            // body; `(?ims-ims)` (no body) scopes the rest of the
+                            // enclosing sequence.
                             var mod = ast.Node.FlagDelta{};
                             var removing = false;
+                            var standalone = false;
+                            // Early errors: a flag may not repeat within, or appear
+                            // in both, the add and remove groups (and only i/m/s
+                            // are permitted — any other code point falls through to
+                            // a syntax error).
+                            var add_mask: u3 = 0;
+                            var remove_mask: u3 = 0;
                             while (true) {
+                                if (self.peek() == .rparen) {
+                                    standalone = true;
+                                    break;
+                                }
                                 if (self.current_token.token_type != .literal) return RegexError.UnexpectedCharacter;
                                 const v = self.current_token.value;
                                 if (v == ':') {
@@ -708,6 +720,16 @@ pub const Parser = struct {
                                     try self.advance();
                                 } else if (v == 'i' or v == 'm' or v == 's') {
                                     const on = !removing;
+                                    const bit: u3 = switch (v) {
+                                        'i' => 0b001,
+                                        'm' => 0b010,
+                                        's' => 0b100,
+                                        else => unreachable,
+                                    };
+                                    const side = if (removing) &remove_mask else &add_mask;
+                                    if (side.* & bit != 0) return RegexError.UnexpectedCharacter; // repeated flag
+                                    side.* |= bit;
+                                    if (add_mask & remove_mask != 0) return RegexError.UnexpectedCharacter; // added and removed
                                     switch (v) {
                                         'i' => mod.i = on,
                                         'm' => mod.m = on,
@@ -718,6 +740,16 @@ pub const Parser = struct {
                                 } else return RegexError.UnexpectedCharacter;
                             }
                             group_mod = mod;
+                            if (standalone) {
+                                // `(?ims)` directive: close its paren, then wrap the
+                                // remainder of the current alternative under the new
+                                // flags.
+                                try self.expect(.rparen);
+                                const body = try self.parseConcat();
+                                const node = try ast.Node.createGroup(self.allocator, body, null, span);
+                                node.data.group.mod = mod;
+                                return node;
+                            }
                             // capture_index stays null (non-capturing)
                         } else {
                             // Unknown group extension
