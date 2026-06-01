@@ -43,6 +43,8 @@ pub const TokenType = enum {
 pub const Token = struct {
     token_type: TokenType,
     value: u8 = 0,
+    /// For `escape_p`/`escape_P`: the resolved Unicode property operand.
+    prop: ?unicode.PropSpec = null,
     span: common.Span,
 };
 
@@ -153,18 +155,21 @@ pub const Lexer = struct {
             _ = self.advance();
         }
         if (self.peek() != '}') return RegexError.InvalidEscapeSequence;
-        var name = self.input[start..self.pos];
+        const body = self.input[start..self.pos];
         _ = self.advance(); // consume '}'
-        // `gc=Name` / `General_Category=Name` selects a General_Category; any
-        // other `lhs=rhs` form (Script=, scx=, a binary property) is unsupported.
-        if (std.mem.indexOfScalar(u8, name, '=')) |eq_i| {
-            const lhs = name[0..eq_i];
-            if (!std.mem.eql(u8, lhs, "gc") and !std.mem.eql(u8, lhs, "General_Category"))
-                return RegexError.InvalidEscapeSequence;
-            name = name[eq_i + 1 ..];
+        // `\p{Name}` is a lone binary-property/General_Category value;
+        // `\p{lhs=rhs}` selects gc/General_Category, sc/Script, or
+        // scx/Script_Extensions.
+        var lhs: ?[]const u8 = null;
+        var name = body;
+        if (std.mem.indexOfScalar(u8, body, '=')) |eq_i| {
+            lhs = body[0..eq_i];
+            name = body[eq_i + 1 ..];
         }
-        const prop = unicode.UnicodeProperty.fromString(name) orelse return RegexError.InvalidEscapeSequence;
-        return self.makeToken(if (negated) .escape_P else .escape_p, @intFromEnum(prop));
+        const spec = unicode.resolveProperty(lhs, name) orelse return RegexError.InvalidEscapeSequence;
+        var tok = self.makeToken(if (negated) .escape_P else .escape_p, 0);
+        tok.prop = spec;
+        return tok;
     }
 
     fn parseHexEscape(self: *Lexer) Token {
@@ -599,8 +604,7 @@ pub const Parser = struct {
             },
             .escape_p, .escape_P => {
                 try self.advance();
-                const prop: unicode.UnicodeProperty = @enumFromInt(token.value);
-                return ast.Node.createUnicodeProperty(self.allocator, prop, token.token_type == .escape_P, span);
+                return ast.Node.createUnicodeProperty(self.allocator, token.prop.?, token.token_type == .escape_P, span);
             },
             .lparen => {
                 // SECURITY: Check nesting depth to prevent stack overflow

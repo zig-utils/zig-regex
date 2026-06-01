@@ -374,6 +374,122 @@ pub fn matchesProperty(cp: Codepoint, property: UnicodeProperty) bool {
     };
 }
 
+// ===== Script / Script_Extensions / binary properties (Unicode 17.0.0) =======
+
+const prop_data = @import("unicode_prop_data.zig");
+
+/// Like `decodeUtf8` but also accepts a lone surrogate encoded as 3-byte WTF-8
+/// (`0xED 0xA0–0xBF 0x80–0xBF`). A `/u` regex classifies a lone surrogate as its
+/// own code point (e.g. `\P{L}` matches one), and `String.fromCodePoint(0xD800)`
+/// produces exactly that encoding, so property matching must decode it.
+pub fn decodeUtf8Lenient(bytes: []const u8) ?struct { codepoint: Codepoint, len: u3 } {
+    if (decodeUtf8(bytes)) |d| {
+        return .{ .codepoint = d.codepoint, .len = d.len };
+    } else |_| {}
+    if (bytes.len >= 3 and bytes[0] == 0xED and (bytes[1] & 0xC0) == 0x80 and (bytes[2] & 0xC0) == 0x80) {
+        const cp = (@as(Codepoint, bytes[0] & 0x0F) << 12) |
+            (@as(Codepoint, bytes[1] & 0x3F) << 6) |
+            (bytes[2] & 0x3F);
+        if (cp >= 0xD800 and cp <= 0xDFFF) return .{ .codepoint = cp, .len = 3 };
+    }
+    return null;
+}
+
+/// A resolved `\p{...}` operand: a General_Category, a Script, a
+/// Script_Extensions, or a binary property.
+pub const PropSpec = union(enum) {
+    gc: UnicodeProperty,
+    script: u16,
+    script_extensions: u16,
+    binary: prop_data.BinaryProp,
+};
+
+/// Resolve a `\p{lhs=rhs}` (or lone `\p{name}`) operand to a PropSpec, matching
+/// the spec's UnicodeMatchProperty / LoneUnicodePropertyNameOrValue. `lhs` is
+/// null for the lone form.
+pub fn resolveProperty(lhs: ?[]const u8, name: []const u8) ?PropSpec {
+    if (lhs) |l| {
+        if (eqi(l, "gc") or eqi(l, "General_Category"))
+            return if (UnicodeProperty.fromString(name)) |p| .{ .gc = p } else null;
+        if (eqi(l, "sc") or eqi(l, "Script"))
+            return if (prop_data.scriptId(name)) |id| .{ .script = id } else null;
+        if (eqi(l, "scx") or eqi(l, "Script_Extensions"))
+            return if (prop_data.scriptId(name)) |id| .{ .script_extensions = id } else null;
+        return null;
+    }
+    // Lone form: a binary property name, or a General_Category value.
+    if (prop_data.binaryFromName(name)) |bp| return .{ .binary = bp };
+    if (UnicodeProperty.fromString(name)) |p| return .{ .gc = p };
+    return null;
+}
+
+fn eqi(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+/// The Script value of a codepoint (Unknown when not in any explicit range).
+pub fn scriptOf(cp: Codepoint) u16 {
+    const ranges = prop_data.sc_ranges;
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (cp < r.lo) hi = mid else if (cp > r.hi) lo = mid + 1 else return r.sc;
+    }
+    return prop_data.unknown_script;
+}
+
+fn matchScriptExtensions(cp: Codepoint, sc: u16) bool {
+    const ranges = prop_data.scx_ranges;
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (cp < r.lo) {
+            hi = mid;
+        } else if (cp > r.hi) {
+            lo = mid + 1;
+        } else {
+            for (prop_data.scx_pool[r.start .. r.start + r.len]) |id| if (id == sc) return true;
+            return false;
+        }
+    }
+    // Codepoints not listed in ScriptExtensions inherit Script_Extensions = { Script }.
+    return scriptOf(cp) == sc;
+}
+
+fn inRanges(cp: Codepoint, ranges: []const prop_data.R) bool {
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (cp < r.lo) hi = mid else if (cp > r.hi) lo = mid + 1 else return true;
+    }
+    return false;
+}
+
+fn matchBinary(cp: Codepoint, bp: prop_data.BinaryProp) bool {
+    return switch (bp) {
+        .ASCII => cp <= 0x7F,
+        .Any => true,
+        .Assigned => getGeneralCategory(cp) != .Cn,
+        else => inRanges(cp, prop_data.binaryRanges(bp)),
+    };
+}
+
+/// Match a codepoint against any resolved `\p{...}` operand.
+pub fn matchesSpec(cp: Codepoint, spec: PropSpec) bool {
+    return switch (spec) {
+        .gc => |p| matchesProperty(cp, p),
+        .script => |id| scriptOf(cp) == id,
+        .script_extensions => |id| matchScriptExtensions(cp, id),
+        .binary => |bp| matchBinary(cp, bp),
+    };
+}
+
 test "Unicode categories" {
     try std.testing.expect(isLetter('a'));
     try std.testing.expect(isLetter('Z'));

@@ -95,7 +95,7 @@ pub const Node = struct {
     };
 
     pub const UnicodeProp = struct {
-        property: @import("unicode.zig").UnicodeProperty,
+        spec: @import("unicode.zig").PropSpec,
         negated: bool = false,
     };
 
@@ -290,11 +290,11 @@ pub const Node = struct {
         return node;
     }
 
-    pub fn createUnicodeProperty(allocator: std.mem.Allocator, property: @import("unicode.zig").UnicodeProperty, negated: bool, span: common.Span) !*Node {
+    pub fn createUnicodeProperty(allocator: std.mem.Allocator, spec: @import("unicode.zig").PropSpec, negated: bool, span: common.Span) !*Node {
         const node = try allocator.create(Node);
         node.* = .{
             .node_type = .unicode_property,
-            .data = .{ .unicode_property = .{ .property = property, .negated = negated } },
+            .data = .{ .unicode_property = .{ .spec = spec, .negated = negated } },
             .span = span,
         };
         return node;

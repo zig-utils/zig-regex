@@ -372,7 +372,7 @@ pub const PatternAnalyzer = struct {
 
     fn calculateComplexity(self: *PatternAnalyzer, node: *ast.Node) usize {
         return switch (node.node_type) {
-            .literal, .any, .anchor, .empty => 1,
+            .literal, .any, .anchor, .empty, .unicode_property => 1,
             .char_class => 2,
             .concat => blk: {
                 const left = self.calculateComplexity(node.data.concat.left);
@@ -413,7 +413,7 @@ pub const PatternAnalyzer = struct {
 
     fn canMatchEmpty(self: *PatternAnalyzer, node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .any, .char_class, .backref => false,
+            .literal, .any, .char_class, .backref, .unicode_property => false,
             .empty, .anchor, .lookahead, .lookbehind => true,
             .concat => blk: {
                 const left = self.canMatchEmpty(node.data.concat.left);

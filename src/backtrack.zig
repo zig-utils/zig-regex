@@ -164,8 +164,8 @@ pub const BacktrackEngine = struct {
     /// General_Category property, and consume the whole code point on a match.
     fn matchUnicodeProperty(self: *BacktrackEngine, up: ast.Node.UnicodeProp, pos: usize) ?usize {
         if (pos >= self.input.len) return null;
-        const dec = unicode_mod.decodeUtf8(self.input[pos..]) catch return null;
-        const matched = unicode_mod.matchesProperty(dec.codepoint, up.property);
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[pos..]) orelse return null;
+        const matched = unicode_mod.matchesSpec(dec.codepoint, up.spec);
         if (matched == up.negated) return null;
         return pos + dec.len;
     }
@@ -213,15 +213,20 @@ pub const BacktrackEngine = struct {
                 }
             }
 
+            // The capture-fixup re-match below is only needed when the left side
+            // actually has groups; skipping it keeps `\p{…}+`-style scans linear.
+            const left_has_groups = self.hasGroups(concat.left);
             for (left_positions.items) |left_end| {
                 // Restore clean captures before each attempt
                 @memcpy(self.captures, clean_captures);
 
                 // Re-match left to this specific end position to set captures correctly
-                if (left_has_quant) {
-                    _ = self.matchNodeConstrained(concat.left, pos, left_end);
-                } else {
-                    _ = self.matchNode(concat.left, pos);
+                if (left_has_groups) {
+                    if (left_has_quant) {
+                        _ = self.matchNodeConstrained(concat.left, pos, left_end);
+                    } else {
+                        _ = self.matchNode(concat.left, pos);
+                    }
                 }
 
                 // Save captures after left match
@@ -396,6 +401,24 @@ pub const BacktrackEngine = struct {
         };
     }
 
+    /// Whether a subtree contains a group (whose captures a constrained re-match
+    /// would need to set). Conservative: any group counts. When false, the
+    /// capture-fixup re-match in matchConcat/collectAllMatches is pure waste and
+    /// can be skipped — turning `\p{…}+`-style scans from O(n²) into O(n).
+    fn hasGroups(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .group => true,
+            .concat => self.hasGroups(node.data.concat.left) or self.hasGroups(node.data.concat.right),
+            .alternation => self.hasGroups(node.data.alternation.left) or self.hasGroups(node.data.alternation.right),
+            .star => self.hasGroups(node.data.star.child),
+            .plus => self.hasGroups(node.data.plus.child),
+            .optional => self.hasGroups(node.data.optional.child),
+            .repeat => self.hasGroups(node.data.repeat.child),
+            .lookahead, .lookbehind => true,
+            else => false,
+        };
+    }
+
     /// Collect all possible ending positions for matching a node at a given position
     /// For lazy quantifiers, this returns positions in order: minimal first
     /// For greedy quantifiers, this returns positions in order: maximal first
@@ -469,17 +492,21 @@ pub const BacktrackEngine = struct {
                     }
 
                     // For each left ending, set captures and try right side
+                    const left_has_groups = self.hasGroups(c.left);
                     for (left_positions.items) |left_end| {
                         // Save captures, set them for this left position, try right
                         const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
                         defer self.allocator.free(saved);
                         @memcpy(saved, self.captures);
 
-                        // Set captures correctly for this left end position
-                        if (left_has_quant) {
-                            _ = self.matchNodeConstrained(c.left, pos, left_end);
-                        } else {
-                            _ = self.matchNode(c.left, pos);
+                        // Set captures correctly for this left end position (only
+                        // needed when the left side has groups — else pure waste).
+                        if (left_has_groups) {
+                            if (left_has_quant) {
+                                _ = self.matchNodeConstrained(c.left, pos, left_end);
+                            } else {
+                                _ = self.matchNode(c.left, pos);
+                            }
                         }
 
                         if (right_has_quant) {

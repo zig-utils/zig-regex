@@ -138,6 +138,10 @@ pub const PrettyPrinter = struct {
                     try writer.print("Backref: \\{d}\n", .{backref.index});
                 }
             },
+            .unicode_property => {
+                const up = node.data.unicode_property;
+                try writer.print("UnicodeProperty: \\{c}{{...}}\n", .{if (up.negated) @as(u8, 'P') else 'p'});
+            },
         }
     }
 
