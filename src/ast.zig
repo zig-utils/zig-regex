@@ -120,10 +120,15 @@ pub const Node = struct {
         greedy: bool = true,
     };
 
+    /// A per-group flag override from inline modifiers `(?ims-ims:...)`: each
+    /// field is null (inherit), true (add) or false (remove) for i/m/s.
+    pub const FlagDelta = struct { i: ?bool = null, m: ?bool = null, s: ?bool = null };
+
     pub const Group = struct {
         child: *Node,
         capture_index: ?usize, // null for non-capturing groups
         name: ?[]const u8 = null, // null for unnamed groups
+        mod: ?FlagDelta = null, // inline-modifier flag override, if any
     };
 
     pub const Assertion = struct {

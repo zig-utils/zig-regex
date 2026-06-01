@@ -619,6 +619,7 @@ pub const Parser = struct {
                 // Check for group extensions (?...)
                 var capture_index: ?usize = null;
                 var group_name: ?[]const u8 = null;
+                var group_mod: ?ast.Node.FlagDelta = null;
 
                 if (self.current_token.token_type == .question) {
                     try self.advance(); // consume ?
@@ -688,6 +689,36 @@ pub const Parser = struct {
                             } else {
                                 return RegexError.UnexpectedCharacter;
                             }
+                        } else if (self.current_token.value == 'i' or self.current_token.value == 'm' or
+                            self.current_token.value == 's' or self.current_token.value == '-')
+                        {
+                            // Inline modifiers `(?ims-ims:...)`: a non-capturing
+                            // group whose body matches under the adjusted flags.
+                            var mod = ast.Node.FlagDelta{};
+                            var removing = false;
+                            while (true) {
+                                if (self.current_token.token_type != .literal) return RegexError.UnexpectedCharacter;
+                                const v = self.current_token.value;
+                                if (v == ':') {
+                                    try self.advance(); // consume :
+                                    break;
+                                } else if (v == '-') {
+                                    if (removing) return RegexError.UnexpectedCharacter;
+                                    removing = true;
+                                    try self.advance();
+                                } else if (v == 'i' or v == 'm' or v == 's') {
+                                    const on = !removing;
+                                    switch (v) {
+                                        'i' => mod.i = on,
+                                        'm' => mod.m = on,
+                                        's' => mod.s = on,
+                                        else => unreachable,
+                                    }
+                                    try self.advance();
+                                } else return RegexError.UnexpectedCharacter;
+                            }
+                            group_mod = mod;
+                            // capture_index stays null (non-capturing)
                         } else {
                             // Unknown group extension
                             return RegexError.UnexpectedCharacter;
@@ -709,7 +740,9 @@ pub const Parser = struct {
                 if (group_name) |name| {
                     return ast.Node.createNamedGroup(self.allocator, child, capture_index, name, span);
                 } else {
-                    return ast.Node.createGroup(self.allocator, child, capture_index, span);
+                    const node = try ast.Node.createGroup(self.allocator, child, capture_index, span);
+                    node.data.group.mod = group_mod;
+                    return node;
                 }
             },
             .lbracket => {

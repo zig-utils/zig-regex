@@ -780,6 +780,17 @@ pub const BacktrackEngine = struct {
     fn matchGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {
         const start_pos = pos;
 
+        // Inline modifiers `(?i:...)` adjust i/m/s only within the group body.
+        const saved_flags = self.flags;
+        if (group.mod) |m| {
+            if (m.i) |b| self.flags.case_insensitive = b;
+            if (m.m) |b| self.flags.multiline = b;
+            if (m.s) |b| self.flags.dot_all = b;
+        }
+        defer if (group.mod != null) {
+            self.flags = saved_flags;
+        };
+
         const end_pos = self.matchNode(group.child, pos) orelse return null;
 
         // Save capture if this is a capturing group

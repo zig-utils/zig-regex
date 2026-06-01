@@ -696,7 +696,9 @@ fn requiresBacktracking(node: *ast.Node) bool {
             return requiresBacktracking(node.data.alternation.left) or
                    requiresBacktracking(node.data.alternation.right);
         },
-        .group => return requiresBacktracking(node.data.group.child),
+        // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
+        // which only the backtracking engine honors.
+        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child),
 
         // These don't require backtracking
         .literal, .any, .char_class, .anchor, .empty => return false,
