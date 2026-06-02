@@ -998,8 +998,26 @@ pub const Parser = struct {
         return .{ .nested = set };
     }
 
+    /// The set of strings for a `/v` property-of-strings, or null for an ordinary
+    /// (code-point) property. Only the fixed Emoji_Keycap_Sequence is supported;
+    /// the data-driven RGI_Emoji / Basic_Emoji families are not.
+    fn stringPropertyItem(self: *Parser, name: []const u8) RegexError!?ast.Node.ClassItem {
+        if (!std.mem.eql(u8, name, "Emoji_Keycap_Sequence")) return null;
+        var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        for ([_]u21{ '#', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' }) |b| {
+            const s = try self.allocator.alloc(u21, 3);
+            s[0] = b;
+            s[1] = 0xFE0F;
+            s[2] = 0x20E3;
+            try items.append(self.allocator, .{ .string = s });
+        }
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{ .op = .union_, .items = try items.toOwnedSlice(self.allocator) };
+        return .{ .nested = set };
+    }
+
     /// Parse one `\p{...}`/`\P{...}` property escape as a class item.
-    fn propertyClassItem(input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
+    fn propertyClassItem(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
         const neg = input[i.* + 1] == 'P';
         i.* += 2; // consume \p
         if (i.* >= input.len or input[i.*] != '{') return RegexError.InvalidEscapeSequence;
@@ -1015,6 +1033,11 @@ pub const Parser = struct {
             lhs = body[0..eq];
             name = body[eq + 1 ..];
         }
+        if (lhs == null) if (try self.stringPropertyItem(name)) |item| {
+            // A property of strings can't be complemented (`\P{...}`).
+            if (neg) return RegexError.UnexpectedCharacter;
+            return item;
+        };
         const spec = unicode.resolveProperty(lhs, name) orelse return RegexError.InvalidEscapeSequence;
         return .{ .property = .{ .spec = spec, .negated = neg } };
     }
@@ -1062,7 +1085,7 @@ pub const Parser = struct {
                     i.* += 2;
                     return self.builtinClassItem(e);
                 },
-                'p', 'P' => return propertyClassItem(input, i),
+                'p', 'P' => return self.propertyClassItem(input, i),
                 'q' => return self.parseQItem(input, i),
                 else => {},
             }
