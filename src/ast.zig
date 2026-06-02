@@ -111,6 +111,9 @@ pub const Node = struct {
         range: CpRange,
         property: struct { spec: @import("unicode.zig").PropSpec, negated: bool },
         nested: *ClassSet,
+        /// A `\q{...}` string alternative — a (possibly multi-code-point) string
+        /// the class can match as a unit.
+        string: []const u21,
     };
 
     /// A `/v` class-set expression: a list of items combined by one operator,
@@ -119,6 +122,36 @@ pub const Node = struct {
         op: ClassOp,
         negated: bool = false,
         items: []const ClassItem,
+
+        /// The longest byte length the class matches at `input[start..]`, or null.
+        /// Strings (`\q{...}`) and nested sets can consume multiple code points;
+        /// for intersection/difference (and complement) only single-code-point
+        /// membership is considered.
+        pub fn matchLongest(self: *const ClassSet, input: []const u8, start: usize, ignore_case: bool) ?usize {
+            const u = @import("unicode.zig");
+            if (self.op != .union_ or self.negated) {
+                if (start >= input.len) return null;
+                const dec = u.decodeUtf8Lenient(input[start..]) orelse return null;
+                if (!self.matches(dec.codepoint, ignore_case)) return null;
+                return start + dec.len;
+            }
+            var best: ?usize = null;
+            for (self.items) |it| {
+                const e: ?usize = switch (it) {
+                    .string => |s| matchStringItem(input, start, s, ignore_case),
+                    .nested => |n| n.matchLongest(input, start, ignore_case),
+                    .range, .property => blk: {
+                        if (start >= input.len) break :blk null;
+                        const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk null;
+                        break :blk if (itemMatches(it, dec.codepoint, ignore_case)) start + dec.len else null;
+                    },
+                };
+                if (e) |end| {
+                    if (best == null or end > best.?) best = end;
+                }
+            }
+            return best;
+        }
 
         pub fn matches(self: *const ClassSet, cp: u21, ignore_case: bool) bool {
             const r = switch (self.op) {
@@ -160,7 +193,29 @@ pub const Node = struct {
             },
             .property => |p| return u.matchesSpec(cp, p.spec) != p.negated,
             .nested => |n| return n.matches(cp, ignore_case),
+            // A single-code-point string contributes that code point to membership.
+            .string => |s| return s.len == 1 and (s[0] == cp or (ignore_case and asciiFoldEq(s[0], cp))),
         }
+    }
+
+    fn asciiFoldEq(a: u21, b: u21) bool {
+        const la: u21 = if (a >= 'A' and a <= 'Z') a + 32 else a;
+        const lb: u21 = if (b >= 'A' and b <= 'Z') b + 32 else b;
+        return la == lb;
+    }
+
+    /// Match a `\q{...}` string (a sequence of code points) at `input[start..]`,
+    /// returning the end byte position or null.
+    fn matchStringItem(input: []const u8, start: usize, s: []const u21, ignore_case: bool) ?usize {
+        const u = @import("unicode.zig");
+        var pos = start;
+        for (s) |scp| {
+            if (pos >= input.len) return null;
+            const dec = u.decodeUtf8Lenient(input[pos..]) orelse return null;
+            if (dec.codepoint != scp and !(ignore_case and asciiFoldEq(dec.codepoint, scp))) return null;
+            pos += dec.len;
+        }
+        return pos;
     }
 
     pub const Concat = struct {

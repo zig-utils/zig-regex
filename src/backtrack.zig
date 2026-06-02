@@ -782,10 +782,8 @@ pub const BacktrackEngine = struct {
     /// A `/v` set-notation class: decode the code point at `pos` and test
     /// membership, consuming the whole code point on a match.
     fn matchClassSet(self: *BacktrackEngine, set: *ast.Node.ClassSet, pos: usize) ?usize {
-        if (pos >= self.input.len) return null;
-        const dec = unicode_mod.decodeUtf8Lenient(self.input[pos..]) orelse return null;
-        if (!set.matches(dec.codepoint, self.flags.case_insensitive)) return null;
-        return pos + dec.len;
+        // The longest match (a `\q{...}` string can consume several code points).
+        return set.matchLongest(self.input, pos, self.flags.case_insensitive);
     }
 
     fn matchGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {

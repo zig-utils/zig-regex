@@ -1019,6 +1019,31 @@ pub const Parser = struct {
         return .{ .property = .{ .spec = spec, .negated = neg } };
     }
 
+    /// Parse a `\q{a|bc|...}` string disjunction into a union of string items.
+    fn parseQItem(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
+        i.* += 2; // consume \q
+        if (i.* >= input.len or input[i.*] != '{') return RegexError.InvalidEscapeSequence;
+        i.* += 1; // consume {
+        var alts: std.ArrayList(ast.Node.ClassItem) = .empty;
+        while (true) {
+            var cps: std.ArrayList(u21) = .empty;
+            while (i.* < input.len and input[i.*] != '|' and input[i.*] != '}') {
+                const cp = (try readClassCp(input, i)) orelse return RegexError.UnexpectedCharacter;
+                try cps.append(self.allocator, cp);
+            }
+            try alts.append(self.allocator, .{ .string = try cps.toOwnedSlice(self.allocator) });
+            if (i.* >= input.len) return RegexError.InvalidCharacterClass;
+            if (input[i.*] == '}') {
+                i.* += 1; // consume }
+                break;
+            }
+            i.* += 1; // consume |
+        }
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{ .op = .union_, .items = try alts.toOwnedSlice(self.allocator) };
+        return .{ .nested = set };
+    }
+
     /// Parse one operand of a set expression (a range/char, escape, property, or
     /// nested class).
     fn parseSetOperand(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
@@ -1038,7 +1063,7 @@ pub const Parser = struct {
                     return self.builtinClassItem(e);
                 },
                 'p', 'P' => return propertyClassItem(input, i),
-                'q' => return RegexError.UnexpectedCharacter, // \q{...} strings unsupported
+                'q' => return self.parseQItem(input, i),
                 else => {},
             }
         }
