@@ -147,12 +147,19 @@ pub const PatternAnalyzer = struct {
         // Check for nested quantifiers - CRITICAL ISSUE
         // This check needs to happen regardless of inside_quantifier flag
         // because we want to detect patterns like (a+)+ where the outer + is not yet inside a quantifier
-        if (self.isQuantifier(child)) {
-            // Direct nesting: a++, a+*, etc.
+        if (self.isQuantifier(child) and self.isUnboundedQuant(child)) {
+            // Direct nesting of UNBOUNDED quantifiers: (a+)+, (a*)*, etc.
+            // catastrophic backtracking. A bounded inner (`a{3,8}`, `a?`) under
+            // any outer is at worst polynomial, so it falls through below.
             self.explosion_factor *= 1000000.0;
             try self.addIssue("CRITICAL: Nested quantifiers detected (causes exponential backtracking)");
             try self.addRecommendation("Rewrite pattern to avoid nesting quantifiers inside quantifiers");
             try self.addRecommendation("Example: Replace (a+)+ with a+ (they match the same input)");
+        } else if (self.containsQuantifier(child) and !self.containsUnboundedQuantifier(child)) {
+            // The child only contains BOUNDED quantifiers (`{m,n}`/`?`): even an
+            // unbounded outer can drive at most polynomial work, not exponential
+            // (e.g. `(-[a-z0-9]{3,8})*` from BCP-47 locale validation). Safe.
+            self.explosion_factor *= 2.0;
         } else if (self.containsQuantifier(child)) {
             // Child contains quantifier: (a+)+, (a*b+)*, etc.
             // Use lower penalty for simple atomic patterns like (?:\d+)+
@@ -167,6 +174,16 @@ pub const PatternAnalyzer = struct {
             if (self.outerIsBounded(node)) {
                 // Mild bump only — bounded by a small constant.
                 self.explosion_factor *= 2.0;
+            } else if (self.leadingLiteral(child)) {
+                // The repeated body begins with a fixed literal/char-class
+                // delimiter (e.g. `(-keyword)+`, `(ab+)*`): each iteration must
+                // start at that atom, so the partition is unambiguous and the
+                // match is linear — not the exponential `(a+)+` shape. Common in
+                // BCP-47 locale / URL grammars. Negligible bump — these are
+                // common and safe, and a large grammar stacks many of them, so
+                // the per-group factor must stay near 1 to avoid a false
+                // cumulative CRITICAL.
+                self.explosion_factor *= 1.5;
             } else if (self.isAtomicGroup(child)) {
                 // Atomic patterns like character classes are less dangerous
                 self.explosion_factor *= 100.0; // MEDIUM risk instead of CRITICAL
@@ -181,9 +198,12 @@ pub const PatternAnalyzer = struct {
             }
         }
 
-        // Additional penalty if we're already inside a quantifier (triple+ nesting)
-        if (inside_quantifier and self.containsQuantifier(child)) {
-            self.explosion_factor *= 1000.0; // Extra penalty for triple nesting
+        // Additional penalty for triple+ nesting — but only when the inner is a
+        // genuinely-dangerous unbounded, non-delimited quantifier. Deeply but
+        // safely nested grammars (delimited or bounded, e.g. BCP-47) must not be
+        // penalised into a false CRITICAL.
+        if (inside_quantifier and self.containsUnboundedQuantifier(child) and !self.leadingLiteral(child)) {
+            self.explosion_factor *= 1000.0;
         }
 
         // Analyze with quantifier context
@@ -245,6 +265,49 @@ pub const PatternAnalyzer = struct {
             },
             else => false,
         };
+    }
+
+    /// Whether `node` is itself an *unbounded* quantifier (`*`, `+`, or a
+    /// `{m,}` repeat with no upper bound) — the only kind that can drive
+    /// exponential backtracking when nested. A `?` or `{m,n}` is bounded.
+    fn isUnboundedQuant(self: *PatternAnalyzer, node: *ast.Node) bool {
+        _ = self;
+        return switch (node.node_type) {
+            .star, .plus => true,
+            .repeat => node.data.repeat.bounds.max == null,
+            else => false,
+        };
+    }
+
+    /// Whether `node`'s leftmost matchable atom is a fixed literal / char-class
+    /// / anchor — i.e. every match must begin there. When a repeated group's
+    /// body has such a leading anchor, its iterations are delimited and cannot
+    /// overlap, so even nested unbounded quantifiers inside match in linear time
+    /// (no catastrophic backtracking).
+    fn leadingLiteral(self: *PatternAnalyzer, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .literal, .char_class, .anchor => true,
+            .group => self.leadingLiteral(node.data.group.child),
+            .concat => self.leadingLiteral(node.data.concat.left),
+            else => false,
+        };
+    }
+
+    /// Whether `node`'s subtree contains any unbounded quantifier.
+    fn containsUnboundedQuantifier(self: *PatternAnalyzer, node: *ast.Node) bool {
+        if (self.isUnboundedQuant(node)) return true;
+        switch (node.node_type) {
+            .star => return self.containsUnboundedQuantifier(node.data.star.child),
+            .plus => return self.containsUnboundedQuantifier(node.data.plus.child),
+            .optional => return self.containsUnboundedQuantifier(node.data.optional.child),
+            .repeat => return self.containsUnboundedQuantifier(node.data.repeat.child),
+            .concat => return self.containsUnboundedQuantifier(node.data.concat.left) or
+                self.containsUnboundedQuantifier(node.data.concat.right),
+            .alternation => return self.containsUnboundedQuantifier(node.data.alternation.left) or
+                self.containsUnboundedQuantifier(node.data.alternation.right),
+            .group => return self.containsUnboundedQuantifier(node.data.group.child),
+            else => return false,
+        }
     }
 
     fn containsQuantifier(self: *PatternAnalyzer, node: *ast.Node) bool {
