@@ -120,7 +120,7 @@ pub const BacktrackEngine = struct {
     /// Check if a node can match empty string
     pub fn canMatchEmpty(self: *BacktrackEngine, node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .any, .char_class, .backref, .unicode_property => false,
+            .literal, .any, .char_class, .backref, .unicode_property, .class_set => false,
             .empty, .anchor, .lookahead, .lookbehind => true,
             .concat => self.canMatchEmpty(node.data.concat.left) and self.canMatchEmpty(node.data.concat.right),
             .alternation => self.canMatchEmpty(node.data.alternation.left) or self.canMatchEmpty(node.data.alternation.right),
@@ -157,6 +157,7 @@ pub const BacktrackEngine = struct {
             .lookbehind => self.matchLookbehind(node.data.lookbehind, pos),
             .backref => self.matchBackreference(node.data.backref, pos),
             .unicode_property => self.matchUnicodeProperty(node.data.unicode_property, pos),
+            .class_set => self.matchClassSet(node.data.class_set, pos),
         };
     }
 
@@ -275,6 +276,7 @@ pub const BacktrackEngine = struct {
             .any => return if (self.matchAny(pos)) |end| end == target_end else false,
             .char_class => return if (self.matchCharClass(node.data.char_class, pos)) |end| end == target_end else false,
             .unicode_property => return if (self.matchUnicodeProperty(node.data.unicode_property, pos)) |end| end == target_end else false,
+            .class_set => return if (self.matchClassSet(node.data.class_set, pos)) |end| end == target_end else false,
             .anchor => return if (self.matchAnchor(node.data.anchor, pos)) |end| end == target_end else false,
             .empty => return pos == target_end,
             .group => {
@@ -775,6 +777,15 @@ pub const BacktrackEngine = struct {
         const matches = char_class.matches(c);
 
         return if (matches) pos + 1 else null;
+    }
+
+    /// A `/v` set-notation class: decode the code point at `pos` and test
+    /// membership, consuming the whole code point on a match.
+    fn matchClassSet(self: *BacktrackEngine, set: *ast.Node.ClassSet, pos: usize) ?usize {
+        if (pos >= self.input.len) return null;
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[pos..]) orelse return null;
+        if (!set.matches(dec.codepoint, self.flags.case_insensitive)) return null;
+        return pos + dec.len;
     }
 
     fn matchGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {

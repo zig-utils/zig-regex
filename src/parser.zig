@@ -289,6 +289,8 @@ pub const Parser = struct {
     current_token: Token,
     capture_count: usize,
     nesting_depth: usize,
+    /// The `v` flag: parse character classes with set notation.
+    unicode_sets: bool = false,
 
     /// Maximum nesting depth to prevent stack overflow from patterns like (((((...
     pub const MAX_NESTING_DEPTH: usize = 100;
@@ -901,7 +903,213 @@ pub const Parser = struct {
         if (next <= 255) try ranges.append(self.allocator, common.CharRange.init(@intCast(next), 255));
     }
 
+    // ===== `/v` (unicodeSets) character classes ============================
+    // Parsed directly from raw input so code-point operands and the set
+    // operators `&&`/`--` are representable. Supports ranges, \d\w\s and their
+    // negations, \p{...}/\P{...}, nested [...] classes, union, intersection and
+    // difference. `\q{...}` string literals and string-valued properties are not
+    // handled (those patterns raise a syntax error).
+
+    fn classHex(input: []const u8, i: *usize, n: usize) ?u21 {
+        if (i.* + n > input.len) return null;
+        var cp: u21 = 0;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            const d = std.fmt.charToDigit(input[i.* + k], 16) catch return null;
+            cp = cp * 16 + d;
+        }
+        i.* += n;
+        return cp;
+    }
+
+    /// Read one code point at `i`, resolving escapes. Returns null if the next
+    /// token isn't a plain character (i.e. it's `]`, `[`, or a class escape that
+    /// the operand parser handles).
+    fn readClassCp(input: []const u8, i: *usize) RegexError!?u21 {
+        if (i.* >= input.len) return null;
+        const c = input[i.*];
+        if (c == ']' or c == '[') return null;
+        if (c == '\\') {
+            if (i.* + 1 >= input.len) return RegexError.InvalidEscapeSequence;
+            const e = input[i.* + 1];
+            switch (e) {
+                'd', 'D', 'w', 'W', 's', 'S', 'p', 'P', 'q' => return null, // operand-level escapes
+                'n' => { i.* += 2; return '\n'; },
+                'r' => { i.* += 2; return '\r'; },
+                't' => { i.* += 2; return '\t'; },
+                'f' => { i.* += 2; return 0x0C; },
+                'v' => { i.* += 2; return 0x0B; },
+                '0' => { i.* += 2; return 0; },
+                'x' => {
+                    i.* += 2;
+                    return classHex(input, i, 2) orelse return RegexError.InvalidEscapeSequence;
+                },
+                'u' => {
+                    i.* += 2;
+                    if (i.* < input.len and input[i.*] == '{') {
+                        i.* += 1;
+                        var cp: u21 = 0;
+                        var any = false;
+                        while (i.* < input.len and input[i.*] != '}') : (i.* += 1) {
+                            const d = std.fmt.charToDigit(input[i.*], 16) catch return RegexError.InvalidEscapeSequence;
+                            cp = @intCast(@as(u32, cp) * 16 + d);
+                            any = true;
+                        }
+                        if (!any or i.* >= input.len) return RegexError.InvalidEscapeSequence;
+                        i.* += 1; // consume }
+                        return cp;
+                    }
+                    return classHex(input, i, 4) orelse return RegexError.InvalidEscapeSequence;
+                },
+                else => {
+                    // Identity escape of a syntax character.
+                    i.* += 2;
+                    return e;
+                },
+            }
+        }
+        const dec = unicode.decodeUtf8Lenient(input[i.*..]) orelse {
+            i.* += 1;
+            return c;
+        };
+        i.* += dec.len;
+        return dec.codepoint;
+    }
+
+    /// A `\d\w\s` (and negations) shorthand as a nested set of code-point ranges.
+    fn builtinClassItem(self: *Parser, kind: u8) RegexError!ast.Node.ClassItem {
+        var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        const lower = std.ascii.toLower(kind);
+        const negated = std.ascii.isUpper(kind);
+        if (lower == 'd') {
+            try items.append(self.allocator, .{ .range = .{ .lo = '0', .hi = '9' } });
+        } else if (lower == 'w') {
+            try items.append(self.allocator, .{ .range = .{ .lo = '0', .hi = '9' } });
+            try items.append(self.allocator, .{ .range = .{ .lo = 'A', .hi = 'Z' } });
+            try items.append(self.allocator, .{ .range = .{ .lo = 'a', .hi = 'z' } });
+            try items.append(self.allocator, .{ .range = .{ .lo = '_', .hi = '_' } });
+        } else { // 's'
+            for ([_]u21{ ' ', '\t', '\n', '\r', 0x0B, 0x0C, 0xA0, 0xFEFF }) |c|
+                try items.append(self.allocator, .{ .range = .{ .lo = c, .hi = c } });
+            try items.append(self.allocator, .{ .range = .{ .lo = 0x2028, .hi = 0x2029 } });
+        }
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{ .op = .union_, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
+        return .{ .nested = set };
+    }
+
+    /// Parse one `\p{...}`/`\P{...}` property escape as a class item.
+    fn propertyClassItem(input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
+        const neg = input[i.* + 1] == 'P';
+        i.* += 2; // consume \p
+        if (i.* >= input.len or input[i.*] != '{') return RegexError.InvalidEscapeSequence;
+        i.* += 1;
+        const begin = i.*;
+        while (i.* < input.len and input[i.*] != '}') i.* += 1;
+        if (i.* >= input.len) return RegexError.InvalidEscapeSequence;
+        const body = input[begin..i.*];
+        i.* += 1; // consume }
+        var lhs: ?[]const u8 = null;
+        var name = body;
+        if (std.mem.indexOfScalar(u8, body, '=')) |eq| {
+            lhs = body[0..eq];
+            name = body[eq + 1 ..];
+        }
+        const spec = unicode.resolveProperty(lhs, name) orelse return RegexError.InvalidEscapeSequence;
+        return .{ .property = .{ .spec = spec, .negated = neg } };
+    }
+
+    /// Parse one operand of a set expression (a range/char, escape, property, or
+    /// nested class).
+    fn parseSetOperand(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
+        const c = input[i.*];
+        if (c == '[') {
+            i.* += 1;
+            const nested = try self.parseSetExpr(input, i);
+            if (i.* >= input.len or input[i.*] != ']') return RegexError.InvalidCharacterClass;
+            i.* += 1; // consume ]
+            return .{ .nested = nested };
+        }
+        if (c == '\\' and i.* + 1 < input.len) {
+            const e = input[i.* + 1];
+            switch (e) {
+                'd', 'D', 'w', 'W', 's', 'S' => {
+                    i.* += 2;
+                    return self.builtinClassItem(e);
+                },
+                'p', 'P' => return propertyClassItem(input, i),
+                'q' => return RegexError.UnexpectedCharacter, // \q{...} strings unsupported
+                else => {},
+            }
+        }
+        const lo = (try readClassCp(input, i)) orelse return RegexError.InvalidCharacterClass;
+        // A range `lo-hi`, but only when `-` is followed by a real character (a
+        // double `-` is the difference operator, a trailing `-` is a literal).
+        if (i.* < input.len and input[i.*] == '-' and i.* + 1 < input.len and
+            input[i.* + 1] != '-' and input[i.* + 1] != ']')
+        {
+            i.* += 1; // consume -
+            const hi = (try readClassCp(input, i)) orelse return RegexError.InvalidCharacterClass;
+            if (hi < lo) return RegexError.InvalidCharacterClass;
+            return .{ .range = .{ .lo = lo, .hi = hi } };
+        }
+        return .{ .range = .{ .lo = lo, .hi = lo } };
+    }
+
+    fn parseSetExpr(self: *Parser, input: []const u8, i: *usize) RegexError!*ast.Node.ClassSet {
+        var negated = false;
+        if (i.* < input.len and input[i.*] == '^') {
+            negated = true;
+            i.* += 1;
+        }
+        var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        var op: ast.Node.ClassOp = .union_;
+        const first = try self.parseSetOperand(input, i);
+        try items.append(self.allocator, first);
+
+        // Determine the operator from what follows the first operand.
+        if (i.* + 1 < input.len and input[i.*] == '&' and input[i.* + 1] == '&') {
+            op = .intersection;
+        } else if (i.* + 1 < input.len and input[i.*] == '-' and input[i.* + 1] == '-') {
+            op = .difference;
+        }
+
+        if (op == .union_) {
+            while (i.* < input.len and input[i.*] != ']') {
+                try items.append(self.allocator, try self.parseSetOperand(input, i));
+            }
+        } else {
+            const sep: u8 = if (op == .intersection) '&' else '-';
+            while (i.* + 1 < input.len and input[i.*] == sep and input[i.* + 1] == sep) {
+                i.* += 2; // consume operator
+                try items.append(self.allocator, try self.parseSetOperand(input, i));
+            }
+        }
+
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{ .op = op, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
+        return set;
+    }
+
+    fn parseClassSetV(self: *Parser) RegexError!*ast.Node {
+        const input = self.lexer.input;
+        const open = self.current_token.span.start; // position of '['
+        var i: usize = open + 1;
+        const set = try self.parseSetExpr(input, &i);
+        if (i >= input.len or input[i] != ']') return RegexError.InvalidCharacterClass;
+        i += 1; // consume ]
+        // Resync the lexer to just past the class and re-read the next token.
+        self.lexer.pos = i;
+        self.lexer.pending_len = 0;
+        self.lexer.pending_pos = 0;
+        self.current_token = try self.lexer.next();
+        return ast.Node.createClassSet(self.allocator, set, common.Span.init(open, i));
+    }
+
     fn parseCharClass(self: *Parser) !*ast.Node {
+        // With the `v` flag, classes use set notation; parse from the raw input
+        // (the byte-token stream can't represent code-point operands/operators).
+        if (self.unicode_sets) return self.parseClassSetV();
         const start = self.current_token.span.start;
         try self.advance(); // consume [
 

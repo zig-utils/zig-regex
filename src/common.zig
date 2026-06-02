@@ -44,6 +44,8 @@ pub const CompileFlags = packed struct {
     dot_all: bool = false,
     extended: bool = false,
     unicode: bool = false,
+    /// The `v` (unicodeSets) flag: character classes use set notation.
+    unicode_sets: bool = false,
 };
 
 /// Span in the source pattern (for error reporting)

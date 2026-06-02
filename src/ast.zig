@@ -35,6 +35,8 @@ pub const NodeType = enum {
     backref,
     /// Unicode property escape `\p{...}` / `\P{...}`
     unicode_property,
+    /// A `/v`-flag character class with set notation `[A&&B]`/`[A--B]`/`[AB]`.
+    class_set,
 };
 
 /// Anchor types
@@ -92,12 +94,74 @@ pub const Node = struct {
         lookbehind: Assertion,
         backref: Backreference,
         unicode_property: UnicodeProp,
+        class_set: *ClassSet,
     };
 
     pub const UnicodeProp = struct {
         spec: @import("unicode.zig").PropSpec,
         negated: bool = false,
     };
+
+    /// A code-point range for a `/v` class set (code points, not bytes).
+    pub const CpRange = struct { lo: u21, hi: u21 };
+
+    pub const ClassOp = enum { union_, intersection, difference };
+
+    pub const ClassItem = union(enum) {
+        range: CpRange,
+        property: struct { spec: @import("unicode.zig").PropSpec, negated: bool },
+        nested: *ClassSet,
+    };
+
+    /// A `/v` class-set expression: a list of items combined by one operator,
+    /// optionally complemented (`[^...]`).
+    pub const ClassSet = struct {
+        op: ClassOp,
+        negated: bool = false,
+        items: []const ClassItem,
+
+        pub fn matches(self: *const ClassSet, cp: u21, ignore_case: bool) bool {
+            const r = switch (self.op) {
+                .union_ => blk: {
+                    for (self.items) |it| if (itemMatches(it, cp, ignore_case)) break :blk true;
+                    break :blk false;
+                },
+                .intersection => blk: {
+                    for (self.items) |it| if (!itemMatches(it, cp, ignore_case)) break :blk false;
+                    break :blk true;
+                },
+                .difference => blk: {
+                    if (self.items.len == 0) break :blk false;
+                    if (!itemMatches(self.items[0], cp, ignore_case)) break :blk false;
+                    for (self.items[1..]) |it| if (itemMatches(it, cp, ignore_case)) break :blk false;
+                    break :blk true;
+                },
+            };
+            return r != self.negated;
+        }
+    };
+
+    fn itemMatches(it: ClassItem, cp: u21, ignore_case: bool) bool {
+        const u = @import("unicode.zig");
+        switch (it) {
+            .range => |r| {
+                if (cp >= r.lo and cp <= r.hi) return true;
+                if (ignore_case) {
+                    // Simple ASCII case folding for the common `i` cases.
+                    if (cp >= 'A' and cp <= 'Z') {
+                        const l = cp + 32;
+                        if (l >= r.lo and l <= r.hi) return true;
+                    } else if (cp >= 'a' and cp <= 'z') {
+                        const up = cp - 32;
+                        if (up >= r.lo and up <= r.hi) return true;
+                    }
+                }
+                return false;
+            },
+            .property => |p| return u.matchesSpec(cp, p.spec) != p.negated,
+            .nested => |n| return n.matches(cp, ignore_case),
+        }
+    }
 
     pub const Concat = struct {
         left: *Node,
@@ -226,6 +290,16 @@ pub const Node = struct {
         node.* = .{
             .node_type = .char_class,
             .data = .{ .char_class = char_class },
+            .span = span,
+        };
+        return node;
+    }
+
+    pub fn createClassSet(allocator: std.mem.Allocator, set: *ClassSet, span: common.Span) !*Node {
+        const node = try allocator.create(Node);
+        node.* = .{
+            .node_type = .class_set,
+            .data = .{ .class_set = set },
             .span = span,
         };
         return node;

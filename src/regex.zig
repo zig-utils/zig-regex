@@ -69,6 +69,7 @@ pub const Regex = struct {
 
         // Parse the pattern into an AST
         var p = try parser.Parser.init(allocator, pattern);
+        p.unicode_sets = flags.unicode_sets;
         var tree = try p.parse();
         errdefer tree.deinit(); // Free AST if compilation fails
 
@@ -661,7 +662,7 @@ pub const Regex = struct {
 fn requiresBacktracking(node: *ast.Node) bool {
     switch (node.node_type) {
         // These features require backtracking
-        .lookahead, .lookbehind, .backref, .unicode_property => return true,
+        .lookahead, .lookbehind, .backref, .unicode_property, .class_set => return true,
 
         // Check for lazy quantifiers
         .star, .plus, .optional => {
