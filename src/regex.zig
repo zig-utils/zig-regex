@@ -195,6 +195,10 @@ pub const Regex = struct {
 
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
+        // Exact-literal fast path: a fixed-string pattern is a substring search.
+        if (self.opt_info.exact_literal) |lit| {
+            if (!self.flags.case_insensitive) return std.mem.indexOf(u8, input, lit) != null;
+        }
         switch (self.engine_type) {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
@@ -267,6 +271,15 @@ pub const Regex = struct {
 
     /// Find the first match in the input string
     pub fn find(self: *const Regex, input: []const u8) !?Match {
+        // Exact-literal fast path: a fixed-string pattern is a substring search.
+        if (self.opt_info.exact_literal) |lit| {
+            if (!self.flags.case_insensitive) {
+                if (std.mem.indexOf(u8, input, lit)) |i| {
+                    return Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len };
+                }
+                return null;
+            }
+        }
         switch (self.engine_type) {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
@@ -316,6 +329,18 @@ pub const Regex = struct {
 
         var pos: usize = 0;
 
+        // Exact-literal fast path: repeated substring search, no NFA.
+        if (self.opt_info.exact_literal) |lit| {
+            if (!self.flags.case_insensitive) {
+                while (std.mem.indexOf(u8, input[pos..], lit)) |rel| {
+                    const i = pos + rel;
+                    try matches.append(allocator, Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len });
+                    pos = i + lit.len;
+                }
+                return matches.toOwnedSlice(allocator);
+            }
+        }
+
         // Thompson path: reuse a single VM across all matches (VM.init does not
         // allocate) and, when the pattern has a literal prefix, use it as a
         // prefilter — `std.mem.indexOf` skips whole non-matching regions instead
@@ -326,7 +351,11 @@ pub const Regex = struct {
             const nfa_mut = @constCast(&self.nfa);
             var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
             defer virtual_machine.deinit();
+            // Prefilters (skipped under case-insensitive matching, where the
+            // byte-exact sets don't hold): a literal prefix is strongest; else a
+            // first-byte set rules out positions that can't start a match.
             const prefix: ?[]const u8 = if (self.flags.case_insensitive) null else self.opt_info.literal_prefix;
+            const first_bytes: ?[256]bool = if (self.flags.case_insensitive or prefix != null) null else self.opt_info.first_bytes;
 
             while (pos <= input.len) {
                 // Locate the next position >= pos where a match starts.
@@ -336,6 +365,9 @@ pub const Regex = struct {
                     if (prefix) |p| {
                         const rel = std.mem.indexOf(u8, input[scan..], p) orelse break;
                         scan += rel;
+                    } else if (first_bytes) |fb| {
+                        while (scan < input.len and !fb[input[scan]]) scan += 1;
+                        if (scan >= input.len) break;
                     }
                     if (try virtual_machine.matchAt(input, scan)) |r| {
                         result = r;

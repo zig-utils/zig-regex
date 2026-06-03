@@ -7,6 +7,19 @@ pub const OptimizationInfo = struct {
     /// This allows skipping ahead in the input using memchr/indexOf
     literal_prefix: ?[]const u8 = null,
 
+    /// Set when the whole pattern is an exact literal string (only literals,
+    /// concatenation, and non-capturing groups — no quantifiers, alternation,
+    /// classes, anchors, or captures). Such a pattern reduces to a substring
+    /// search, bypassing the NFA entirely.
+    exact_literal: ?[]const u8 = null,
+
+    /// The set of bytes that can begin a match, when the pattern always consumes
+    /// at least one byte and that first byte is statically known (e.g. literal
+    /// alternations, `\d+`). Lets the search skip positions whose byte can't
+    /// start a match, generalizing `literal_prefix` to non-prefix patterns.
+    /// Null when unknown / unhelpful (e.g. `.`, nullable patterns).
+    first_bytes: ?[256]bool = null,
+
     /// Whether the pattern is anchored at start (^)
     anchored_start: bool = false,
 
@@ -22,6 +35,9 @@ pub const OptimizationInfo = struct {
     pub fn deinit(self: *OptimizationInfo, allocator: std.mem.Allocator) void {
         if (self.literal_prefix) |prefix| {
             allocator.free(prefix);
+        }
+        if (self.exact_literal) |lit| {
+            allocator.free(lit);
         }
     }
 };
@@ -65,7 +81,123 @@ pub const Optimizer = struct {
         info.min_length = self.calculateMinLength(root);
         info.max_length = self.calculateMaxLength(root);
 
+        // Exact-literal fast path: the entire pattern is a fixed string.
+        if (isExactLiteral(root)) {
+            var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+            errdefer buf.deinit(self.allocator);
+            _ = try self.collectLiteralPrefix(root, &buf);
+            if (buf.items.len >= 1) {
+                info.exact_literal = try buf.toOwnedSlice(self.allocator);
+            } else {
+                buf.deinit(self.allocator);
+            }
+        }
+
+        // First-byte set: usable only when every match consumes at least one
+        // byte (min_length >= 1) and the leading byte set is fully determined.
+        if (info.min_length >= 1) {
+            var set = [_]bool{false} ** 256;
+            if (collectFirstBytes(root, &set) == .ok_consumed) {
+                // Only worthwhile if it actually rules some bytes out.
+                var count: usize = 0;
+                for (set) |b| {
+                    if (b) count += 1;
+                }
+                if (count > 0 and count < 256) info.first_bytes = set;
+            }
+        }
+
         return info;
+    }
+
+    /// Whether the pattern is exactly a fixed string: only literals,
+    /// concatenation, and non-capturing groups. Capturing groups are excluded
+    /// because the fast path does not populate capture slices.
+    fn isExactLiteral(node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .literal => true,
+            .concat => isExactLiteral(node.data.concat.left) and isExactLiteral(node.data.concat.right),
+            .group => node.data.group.capture_index == null and
+                node.data.group.mod == null and
+                isExactLiteral(node.data.group.child),
+            else => false,
+        };
+    }
+
+    /// Status of a first-byte collection over a sub-pattern.
+    const FirstByteStatus = enum {
+        /// Always consumes >= 1 byte; `set` holds every possible first byte.
+        ok_consumed,
+        /// May match empty; `set` holds first bytes for the consuming case, and
+        /// the caller must also consider what can follow.
+        ok_nullable,
+        /// Indeterminate (e.g. `.`, backref, lookaround, Unicode/codepoint
+        /// classes) — abandon the prefilter.
+        fail,
+    };
+
+    /// Collect, into `set`, the bytes that can appear as the first consumed byte
+    /// of a match of `node`. ASCII/byte level only.
+    fn collectFirstBytes(node: *ast.Node, set: *[256]bool) FirstByteStatus {
+        switch (node.node_type) {
+            .literal => {
+                set[node.data.literal] = true;
+                return .ok_consumed;
+            },
+            .char_class => {
+                const cc = node.data.char_class;
+                var b: usize = 0;
+                while (b < 256) : (b += 1) {
+                    if (cc.matches(@intCast(b))) set[b] = true;
+                }
+                return .ok_consumed;
+            },
+            .concat => {
+                const c = node.data.concat;
+                switch (collectFirstBytes(c.left, set)) {
+                    .fail => return .fail,
+                    .ok_consumed => return .ok_consumed,
+                    .ok_nullable => return collectFirstBytes(c.right, set),
+                }
+            },
+            .alternation => {
+                const a = node.data.alternation;
+                const ls = collectFirstBytes(a.left, set);
+                if (ls == .fail) return .fail;
+                const rs = collectFirstBytes(a.right, set);
+                if (rs == .fail) return .fail;
+                return if (ls == .ok_nullable or rs == .ok_nullable) .ok_nullable else .ok_consumed;
+            },
+            .plus => {
+                // Requires >= 1 child match: inherits the child's status.
+                return collectFirstBytes(node.data.plus.child, set);
+            },
+            .star, .optional => {
+                // May match empty; still record the child's first bytes.
+                _ = collectFirstBytes(child_of(node), set);
+                return .ok_nullable;
+            },
+            .repeat => {
+                const r = node.data.repeat;
+                const cs = collectFirstBytes(r.child, set);
+                if (cs == .fail) return .fail;
+                // {0,..} is nullable; {1,..} inherits the child's status.
+                return if (r.bounds.min == 0) .ok_nullable else cs;
+            },
+            .group => return collectFirstBytes(node.data.group.child, set),
+            // Anchors / empty don't consume — transparent, continue past them.
+            .anchor, .empty => return .ok_nullable,
+            // Everything else is indeterminate at the byte level.
+            .any, .backref, .lookahead, .lookbehind, .unicode_property, .class_set => return .fail,
+        }
+    }
+
+    fn child_of(node: *ast.Node) *ast.Node {
+        return switch (node.node_type) {
+            .star => node.data.star.child,
+            .optional => node.data.optional.child,
+            else => unreachable,
+        };
     }
 
     /// Try to extract a literal prefix from the pattern

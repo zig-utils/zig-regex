@@ -31,6 +31,12 @@ const Thread = struct {
     capture_ends: []?usize,
 
     pub fn init(allocator: std.mem.Allocator, state: compiler.StateId, num_captures: usize) !Thread {
+        // No capture groups → no per-thread allocation at all. This is the
+        // common case (counting / boolean / capture-less patterns) and the hot
+        // path of matchAt, which clones a thread per surviving transition.
+        if (num_captures == 0) {
+            return .{ .state = state, .capture_starts = &.{}, .capture_ends = &.{} };
+        }
         const starts = try allocator.alloc(?usize, num_captures);
         const ends = try allocator.alloc(?usize, num_captures);
 
@@ -45,8 +51,8 @@ const Thread = struct {
     }
 
     pub fn deinit(self: *Thread, allocator: std.mem.Allocator) void {
-        allocator.free(self.capture_starts);
-        allocator.free(self.capture_ends);
+        if (self.capture_starts.len != 0) allocator.free(self.capture_starts);
+        if (self.capture_ends.len != 0) allocator.free(self.capture_ends);
     }
 
     pub fn clone(self: *const Thread, allocator: std.mem.Allocator) !Thread {
@@ -67,6 +73,11 @@ pub const VM = struct {
     /// across every `matchAt`. Sized to the NFA state count. Reuse matters
     /// because `find`/`findAll` call `matchAt` once per input position.
     visited: []bool = &.{},
+    /// Reused thread lists for the simulation. Kept on the VM so their backing
+    /// capacity survives across the many `matchAt` calls a single `find` /
+    /// `findAll` makes, instead of being reallocated each call.
+    cur_threads: std.ArrayList(Thread) = .empty,
+    nxt_threads: std.ArrayList(Thread) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, num_captures: usize, flags: common.CompileFlags) VM {
         return .{
@@ -81,6 +92,17 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         if (self.visited.len != 0) self.allocator.free(self.visited);
         self.visited = &.{};
+        self.clearThreadList(&self.cur_threads);
+        self.clearThreadList(&self.nxt_threads);
+        self.cur_threads.deinit(self.allocator);
+        self.nxt_threads.deinit(self.allocator);
+    }
+
+    /// Free the per-thread state in a list and reset its length (keeping the
+    /// backing capacity for reuse by the next matchAt).
+    fn clearThreadList(self: *VM, list: *std.ArrayList(Thread)) void {
+        for (list.items) |*thread| thread.deinit(self.allocator);
+        list.clearRetainingCapacity();
     }
 
     /// Helper to compare characters with case-insensitive support
@@ -105,20 +127,16 @@ pub const VM = struct {
 
     /// Check if the pattern matches at a specific position in the input
     pub fn matchAt(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
-        var current_threads: std.ArrayList(Thread) = .empty;
+        // Borrow the VM's reusable thread lists (empty on entry) and hand them
+        // back — threads freed, capacity retained — when done. This keeps the
+        // backing buffers alive across the many matchAt calls per find/findAll.
+        var current_threads = self.cur_threads;
+        var next_threads = self.nxt_threads;
         defer {
-            for (current_threads.items) |*thread| {
-                thread.deinit(self.allocator);
-            }
-            current_threads.deinit(self.allocator);
-        }
-
-        var next_threads: std.ArrayList(Thread) = .empty;
-        defer {
-            for (next_threads.items) |*thread| {
-                thread.deinit(self.allocator);
-            }
-            next_threads.deinit(self.allocator);
+            self.clearThreadList(&current_threads);
+            self.clearThreadList(&next_threads);
+            self.cur_threads = current_threads;
+            self.nxt_threads = next_threads;
         }
 
         // Visited bitmap for epsilon closure — reused across matchAt calls

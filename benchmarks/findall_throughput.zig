@@ -80,7 +80,10 @@ fn writeStdout(io: std.Io, bytes: []const u8) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = init.gpa;
+    // Use the release-grade SMP allocator for the engine work — `init.gpa` is a
+    // safety/debug allocator, which would dominate the timing and skew the
+    // comparison against Rust's fast global allocator.
+    const gpa = std.heap.smp_allocator;
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
