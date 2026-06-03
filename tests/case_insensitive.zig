@@ -137,3 +137,29 @@ test "case-insensitive exact-literal fast path: find/findAll/count/isMatch" {
     // No false positives across case-folding of non-matching letters.
     try std.testing.expectEqual(@as(usize, 0), try re.count("help hell oh hallo"));
 }
+
+test "case-insensitive repeated-atom fast path folds the class" {
+    const allocator = std.testing.allocator;
+
+    // [a-z]+ with the i flag must match uppercase runs too.
+    var re = try Regex.compileWithFlags(allocator, "[a-z]+", .{ .case_insensitive = true });
+    defer re.deinit();
+
+    const text = "ABC def GhI 123 jkL";
+    try std.testing.expectEqual(@as(usize, 4), try re.count(text));
+
+    const all = try re.findAll(allocator, text);
+    defer {
+        for (all) |*x| x.deinit(allocator);
+        allocator.free(all);
+    }
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+    try std.testing.expectEqualStrings("ABC", all[0].slice);
+    try std.testing.expectEqualStrings("def", all[1].slice);
+    try std.testing.expectEqualStrings("GhI", all[2].slice);
+    try std.testing.expectEqualStrings("jkL", all[3].slice);
+
+    var m = (try re.find("999 XyZ")).?;
+    defer m.deinit(allocator);
+    try std.testing.expectEqualStrings("XyZ", m.slice);
+}

@@ -425,6 +425,20 @@ pub const Regex = struct {
         return false;
     }
 
+    /// ASCII case-fold a byte-membership table: include both cases of every set
+    /// byte. Lets the repeated-atom fast path handle the case-insensitive flag.
+    fn foldTableCI(t: [256]bool) [256]bool {
+        var r = t;
+        var b: usize = 0;
+        while (b < 256) : (b += 1) {
+            if (t[b]) {
+                r[std.ascii.toLower(@intCast(b))] = true;
+                r[std.ascii.toUpper(@intCast(b))] = true;
+            }
+        }
+        return r;
+    }
+
     /// Longest literal in `set` that matches at `input[pos..]`, or 0 if none.
     /// Longest wins, matching the engine's alternation semantics (`a|ab` → "ab").
     fn longestLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
@@ -449,16 +463,15 @@ pub const Regex = struct {
         // Repeated-atom fast path: a match exists iff some run of `table` bytes
         // reaches the minimum length.
         if (self.opt_info.repeat_atom) |ra| {
-            if (!self.flags.case_insensitive) {
-                var p: usize = 0;
-                while (p < input.len) {
-                    while (p < input.len and !ra.table[input[p]]) p += 1;
-                    var run: usize = 0;
-                    while (p < input.len and ra.table[input[p]]) : (p += 1) run += 1;
-                    if (run >= ra.min) return true;
-                }
-                return false;
+            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            var p: usize = 0;
+            while (p < input.len) {
+                while (p < input.len and !table[input[p]]) p += 1;
+                var run: usize = 0;
+                while (p < input.len and table[input[p]]) : (p += 1) run += 1;
+                if (run >= ra.min) return true;
             }
+            return false;
         }
         // Literal-alternation fast path.
         if (self.opt_info.literal_set) |set| {
@@ -587,19 +600,18 @@ pub const Regex = struct {
         }
         // Repeated-atom fast path: leftmost maximal run of `table` bytes.
         if (self.opt_info.repeat_atom) |ra| {
-            if (!self.flags.case_insensitive) {
-                const max = ra.max orelse std.math.maxInt(usize);
-                var p: usize = 0;
-                while (p < input.len) {
-                    while (p < input.len and !ra.table[input[p]]) p += 1;
-                    if (p >= input.len) break;
-                    const start = p;
-                    var run: usize = 0;
-                    while (p < input.len and ra.table[input[p]] and run < max) : (p += 1) run += 1;
-                    if (run >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
-                }
-                return null;
+            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const max = ra.max orelse std.math.maxInt(usize);
+            var p: usize = 0;
+            while (p < input.len) {
+                while (p < input.len and !table[input[p]]) p += 1;
+                if (p >= input.len) break;
+                const start = p;
+                var run: usize = 0;
+                while (p < input.len and table[input[p]] and run < max) : (p += 1) run += 1;
+                if (run >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
             }
+            return null;
         }
         // Literal-alternation fast path: leftmost position, longest literal.
         if (self.opt_info.literal_set) |set| {
@@ -729,20 +741,19 @@ pub const Regex = struct {
         // (capped at max) is one non-overlapping match. No NFA, no per-match
         // capture allocation.
         if (self.opt_info.repeat_atom) |ra| {
-            if (!self.flags.case_insensitive) {
-                const max = ra.max orelse std.math.maxInt(usize);
-                while (pos < input.len) {
-                    while (pos < input.len and !ra.table[input[pos]]) pos += 1;
-                    if (pos >= input.len) break;
-                    const start = pos;
-                    var run: usize = 0;
-                    while (pos < input.len and ra.table[input[pos]] and run < max) : (pos += 1) run += 1;
-                    if (run >= ra.min) {
-                        try matches.append(allocator, Match{ .slice = input[start..pos], .start = start, .end = pos });
-                    }
+            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const max = ra.max orelse std.math.maxInt(usize);
+            while (pos < input.len) {
+                while (pos < input.len and !table[input[pos]]) pos += 1;
+                if (pos >= input.len) break;
+                const start = pos;
+                var run: usize = 0;
+                while (pos < input.len and table[input[pos]] and run < max) : (pos += 1) run += 1;
+                if (run >= ra.min) {
+                    try matches.append(allocator, Match{ .slice = input[start..pos], .start = start, .end = pos });
                 }
-                return matches.toOwnedSlice(allocator);
             }
+            return matches.toOwnedSlice(allocator);
         }
         // Literal-alternation fast path: each leftmost-longest literal match.
         if (self.opt_info.literal_set) |set| {
@@ -927,17 +938,16 @@ pub const Regex = struct {
         }
         // Repeated-atom: count maximal runs of >= min table bytes.
         if (self.opt_info.repeat_atom) |ra| {
-            if (!self.flags.case_insensitive) {
-                const max = ra.max orelse std.math.maxInt(usize);
-                while (pos < input.len) {
-                    while (pos < input.len and !ra.table[input[pos]]) pos += 1;
-                    if (pos >= input.len) break;
-                    var run: usize = 0;
-                    while (pos < input.len and ra.table[input[pos]] and run < max) : (pos += 1) run += 1;
-                    if (run >= ra.min) n += 1;
-                }
-                return n;
+            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const max = ra.max orelse std.math.maxInt(usize);
+            while (pos < input.len) {
+                while (pos < input.len and !table[input[pos]]) pos += 1;
+                if (pos >= input.len) break;
+                var run: usize = 0;
+                while (pos < input.len and table[input[pos]] and run < max) : (pos += 1) run += 1;
+                if (run >= ra.min) n += 1;
             }
+            return n;
         }
         // Literal-alternation: leftmost-longest literal at each candidate.
         if (self.opt_info.literal_set) |set| {
