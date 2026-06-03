@@ -300,6 +300,18 @@ pub const Regex = struct {
             !self.opt_info.has_lazy;
     }
 
+    /// Next start to try after a failed DFA match at `scan`. When the pattern
+    /// begins with an unbounded greedy class, skip past that class's run — no
+    /// start within it can match (a later start's match implies one here).
+    fn dfaNextScan(self: *const Regex, input: []const u8, scan: usize) usize {
+        if (self.opt_info.first_unbounded_class) |t| {
+            var s = scan;
+            while (s < input.len and t[input[s]]) s += 1;
+            if (s > scan) return s;
+        }
+        return scan + 1;
+    }
+
     /// count() via the lazy DFA. Returns error.DfaOverflow if the DFA exceeds its
     /// state cap, so the caller can fall back to the NFA.
     fn countWithDfa(self: *const Regex, input: []const u8) dfa.Error!usize {
@@ -320,7 +332,7 @@ pub const Regex = struct {
                     found_end = end;
                     break;
                 }
-                scan += 1;
+                scan = self.dfaNextScan(input, scan);
             }
             const end = found_end orelse break;
             n += 1;
@@ -358,7 +370,8 @@ pub const Regex = struct {
                     return Match{ .slice = input[scan..end], .start = scan, .end = end };
                 }
             }
-            scan += 1;
+            // No match at scan (DFA and NFA agree); skip the leading run if any.
+            scan = self.dfaNextScan(input, scan);
         }
         return null;
     }
@@ -390,7 +403,7 @@ pub const Regex = struct {
                     matched_end = end;
                     break;
                 }
-                scan += 1;
+                scan = self.dfaNextScan(input, scan);
             }
             const end = matched_end orelse break;
             if (v) |*vv| {
@@ -420,7 +433,7 @@ pub const Regex = struct {
                 if (pos >= input.len) break;
             }
             if (try d.longestMatchFrom(input, pos)) |_| return true;
-            pos += 1;
+            pos = self.dfaNextScan(input, pos);
         }
         return false;
     }

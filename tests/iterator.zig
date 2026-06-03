@@ -280,3 +280,27 @@ test "required-literal fast-fail correctness" {
         try std.testing.expectEqual(c.n != 0, try re.isMatch(c.input));
     }
 }
+
+// DFA first-atom run-skip (leading unbounded class): must skip only on true
+// failures, never miss a match that starts mid-run.
+test "DFA run-skip correctness for leading unbounded class" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pat: []const u8, input: []const u8, n: usize };
+    const cases = [_]Case{
+        .{ .pat = "\\w+[0-9]", .input = "ab1cd hello x9 word42 z", .n = 3 }, // ab1, x9, word42
+        .{ .pat = "\\w+ab", .input = "xxab y zzab noab", .n = 3 },
+        .{ .pat = "[a-z]+9", .input = "aa9 bb hello9 z", .n = 2 },
+        .{ .pat = "\\w+[0-9]", .input = "no digits here at all", .n = 0 },
+    };
+    inline for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pat);
+        defer re.deinit();
+        try std.testing.expectEqual(c.n, try re.count(c.input));
+        const all = try re.findAll(allocator, c.input);
+        defer {
+            for (all) |*m| m.deinit(allocator);
+            allocator.free(all);
+        }
+        try std.testing.expectEqual(c.n, all.len);
+    }
+}

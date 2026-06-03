@@ -30,6 +30,14 @@ pub const OptimizationInfo = struct {
     /// bytes in `table` — instead of the NFA. Null otherwise.
     repeat_atom: ?RepeatAtom = null,
 
+    /// Set when the pattern begins with an unbounded greedy repeat (`+`/`*`/
+    /// `{m,}`) of a byte class — the table is that class. If an anchored match
+    /// fails at some position, no start within the class's run can match (a later
+    /// start's match would imply one from the current start, which consumes more
+    /// of the same class), so the DFA search can skip the whole run. Null when
+    /// the pattern doesn't start that way.
+    first_unbounded_class: ?[256]bool = null,
+
     /// The set of bytes that can begin a match, when the pattern always consumes
     /// at least one byte and that first byte is statically known (e.g. literal
     /// alternations, `\d+`). Lets the search skip positions whose byte can't
@@ -151,6 +159,9 @@ pub const Optimizer = struct {
 
         // Single repeated-atom fast path (greedy, min >= 1).
         info.repeat_atom = detectRepeatAtom(root);
+
+        // Leading unbounded greedy class (for the DFA-search run-skip).
+        info.first_unbounded_class = detectFirstUnboundedClass(root);
 
         // Alternation-of-literals fast path (>= 2 literals).
         if (info.exact_literal == null) {
@@ -277,6 +288,41 @@ pub const Optimizer = struct {
                 return true;
             },
         }
+    }
+
+    /// Byte-membership table for a literal or char-class node, or null.
+    fn classTableOf(node: *ast.Node) ?[256]bool {
+        var t = std.mem.zeroes([256]bool);
+        switch (node.node_type) {
+            .literal => t[node.data.literal] = true,
+            .char_class => {
+                const cc = node.data.char_class;
+                var b: usize = 0;
+                while (b < 256) : (b += 1) {
+                    if (cc.matches(@intCast(b))) t[b] = true;
+                }
+            },
+            else => return null,
+        }
+        return t;
+    }
+
+    /// If the pattern begins with an unbounded greedy repeat of a byte class,
+    /// return that class's table. Descends the leftmost path through concat and
+    /// plain groups.
+    fn detectFirstUnboundedClass(node: *ast.Node) ?[256]bool {
+        return switch (node.node_type) {
+            .concat => detectFirstUnboundedClass(node.data.concat.left),
+            .group => if (node.data.group.mod != null) null else detectFirstUnboundedClass(node.data.group.child),
+            .plus => if (node.data.plus.greedy) classTableOf(node.data.plus.child) else null,
+            .star => if (node.data.star.greedy) classTableOf(node.data.star.child) else null,
+            .repeat => blk: {
+                const r = node.data.repeat;
+                if (!r.greedy or r.bounds.max != null) break :blk null;
+                break :blk classTableOf(r.child);
+            },
+            else => null,
+        };
     }
 
     /// Detect a whole-pattern single greedy-repeated byte atom (min >= 1). Lazy
