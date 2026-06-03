@@ -314,15 +314,13 @@ pub const Regex = struct {
         return s;
     }
 
-    /// Next start to try after a failed DFA match at `scan`. When the pattern
-    /// begins with an unbounded greedy class, skip past that class's run — no
-    /// start within it can match (a later start's match implies one here).
-    fn dfaNextScan(self: *const Regex, input: []const u8, scan: usize) usize {
-        if (self.opt_info.first_unbounded_class) |t| {
-            var s = scan;
-            while (s < input.len and t[input[s]]) s += 1;
-            if (s > scan) return s;
-        }
+    /// Next start to try after a failed DFA match at `scan`, where `stop` is the
+    /// position the DFA halted at. When the pattern begins with an unbounded
+    /// greedy class, the DFA dies exactly at that class's run end, so we can jump
+    /// straight to `stop` (no rescan) — no start within the run can match. Other
+    /// patterns advance by one.
+    fn dfaFailSkip(self: *const Regex, scan: usize, stop: usize) usize {
+        if (self.opt_info.first_unbounded_class != null) return @max(stop, scan + 1);
         return scan + 1;
     }
 
@@ -342,11 +340,12 @@ pub const Regex = struct {
                     scan = self.skipToCandidate(input, scan);
                     if (scan >= input.len) break;
                 }
-                if (try d.longestMatchFrom(input, scan)) |end| {
+                const sc = try d.longestMatchFrom(input, scan);
+                if (sc.end) |end| {
                     found_end = end;
                     break;
                 }
-                scan = self.dfaNextScan(input, scan);
+                scan = self.dfaFailSkip(scan, sc.stop);
             }
             const end = found_end orelse break;
             n += 1;
@@ -375,7 +374,8 @@ pub const Regex = struct {
                 scan = self.skipToCandidate(input, scan);
                 if (scan >= input.len) break;
             }
-            if (try d.longestMatchFrom(input, scan)) |end| {
+            const sc = try d.longestMatchFrom(input, scan);
+            if (sc.end) |end| {
                 if (v) |*vv| {
                     if (try vv.matchAt(input, scan)) |result| {
                         return try self.buildMatch(input, result);
@@ -385,7 +385,7 @@ pub const Regex = struct {
                 }
             }
             // No match at scan (DFA and NFA agree); skip the leading run if any.
-            scan = self.dfaNextScan(input, scan);
+            scan = self.dfaFailSkip(scan, sc.stop);
         }
         return null;
     }
@@ -413,11 +413,12 @@ pub const Regex = struct {
                     scan = self.skipToCandidate(input, scan);
                     if (scan >= input.len) break;
                 }
-                if (try d.longestMatchFrom(input, scan)) |end| {
+                const sc = try d.longestMatchFrom(input, scan);
+                if (sc.end) |end| {
                     matched_end = end;
                     break;
                 }
-                scan = self.dfaNextScan(input, scan);
+                scan = self.dfaFailSkip(scan, sc.stop);
             }
             const end = matched_end orelse break;
             if (v) |*vv| {
@@ -446,8 +447,9 @@ pub const Regex = struct {
                 pos = self.skipToCandidate(input, pos);
                 if (pos >= input.len) break;
             }
-            if (try d.longestMatchFrom(input, pos)) |_| return true;
-            pos = self.dfaNextScan(input, pos);
+            const sc = try d.longestMatchFrom(input, pos);
+            if (sc.end) |_| return true;
+            pos = self.dfaFailSkip(pos, sc.stop);
         }
         return false;
     }

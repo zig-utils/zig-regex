@@ -192,10 +192,14 @@ pub const LazyDfa = struct {
         return result;
     }
 
-    /// End position of the longest match starting at `start`, or null. Identical
-    /// boundaries to `vm.matchAt`. Hot loop caches the flat slices and re-fetches
-    /// only when a transition is computed (which may grow them).
-    pub fn longestMatchFrom(self: *LazyDfa, input: []const u8, start: usize) Error!?usize {
+    /// Result of an anchored scan: the longest match end (or null), plus `stop` —
+    /// the position where the DFA halted (died or end of input).
+    pub const Scan = struct { end: ?usize, stop: usize };
+
+    /// Longest match starting at `start` (identical boundaries to `vm.matchAt`),
+    /// reporting where the scan stopped. Hot loop caches the flat slices and
+    /// re-fetches only when a transition is computed (which may grow them).
+    pub fn longestMatchFrom(self: *LazyDfa, input: []const u8, start: usize) Error!Scan {
         var s: usize = @intCast(try self.getStart());
         var trans = self.trans.items;
         var acc = self.acc.items;
@@ -213,6 +217,6 @@ pub const LazyDfa = struct {
             p += 1;
             if (acc[s]) last = p;
         }
-        return last;
+        return .{ .end = last, .stop = p };
     }
 };
