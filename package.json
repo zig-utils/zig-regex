@@ -5,5 +5,8 @@
     "release": "pantry release patch --yes",
     "release:minor": "pantry release minor --yes",
     "release:major": "pantry release major --yes"
+  },
+  "dependencies": {
+    "ziglang.org": "^0.16.0"
   }
 }

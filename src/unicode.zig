@@ -706,14 +706,14 @@ test "unicode: CJK and extended ranges" {
     try std.testing.expectEqual(GeneralCategory.Lo, getGeneralCategory(0x9FFF));
     try std.testing.expect(matchesProperty(0x4E00, .Letter));
 
-    // Hangul Syllables
+    // Hangul Syllables (block runs U+AC00..U+D7A3; U+D7A4..U+D7AF are unassigned)
     try std.testing.expectEqual(GeneralCategory.Lo, getGeneralCategory(0xAC00));
-    try std.testing.expectEqual(GeneralCategory.Lo, getGeneralCategory(0xD7AF));
+    try std.testing.expectEqual(GeneralCategory.Lo, getGeneralCategory(0xD7A3));
     try std.testing.expect(matchesProperty(0xAC00, .Letter));
 
-    // Arabic
-    try std.testing.expectEqual(GeneralCategory.Lo, getGeneralCategory(0x0600));
-    try std.testing.expect(matchesProperty(0x0600, .Letter));
+    // Arabic (U+0600 is the ARABIC NUMBER SIGN, a format char; use a real letter)
+    try std.testing.expectEqual(GeneralCategory.Lo, getGeneralCategory(0x0627)); // ARABIC LETTER ALEF
+    try std.testing.expect(matchesProperty(0x0627, .Letter));
 }
 
 // Stress and integration tests

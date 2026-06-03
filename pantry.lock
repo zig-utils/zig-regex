@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "lockfileVersion": 2,
+  "packages": {
+    "ziglang.org@0.16.0": {
+      "name": "ziglang.org",
+      "version": "0.16.0",
+      "source": "ziglang"
+    }
+  }
+}

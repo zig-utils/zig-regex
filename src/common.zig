@@ -35,6 +35,23 @@ pub const CharClass = struct {
         }
         return if (self.negated) !found else found;
     }
+
+    /// Case-insensitive membership test. Folding is applied to the *membership*
+    /// decision (testing the character and its ASCII case variants), and only
+    /// then is negation applied — so a negated class like `[^a]` under `i`
+    /// correctly rejects both `a` and `A`.
+    pub fn matchesCI(self: CharClass, c: Char) bool {
+        const lo = std.ascii.toLower(c);
+        const up = std.ascii.toUpper(c);
+        var found = false;
+        for (self.ranges) |range| {
+            if (range.contains(c) or range.contains(lo) or range.contains(up)) {
+                found = true;
+                break;
+            }
+        }
+        return if (self.negated) !found else found;
+    }
 };
 
 /// Regex compilation flags

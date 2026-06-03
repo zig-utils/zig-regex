@@ -774,7 +774,10 @@ pub const BacktrackEngine = struct {
         if (pos >= self.input.len) return null;
 
         const c = self.input[pos];
-        const matches = char_class.matches(c);
+        const matches = if (self.flags.case_insensitive)
+            char_class.matchesCI(c)
+        else
+            char_class.matches(c);
 
         return if (matches) pos + 1 else null;
     }

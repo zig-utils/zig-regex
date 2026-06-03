@@ -142,6 +142,9 @@ pub const PrettyPrinter = struct {
                 const up = node.data.unicode_property;
                 try writer.print("UnicodeProperty: \\{c}{{...}}\n", .{if (up.negated) @as(u8, 'P') else 'p'});
             },
+            .class_set => {
+                try writer.writeAll("ClassSet (/v set notation)\n");
+            },
         }
     }
 
@@ -249,6 +252,11 @@ pub const PrettyPrinter = struct {
             .backref => {
                 try writer.print("(backref {d})", .{node.data.backref.index});
             },
+            .unicode_property => {
+                const up = node.data.unicode_property;
+                try writer.print("(uprop \\{c})", .{if (up.negated) @as(u8, 'P') else 'p'});
+            },
+            .class_set => try writer.writeAll("(class-set)"),
         }
     }
 
@@ -327,6 +335,8 @@ pub const PrettyPrinter = struct {
                 try writer.print("Lookbehind\\n(?<{s})", .{sign});
             },
             .backref => try writer.print("Backref\\n\\\\{d}", .{node.data.backref.index}),
+            .unicode_property => try writer.writeAll("UnicodeProp"),
+            .class_set => try writer.writeAll("ClassSet"),
         }
 
         try writer.writeAll("\"];\n");
@@ -464,6 +474,11 @@ pub const PrettyPrinter = struct {
             .backref => {
                 try writer.print("\\{d}", .{node.data.backref.index});
             },
+            .unicode_property => {
+                const up = node.data.unicode_property;
+                try writer.print("\\{c}{{...}}", .{if (up.negated) @as(u8, 'P') else 'p'});
+            },
+            .class_set => try writer.writeAll("[...]"),
         }
     }
 

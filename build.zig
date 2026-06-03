@@ -378,6 +378,20 @@ pub fn build(b: *std.Build) void {
     const run_parser_compiler_edge_cases_tests = b.addRunArtifact(parser_compiler_edge_cases_tests);
     test_step.dependOn(&run_parser_compiler_edge_cases_tests.step);
 
+    // Inline flag groups / scoped modifiers (issue #9)
+    const inline_modifiers_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/inline_modifiers.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_inline_modifiers_tests = b.addRunArtifact(inline_modifiers_tests);
+    test_step.dependOn(&run_inline_modifiers_tests.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
