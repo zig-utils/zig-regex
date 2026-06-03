@@ -84,6 +84,33 @@ pub const Plan = struct {
         }
         return vm.MatchResult{ .start = start, .end = pos, .captures = caps };
     }
+
+    /// Match end at `start` without building captures — for count/isMatch.
+    pub fn matchEndAt(self: *const Plan, input: []const u8, start: usize) ?usize {
+        var pos = start;
+        for (self.segs) |seg| {
+            const mx = seg.max orelse std.math.maxInt(usize);
+            var cnt: usize = 0;
+            while (pos < input.len and seg.table[input[pos]] and cnt < mx) : (pos += 1) cnt += 1;
+            if (cnt < seg.min) return null;
+        }
+        return pos;
+    }
+
+    /// Next start position to try after a failed `matchAt(scan)`. When the first
+    /// atom is unbounded (`+`/`*`), a failure means no start within its current
+    /// run can match (every such start consumes the same run — by disjointness
+    /// the next atom can't begin inside it — and hits the same later failure), so
+    /// skip past the whole run. Otherwise advance by one. Always makes progress.
+    pub fn nextScan(self: *const Plan, input: []const u8, scan: usize) usize {
+        if (self.segs[0].max == null) {
+            const t0 = &self.segs[0].table;
+            var s = scan;
+            while (s < input.len and t0[input[s]]) s += 1;
+            if (s > scan) return s;
+        }
+        return scan + 1;
+    }
 };
 
 const Builder = struct {

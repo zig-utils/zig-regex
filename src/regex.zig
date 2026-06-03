@@ -505,6 +505,20 @@ pub const Regex = struct {
                 return false;
             }
         }
+        // One-pass plan (bounds only).
+        if (self.onepass) |plan| {
+            const fb = self.opt_info.first_bytes;
+            var scan: usize = 0;
+            while (scan <= input.len) {
+                if (fb) |t| {
+                    while (scan < input.len and !t[input[scan]]) scan += 1;
+                    if (scan >= input.len) break;
+                }
+                if (plan.matchEndAt(input, scan)) |_| return true;
+                scan = plan.nextScan(input, scan);
+            }
+            return false;
+        }
         // Lazy-DFA path for eligible general patterns.
         if (self.dfaEligible()) {
             if (self.isMatchWithDfa(input)) |b| {
@@ -659,7 +673,7 @@ pub const Regex = struct {
                 if (try plan.matchAt(self.allocator, input, scan)) |result| {
                     return try self.buildMatch(input, result);
                 }
-                scan += 1;
+                scan = plan.nextScan(input, scan);
             }
             return null;
         }
@@ -810,7 +824,7 @@ pub const Regex = struct {
                         found = r;
                         break;
                     }
-                    scan += 1;
+                    scan = plan.nextScan(input, scan);
                 }
                 const result = found orelse break;
                 const captures = try allocator.alloc([]const u8, result.captures.len);
@@ -989,6 +1003,29 @@ pub const Regex = struct {
             }
         }
 
+        // One-pass plan (bounds only) — counts non-overlapping matches.
+        if (self.onepass) |plan| {
+            const fb = self.opt_info.first_bytes;
+            while (pos <= input.len) {
+                var scan = pos;
+                var matched_end: ?usize = null;
+                while (scan <= input.len) {
+                    if (fb) |t| {
+                        while (scan < input.len and !t[input[scan]]) scan += 1;
+                        if (scan >= input.len) break;
+                    }
+                    if (plan.matchEndAt(input, scan)) |end| {
+                        matched_end = end;
+                        break;
+                    }
+                    scan = plan.nextScan(input, scan);
+                }
+                const end = matched_end orelse break;
+                n += 1;
+                pos = if (end > scan) end else end + 1;
+            }
+            return n;
+        }
         // Lazy-DFA path for eligible general patterns.
         if (self.dfaEligible()) {
             if (self.countWithDfa(input)) |c| {
