@@ -45,6 +45,10 @@ pub const OptimizationInfo = struct {
     /// Null when unknown / unhelpful (e.g. `.`, nullable patterns).
     first_bytes: ?[256]bool = null,
 
+    /// Set when `first_bytes` contains exactly one byte: the search can then skip
+    /// to candidates with a SIMD `indexOfScalar` instead of a scalar table walk.
+    first_byte_single: ?u8 = null,
+
     /// Whether the pattern contains any position assertion (^ $ \A \z \b \B).
     /// The lazy DFA can't represent these, so it's disabled when true.
     has_assertions: bool = false,
@@ -188,7 +192,17 @@ pub const Optimizer = struct {
                 for (set) |b| {
                     if (b) count += 1;
                 }
-                if (count > 0 and count < 256) info.first_bytes = set;
+                if (count > 0 and count < 256) {
+                    info.first_bytes = set;
+                    if (count == 1) {
+                        for (set, 0..) |b, i| {
+                            if (b) {
+                                info.first_byte_single = @intCast(i);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 

@@ -300,6 +300,20 @@ pub const Regex = struct {
             !self.opt_info.has_lazy;
     }
 
+    /// Skip to the next position >= `scan` whose byte can start a match, or
+    /// `input.len` if none. Uses a SIMD `indexOfScalar` when the first-byte set
+    /// is a single byte; otherwise a scalar table walk. Callers only invoke this
+    /// when `first_bytes` is set.
+    fn skipToCandidate(self: *const Regex, input: []const u8, scan: usize) usize {
+        if (self.opt_info.first_byte_single) |b| {
+            return std.mem.indexOfScalarPos(u8, input, scan, b) orelse input.len;
+        }
+        const t = self.opt_info.first_bytes.?;
+        var s = scan;
+        while (s < input.len and !t[input[s]]) s += 1;
+        return s;
+    }
+
     /// Next start to try after a failed DFA match at `scan`. When the pattern
     /// begins with an unbounded greedy class, skip past that class's run — no
     /// start within it can match (a later start's match implies one here).
@@ -324,8 +338,8 @@ pub const Regex = struct {
             var scan = pos;
             var found_end: ?usize = null;
             while (scan <= input.len) {
-                if (fb) |t| {
-                    while (scan < input.len and !t[input[scan]]) scan += 1;
+                if (fb != null) {
+                    scan = self.skipToCandidate(input, scan);
                     if (scan >= input.len) break;
                 }
                 if (try d.longestMatchFrom(input, scan)) |end| {
@@ -357,8 +371,8 @@ pub const Regex = struct {
         const fb = self.opt_info.first_bytes;
         var scan: usize = 0;
         while (scan <= input.len) {
-            if (fb) |t| {
-                while (scan < input.len and !t[input[scan]]) scan += 1;
+            if (fb != null) {
+                scan = self.skipToCandidate(input, scan);
                 if (scan >= input.len) break;
             }
             if (try d.longestMatchFrom(input, scan)) |end| {
@@ -395,8 +409,8 @@ pub const Regex = struct {
             var scan = pos;
             var matched_end: ?usize = null;
             while (scan <= input.len) {
-                if (fb) |t| {
-                    while (scan < input.len and !t[input[scan]]) scan += 1;
+                if (fb != null) {
+                    scan = self.skipToCandidate(input, scan);
                     if (scan >= input.len) break;
                 }
                 if (try d.longestMatchFrom(input, scan)) |end| {
@@ -428,8 +442,8 @@ pub const Regex = struct {
         const fb = self.opt_info.first_bytes;
         var pos: usize = 0;
         while (pos <= input.len) {
-            if (fb) |t| {
-                while (pos < input.len and !t[input[pos]]) pos += 1;
+            if (fb != null) {
+                pos = self.skipToCandidate(input, pos);
                 if (pos >= input.len) break;
             }
             if (try d.longestMatchFrom(input, pos)) |_| return true;
