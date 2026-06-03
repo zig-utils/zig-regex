@@ -17,10 +17,10 @@
 //!   - Thompson-eligible only: no backreferences, lookaround.
 //!   - No alternation, no anchors (^ $ \b), no case-insensitive.
 //!   - Atoms are a single base (literal / char-class / `.`) with an optional
-//!     greedy quantifier; every atom matches at least one byte (no `*`, `?`,
-//!     `{0,n}` — nullable atoms are ambiguous here).
+//!     greedy quantifier (`+`, `*`, `?`, `{m,n}`); `{0,0}` is rejected.
 //!   - Quantifiers wrap only a base, never a group.
-//!   - Every variable-length atom's byte set is disjoint from the next atom's.
+//!   - Every variable-length atom's byte set is disjoint from the next atom's —
+//!     this is what makes greedy matching unambiguous even for nullable atoms.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -141,15 +141,28 @@ const Builder = struct {
                 try self.pushSegment(table, 1, null);
                 return true;
             },
+            .star => {
+                if (!node.data.star.greedy) return false;
+                if (!self.baseTable(node.data.star.child, &table)) return false;
+                try self.pushSegment(table, 0, null);
+                return true;
+            },
+            .optional => {
+                if (!node.data.optional.greedy) return false;
+                if (!self.baseTable(node.data.optional.child, &table)) return false;
+                try self.pushSegment(table, 0, 1);
+                return true;
+            },
             .repeat => {
                 const r = node.data.repeat;
-                if (!r.greedy or r.bounds.min < 1) return false; // nullable rejected
+                if (!r.greedy) return false;
+                if (r.bounds.max) |mx| {
+                    if (mx == 0) return false; // {0,0} matches nothing useful
+                }
                 if (!self.baseTable(r.child, &table)) return false;
                 try self.pushSegment(table, r.bounds.min, r.bounds.max);
                 return true;
             },
-            // star / optional are nullable -> not supported.
-            .star, .optional => return false,
             .concat => {
                 if (!try self.flatten(node.data.concat.left)) return false;
                 return try self.flatten(node.data.concat.right);
@@ -257,6 +270,9 @@ test "onepass: differential vs NFA across patterns/inputs/positions" {
         "(foo)([0-9]+)",   "(a+)(b+)",        "(\\w+):(\\d+)",
         "x(\\d+)y",         "([A-Z])([a-z]+)", "(\\d{2,4})-(\\d+)",
         "(ab+)(c)",         "(\\d+)\\.(\\d+)",
+        // nullable atoms (still disjoint-bounded)
+        "(\\w*)@(\\w*)",    "(\\d*)-(\\d+)",   "(a?)(b+)",
+        "(x*)(y*)",         "(\\w*)",          "(-?)(\\d+)",
     };
     const inputs = [_][]const u8{
         "",                 "a",               "ab12",
