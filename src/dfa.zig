@@ -32,7 +32,13 @@ pub const LazyDfa = struct {
     num_states: usize,
     word_count: usize, // bytes per state-set bitset
 
-    states: std.ArrayList(DfaState),
+    // Flat tables indexed by DFA state for cache-friendly stepping:
+    //   trans[state * 256 + byte] -> UNCOMPUTED / DEAD / next state
+    //   acc[state]                -> accepting?
+    //   keys[state]               -> owned NFA-state-set bitset (also map key)
+    trans: std.ArrayList(i32),
+    acc: std.ArrayList(bool),
+    keys: std.ArrayList([]u8),
     map: std.StringHashMapUnmanaged(i32), // bitset bytes -> dfa index
 
     start_index: i32, // UNCOMPUTED until first use
@@ -43,12 +49,6 @@ pub const LazyDfa = struct {
     closure_buf: []u8,
     stack: std.ArrayList(usize),
 
-    const DfaState = struct {
-        key: []u8, // owned bitset, also the map key
-        accepting: bool,
-        trans: [256]i32, // UNCOMPUTED / DEAD / dfa index
-    };
-
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, flags: common.CompileFlags) !LazyDfa {
         const num_states = nfa.states.items.len;
         const word_count = (num_states + 7) / 8;
@@ -58,7 +58,9 @@ pub const LazyDfa = struct {
             .flags = flags,
             .num_states = num_states,
             .word_count = word_count,
-            .states = .empty,
+            .trans = .empty,
+            .acc = .empty,
+            .keys = .empty,
             .map = .{},
             .start_index = UNCOMPUTED,
             .overflow = false,
@@ -69,8 +71,10 @@ pub const LazyDfa = struct {
     }
 
     pub fn deinit(self: *LazyDfa) void {
-        for (self.states.items) |*s| self.allocator.free(s.key);
-        self.states.deinit(self.allocator);
+        for (self.keys.items) |k| self.allocator.free(k);
+        self.keys.deinit(self.allocator);
+        self.trans.deinit(self.allocator);
+        self.acc.deinit(self.allocator);
         self.map.deinit(self.allocator);
         self.allocator.free(self.move_buf);
         self.allocator.free(self.closure_buf);
@@ -125,9 +129,10 @@ pub const LazyDfa = struct {
     }
 
     /// Intern a closed state-set bitset as a DFA state, returning its index.
+    /// May reallocate `trans`/`acc`/`keys` — callers must re-fetch cached slices.
     fn intern(self: *LazyDfa, key_set: []const u8) Error!i32 {
         if (self.map.get(key_set)) |idx| return idx;
-        if (self.states.items.len >= MAX_STATES) {
+        if (self.keys.items.len >= MAX_STATES) {
             self.overflow = true;
             return Error.DfaOverflow;
         }
@@ -143,12 +148,10 @@ pub const LazyDfa = struct {
             }
         }
 
-        const idx: i32 = @intCast(self.states.items.len);
-        try self.states.append(self.allocator, .{
-            .key = owned,
-            .accepting = is_acc,
-            .trans = @splat(UNCOMPUTED),
-        });
+        const idx: i32 = @intCast(self.keys.items.len);
+        try self.trans.appendNTimes(self.allocator, UNCOMPUTED, 256);
+        try self.acc.append(self.allocator, is_acc);
+        try self.keys.append(self.allocator, owned);
         try self.map.put(self.allocator, owned, idx);
         return idx;
     }
@@ -163,54 +166,52 @@ pub const LazyDfa = struct {
         return self.start_index;
     }
 
-    /// The DFA state reached from `dfa_index` on byte `c` (DEAD if none).
-    fn step(self: *LazyDfa, dfa_index: i32, c: u8) Error!i32 {
-        {
-            const cached = self.states.items[@intCast(dfa_index)].trans[c];
-            if (cached != UNCOMPUTED) return cached;
-        }
-        // Build the move set from the current state's NFA set.
+    /// Compute and cache the transition from `dfa_index` on byte `c`. Slow path
+    /// of stepping; may grow the tables.
+    fn computeStep(self: *LazyDfa, dfa_index: i32, c: u8) Error!i32 {
         @memset(self.move_buf, 0);
         var any_move = false;
-        {
-            // Copy the set out first — intern() may reallocate self.states.
-            const set = self.states.items[@intCast(dfa_index)].key;
-            var i: usize = 0;
-            while (i < self.num_states) : (i += 1) {
-                if (!bitTest(set, i)) continue;
-                for (self.nfa.states.items[i].transitions.items) |t| {
-                    if (self.matchesByte(t, c)) {
-                        bitSet(self.move_buf, t.to);
-                        any_move = true;
-                    }
+        // `set` points into the owned key allocation, which survives table growth.
+        const set = self.keys.items[@intCast(dfa_index)];
+        var i: usize = 0;
+        while (i < self.num_states) : (i += 1) {
+            if (!bitTest(set, i)) continue;
+            for (self.nfa.states.items[i].transitions.items) |t| {
+                if (self.matchesByte(t, c)) {
+                    bitSet(self.move_buf, t.to);
+                    any_move = true;
                 }
             }
         }
         var result: i32 = DEAD;
         if (any_move) {
             try self.closure(self.move_buf, self.closure_buf);
-            result = try self.intern(self.closure_buf);
+            result = try self.intern(self.closure_buf); // may realloc tables
         }
-        self.states.items[@intCast(dfa_index)].trans[c] = result;
+        self.trans.items[@as(usize, @intCast(dfa_index)) * 256 + c] = result;
         return result;
     }
 
-    inline fn accepting(self: *const LazyDfa, dfa_index: i32) bool {
-        return self.states.items[@intCast(dfa_index)].accepting;
-    }
-
     /// End position of the longest match starting at `start`, or null. Identical
-    /// boundaries to `vm.matchAt`.
+    /// boundaries to `vm.matchAt`. Hot loop caches the flat slices and re-fetches
+    /// only when a transition is computed (which may grow them).
     pub fn longestMatchFrom(self: *LazyDfa, input: []const u8, start: usize) Error!?usize {
-        var s = try self.getStart();
-        var last: ?usize = if (self.accepting(s)) start else null;
+        var s: usize = @intCast(try self.getStart());
+        var trans = self.trans.items;
+        var acc = self.acc.items;
+        var last: ?usize = if (acc[s]) start else null;
         var p = start;
         while (p < input.len) {
-            const ns = try self.step(s, input[p]);
+            var ns = trans[s * 256 + input[p]];
+            if (ns == UNCOMPUTED) {
+                ns = try self.computeStep(@intCast(s), input[p]);
+                trans = self.trans.items; // re-fetch after possible realloc
+                acc = self.acc.items;
+            }
             if (ns == DEAD) break;
-            s = ns;
+            s = @intCast(ns);
             p += 1;
-            if (self.accepting(s)) last = p;
+            if (acc[s]) last = p;
         }
         return last;
     }
