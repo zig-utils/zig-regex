@@ -262,6 +262,23 @@ pub const Regex = struct {
                 const nfa_mut = @constCast(&self.nfa);
                 var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
                 defer virtual_machine.deinit();
+                // First-byte-set prefilter: skip positions that can't start a match.
+                if (self.opt_info.first_bytes) |fb| {
+                    if (!self.flags.case_insensitive) {
+                        var scan: usize = 0;
+                        while (scan < input.len) {
+                            while (scan < input.len and !fb[input[scan]]) scan += 1;
+                            if (scan >= input.len) break;
+                            if (try virtual_machine.matchAt(input, scan)) |result| {
+                                var r = result;
+                                r.deinit(self.allocator);
+                                return true;
+                            }
+                            scan += 1;
+                        }
+                        return false;
+                    }
+                }
                 return try virtual_machine.isMatch(input);
             },
             .backtracking => {
@@ -391,6 +408,23 @@ pub const Regex = struct {
                             search_from = prefix_pos + 1;
                         }
                         // No prefix occurrence matched
+                        return null;
+                    }
+                }
+
+                // First-byte-set prefilter: only attempt matches where the byte
+                // can start one. Same correctness basis as findAll/count.
+                if (self.opt_info.first_bytes) |fb| {
+                    if (!self.flags.case_insensitive) {
+                        var scan: usize = 0;
+                        while (scan < input.len) {
+                            while (scan < input.len and !fb[input[scan]]) scan += 1;
+                            if (scan >= input.len) break;
+                            if (try virtual_machine.matchAt(input, scan)) |result| {
+                                return try self.buildMatch(input, result);
+                            }
+                            scan += 1;
+                        }
                         return null;
                     }
                 }
