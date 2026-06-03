@@ -27,47 +27,48 @@ binaries so the comparison is apples-to-apples.
 ### Results (Apple M4, Zig 0.16, regex crate 1.x, 50 iterations)
 
 `findAll` time per scan of the 1.17 MB haystack. The "#10 baseline" column is the
-original numbers from the issue.
+original numbers from the issue; "ratio" is zig-now ÷ rust (< 1.0 means zig is
+faster).
 
-| pattern            | matches | #10 baseline | zig now | rust | ratio now |
+| pattern            | matches | #10 baseline | zig now | rust | ratio |
 |--------------------|--------:|------------:|--------:|-----:|------:|
-| `hello`            |  22,202 |      ~60 ms |  ~3.2 ms | ~0.42 ms | ~8x |
-| `hello\|world\|test` |  66,631 |     ~173 ms | ~19 ms  | ~2.4 ms  | ~8x |
-| `\d+`              |  66,651 |      ~83 ms | ~12 ms  | ~3.0 ms  | ~4x |
-| `\w+`              | 200,000 |      ~83 ms | ~55 ms  | ~4.2 ms  | ~13x |
+| `hello`            |  22,202 |      ~60 ms |  ~0.6 ms | ~0.7 ms | **0.8x** |
+| `hello\|world\|test` |  66,631 |     ~173 ms | ~2.8 ms | ~2.3 ms  | 1.2x |
+| `\d+`              |  66,651 |      ~83 ms | ~1.7 ms | ~2.8 ms  | **0.6x** |
+| `\w+`              | 200,000 |      ~83 ms | ~4.7 ms | ~4.6 ms  | 1.2x |
 
-Numbers vary by machine; run `compare.sh` for your own.
+From 13–118x slower at the time of #10 to **0.6–1.2x** — faster than the Rust
+regex crate on `hello` and `\d+`, near parity on the rest. Single `find` is now a
+few nanoseconds. Numbers vary by machine; run `compare.sh` for your own.
 
 ### What changed
 
-Successive rounds have closed most of the gap #10 reported (e.g. literal
-`findAll` ~118x → ~8x):
+A series of fast paths that recognize common pattern shapes and bypass the NFA,
+plus allocation cuts in the VM:
 
-- **Exact-literal fast path.** A fixed-string pattern (`hello`) skips the NFA
-  entirely and runs a plain `std.mem.indexOf` substring search.
-- **First-byte-set prefilter.** When every match must start with one of a known
-  set of bytes (literal alternations, `\d+`, …), the search skips positions whose
-  byte can't start a match — generalizes the single literal-prefix filter and is
-  what dropped `hello|world|test` (~55x → ~8x) and `\d+` (~20x → ~4x).
-- **Single VM + literal-prefix prefilter in `findAll`** (previously it re-ran the
-  NFA at every byte).
-- **Allocation cuts in the VM.** The epsilon-closure `visited` bitmap and the two
-  thread lists are allocated once per VM and reused across positions; threads with
-  no capture groups allocate nothing.
+- **Exact-literal fast path.** A fixed-string pattern (`hello`) becomes a
+  substring search via a SIMD first-byte scan (`indexOfScalarPos`) + tail compare.
+- **Repeated-atom fast path.** A single greedy-repeated byte atom (`\w+`, `\d+`,
+  `[a-z]+`, `a+`, `x{2,5}`) is matched by a tight byte loop over maximal runs of a
+  membership table — no NFA. This is what made `\d+`/`\w+` match/beat Rust.
+- **Literal-alternation fast path.** `foo|bar|baz` tries each literal directly
+  (longest wins) at first-byte-set candidates instead of running the NFA.
+- **First-byte-set prefilter.** When matches must begin with one of a known byte
+  set, the search skips positions whose byte can't start a match (generalizes the
+  single literal-prefix filter).
+- **VM allocation cuts.** The epsilon-closure `visited` bitmap and the two thread
+  lists are allocated once per VM and reused across positions; capture-less
+  threads allocate nothing. `findAll` reuses a single VM.
 - **The benchmark uses the release-grade SMP allocator** (not a debug allocator),
   for a fair comparison with Rust's global allocator.
 
+All fast paths preserve the engine's exact match semantics (verified by the full
+test suite) and fall back to the NFA whenever they don't apply (captures,
+case-insensitive, lazy/nullable quantifiers, lookaround, Unicode classes, …).
+
 ### What's left
 
-The remaining gap is dense-match patterns like `\w+` (matches almost everywhere,
-so prefilters don't help) — that's the per-byte NFA simulation cost. Matching Rust
-there needs the techniques its engine uses:
-
-1. **Lazy DFA** — compile NFA→DFA states on demand for byte-at-a-time scanning
-   with no per-step thread bookkeeping. Biggest remaining win for `\w+` / `\d+`.
-2. **Multi-literal / SIMD prefilters (Teddy)** — further accelerate literal
-   alternations.
-3. **Zero-allocation match iterator / `count`** — avoid materializing a `Match`
-   per result when only counting/iterating.
-
-These are tracked as the performance roadmap for #10.
+The fast paths cover the common shapes; arbitrary patterns that don't match one
+still run the Thompson NFA (`matchAt` per position). Pushing those to Rust's level
+needs a **lazy DFA** and **Teddy-style SIMD multi-literal prefilters**, plus a
+**zero-allocation match iterator** for counting. Tracked as the #10 roadmap.

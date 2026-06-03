@@ -193,11 +193,39 @@ pub const Regex = struct {
         return match.captures[index - 1]; // Captures are 1-indexed in the API
     }
 
+    /// Substring search using a SIMD first-byte scan (`indexOfScalarPos`) plus a
+    /// tail compare. For the literal patterns we fast-path, the first byte is
+    /// usually rare, so this beats Boyer-Moore-Horspool (what `std.mem.indexOf`
+    /// uses) by jumping directly between candidates.
+    fn literalSearch(input: []const u8, lit: []const u8, from: usize) ?usize {
+        if (lit.len == 1) return std.mem.indexOfScalarPos(u8, input, from, lit[0]);
+        if (from + lit.len > input.len) return null;
+        var i = from;
+        const last = input.len - lit.len;
+        while (std.mem.indexOfScalarPos(u8, input, i, lit[0])) |p| {
+            if (p > last) return null;
+            if (std.mem.eql(u8, input[p + 1 .. p + lit.len], lit[1..])) return p;
+            i = p + 1;
+        }
+        return null;
+    }
+
+    /// Longest literal in `set` that matches at `input[pos..]`, or 0 if none.
+    /// Longest wins, matching the engine's alternation semantics (`a|ab` → "ab").
+    fn longestLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
+        var best: usize = 0;
+        for (set) |s| {
+            if (s.len > best and pos + s.len <= input.len and
+                std.mem.eql(u8, input[pos .. pos + s.len], s)) best = s.len;
+        }
+        return best;
+    }
+
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
-            if (!self.flags.case_insensitive) return std.mem.indexOf(u8, input, lit) != null;
+            if (!self.flags.case_insensitive) return literalSearch(input, lit, 0) != null;
         }
         // Repeated-atom fast path: a match exists iff some run of `table` bytes
         // reaches the minimum length.
@@ -209,6 +237,22 @@ pub const Regex = struct {
                     var count: usize = 0;
                     while (p < input.len and ra.table[input[p]]) : (p += 1) count += 1;
                     if (count >= ra.min) return true;
+                }
+                return false;
+            }
+        }
+        // Literal-alternation fast path.
+        if (self.opt_info.literal_set) |set| {
+            if (!self.flags.case_insensitive) {
+                const fb = self.opt_info.first_bytes;
+                var p: usize = 0;
+                while (p < input.len) {
+                    if (fb) |t| {
+                        while (p < input.len and !t[input[p]]) p += 1;
+                        if (p >= input.len) break;
+                    }
+                    if (longestLiteralAt(set, input, p) > 0) return true;
+                    p += 1;
                 }
                 return false;
             }
@@ -288,7 +332,7 @@ pub const Regex = struct {
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
             if (!self.flags.case_insensitive) {
-                if (std.mem.indexOf(u8, input, lit)) |i| {
+                if (literalSearch(input, lit, 0)) |i| {
                     return Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len };
                 }
                 return null;
@@ -306,6 +350,23 @@ pub const Regex = struct {
                     var count: usize = 0;
                     while (p < input.len and ra.table[input[p]] and count < max) : (p += 1) count += 1;
                     if (count >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
+                }
+                return null;
+            }
+        }
+        // Literal-alternation fast path: leftmost position, longest literal.
+        if (self.opt_info.literal_set) |set| {
+            if (!self.flags.case_insensitive) {
+                const fb = self.opt_info.first_bytes;
+                var p: usize = 0;
+                while (p < input.len) {
+                    if (fb) |t| {
+                        while (p < input.len and !t[input[p]]) p += 1;
+                        if (p >= input.len) break;
+                    }
+                    const best = longestLiteralAt(set, input, p);
+                    if (best > 0) return Match{ .slice = input[p .. p + best], .start = p, .end = p + best };
+                    p += 1;
                 }
                 return null;
             }
@@ -362,8 +423,7 @@ pub const Regex = struct {
         // Exact-literal fast path: repeated substring search, no NFA.
         if (self.opt_info.exact_literal) |lit| {
             if (!self.flags.case_insensitive) {
-                while (std.mem.indexOf(u8, input[pos..], lit)) |rel| {
-                    const i = pos + rel;
+                while (literalSearch(input, lit, pos)) |i| {
                     try matches.append(allocator, Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len });
                     pos = i + lit.len;
                 }
@@ -384,6 +444,26 @@ pub const Regex = struct {
                     while (pos < input.len and ra.table[input[pos]] and count < max) : (pos += 1) count += 1;
                     if (count >= ra.min) {
                         try matches.append(allocator, Match{ .slice = input[start..pos], .start = start, .end = pos });
+                    }
+                }
+                return matches.toOwnedSlice(allocator);
+            }
+        }
+        // Literal-alternation fast path: each leftmost-longest literal match.
+        if (self.opt_info.literal_set) |set| {
+            if (!self.flags.case_insensitive) {
+                const fb = self.opt_info.first_bytes;
+                while (pos < input.len) {
+                    if (fb) |t| {
+                        while (pos < input.len and !t[input[pos]]) pos += 1;
+                        if (pos >= input.len) break;
+                    }
+                    const best = longestLiteralAt(set, input, pos);
+                    if (best > 0) {
+                        try matches.append(allocator, Match{ .slice = input[pos .. pos + best], .start = pos, .end = pos + best });
+                        pos += best;
+                    } else {
+                        pos += 1;
                     }
                 }
                 return matches.toOwnedSlice(allocator);

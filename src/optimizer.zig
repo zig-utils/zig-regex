@@ -13,6 +13,12 @@ pub const OptimizationInfo = struct {
     /// search, bypassing the NFA entirely.
     exact_literal: ?[]const u8 = null,
 
+    /// Set when the whole pattern is an alternation of two or more exact
+    /// literals (`foo|bar|baz`). Matched by trying each literal directly
+    /// (longest wins, matching the engine's alternation semantics) instead of
+    /// running the NFA. Owned; freed in deinit.
+    literal_set: ?[]const []const u8 = null,
+
     /// Set when the whole pattern is a single greedy-repeated byte atom with a
     /// minimum of at least one (`\w+`, `\d+`, `[a-z]+`, `a+`, `x{2,5}`, or a bare
     /// `\d`). Such a pattern is matched by a tight byte loop — maximal runs of
@@ -52,6 +58,10 @@ pub const OptimizationInfo = struct {
         }
         if (self.exact_literal) |lit| {
             allocator.free(lit);
+        }
+        if (self.literal_set) |set| {
+            for (set) |s| allocator.free(s);
+            allocator.free(set);
         }
     }
 };
@@ -110,6 +120,21 @@ pub const Optimizer = struct {
         // Single repeated-atom fast path (greedy, min >= 1).
         info.repeat_atom = detectRepeatAtom(root);
 
+        // Alternation-of-literals fast path (>= 2 literals).
+        if (info.exact_literal == null) {
+            var list = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
+            errdefer {
+                for (list.items) |s| self.allocator.free(s);
+                list.deinit(self.allocator);
+            }
+            if (try self.collectLiteralAlternatives(root, &list) and list.items.len >= 2) {
+                info.literal_set = try list.toOwnedSlice(self.allocator);
+            } else {
+                for (list.items) |s| self.allocator.free(s);
+                list.deinit(self.allocator);
+            }
+        }
+
         // First-byte set: usable only when every match consumes at least one
         // byte (min_length >= 1) and the leading byte set is fully determined.
         if (info.min_length >= 1) {
@@ -125,6 +150,31 @@ pub const Optimizer = struct {
         }
 
         return info;
+    }
+
+    /// Collect, into `list`, the exact-literal strings of an alternation tree.
+    /// Returns false (abandoning the fast path) if any branch is not an exact
+    /// literal. Caller owns the appended strings.
+    fn collectLiteralAlternatives(self: *Optimizer, node: *ast.Node, list: *std.ArrayList([]const u8)) !bool {
+        switch (node.node_type) {
+            .alternation => {
+                const a = node.data.alternation;
+                if (!try self.collectLiteralAlternatives(a.left, list)) return false;
+                return try self.collectLiteralAlternatives(a.right, list);
+            },
+            else => {
+                if (!isExactLiteral(node)) return false;
+                var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+                errdefer buf.deinit(self.allocator);
+                _ = try self.collectLiteralPrefix(node, &buf);
+                if (buf.items.len == 0) {
+                    buf.deinit(self.allocator);
+                    return false;
+                }
+                try list.append(self.allocator, try buf.toOwnedSlice(self.allocator));
+                return true;
+            },
+        }
     }
 
     /// Detect a whole-pattern single greedy-repeated byte atom (min >= 1). Lazy
