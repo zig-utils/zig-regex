@@ -8,6 +8,7 @@ const common = @import("common.zig");
 const optimizer = @import("optimizer.zig");
 const backtrack = @import("backtrack.zig");
 const dfa = @import("dfa.zig");
+const onepass = @import("onepass.zig");
 
 /// Represents a match result from a regex operation
 pub const Match = struct {
@@ -56,6 +57,9 @@ pub const Regex = struct {
     flags: common.CompileFlags,
     opt_info: optimizer.OptimizationInfo,
     named_captures: std.StringHashMap(usize), // name -> capture_index mapping
+    /// One-pass capture plan for eligible disjoint-boundary atom-sequence
+    /// patterns; null when the pattern doesn't fit the shape.
+    onepass: ?*onepass.Plan = null,
 
     /// Compile a regex pattern with default flags
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
@@ -136,6 +140,10 @@ pub const Regex = struct {
             // Use Thompson NFA engine
             defer tree.deinit();
 
+            // One-pass capture plan (built from the AST, independent of it).
+            const onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
+            errdefer if (onepass_plan) |pl| pl.deinit();
+
             var comp = compiler.Compiler.init(allocator);
             errdefer comp.deinit();
             _ = try comp.compile(&tree);
@@ -151,6 +159,7 @@ pub const Regex = struct {
                 .flags = flags,
                 .opt_info = opt_info,
                 .named_captures = named_captures,
+                .onepass = onepass_plan,
             };
         }
     }
@@ -171,6 +180,7 @@ pub const Regex = struct {
         }
 
         self.opt_info.deinit(self.allocator);
+        if (self.onepass) |p| p.deinit();
 
         // Free named capture keys and deinit map
         var it = self.named_captures.iterator();
@@ -534,6 +544,22 @@ pub const Regex = struct {
                 return null;
             }
         }
+        // One-pass capture plan: deterministic capture matching, no NFA.
+        if (self.onepass) |plan| {
+            const fb = self.opt_info.first_bytes;
+            var scan: usize = 0;
+            while (scan <= input.len) {
+                if (fb) |t| {
+                    while (scan < input.len and !t[input[scan]]) scan += 1;
+                    if (scan >= input.len) break;
+                }
+                if (try plan.matchAt(self.allocator, input, scan)) |result| {
+                    return try self.buildMatch(input, result);
+                }
+                scan += 1;
+            }
+            return null;
+        }
         // Lazy-DFA path for eligible general patterns: the DFA locates the match
         // (bounds directly, or NFA at the start for captures).
         if (self.dfaEligible()) {
@@ -660,6 +686,32 @@ pub const Regex = struct {
             }
         }
 
+        // One-pass capture plan: deterministic capture matching, no NFA.
+        if (self.onepass) |plan| {
+            const fb = self.opt_info.first_bytes;
+            while (pos <= input.len) {
+                var scan = pos;
+                var found: ?vm.MatchResult = null;
+                while (scan <= input.len) {
+                    if (fb) |t| {
+                        while (scan < input.len and !t[input[scan]]) scan += 1;
+                        if (scan >= input.len) break;
+                    }
+                    if (try plan.matchAt(allocator, input, scan)) |r| {
+                        found = r;
+                        break;
+                    }
+                    scan += 1;
+                }
+                const result = found orelse break;
+                const captures = try allocator.alloc([]const u8, result.captures.len);
+                for (result.captures, 0..) |cap, i| captures[i] = cap.text;
+                allocator.free(result.captures);
+                try matches.append(allocator, Match{ .slice = input[result.start..result.end], .start = result.start, .end = result.end, .captures = captures });
+                pos = if (result.end > result.start) result.end else result.end + 1;
+            }
+            return matches.toOwnedSlice(allocator);
+        }
         // Lazy-DFA path for eligible general patterns. On overflow, free any
         // partial results (their captures are owned) and fall back to the NFA.
         if (self.dfaEligible()) {

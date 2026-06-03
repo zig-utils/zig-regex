@@ -92,9 +92,19 @@ quantifiers, anchors, lookaround, Unicode classes, …).
 the DFA gives the match bounds directly, no NFA pass. e.g. `findAll` of
 `\w+[0-9]` over the 1.17 MB haystack dropped from ~145 ms (NFA) to ~9 ms.
 
+- **One-pass capture plan** (`src/onepass.zig`) — for capture patterns that are a
+  concatenation of disjoint-boundary atoms (`(\w+)@(\w+)`, `(\d+)-(\d+)`,
+  `([a-z]+)([0-9]+)`, `(foo)(\d+)`), `find`/`findAll` extract captures with a
+  deterministic greedy byte walk per atom — no NFA. Eligibility requires that
+  each variable atom's byte set is disjoint from the next, which makes greedy
+  matching provably backtrack-free. A differential test cross-checks the plan
+  against `vm.matchAt` over many patterns/inputs/positions. `findAll` captures:
+  `([a-z]+)([0-9]+)` ~55 ms → ~18 ms, `(foo)([0-9]+)` ~12 ms → ~1.8 ms (vs ~260 ms
+  originally).
+
 ### What's left
 
-`find`/`findAll` on patterns *with* capture groups still use the NFA — the open
-piece is a capture-aware hybrid (DFA to find bounds, then the NFA only at the
-confirmed start to fill captures). Beyond that: **Teddy-style SIMD multi-literal
-prefilters** and a zero-allocation `findAll`-style iterator.
+Capture patterns *outside* the one-pass shape (alternation, overlapping
+boundaries, nullable atoms) still use the NFA. A general tagged/one-pass DFA
+would cover those. Beyond that: **Teddy-style SIMD multi-literal prefilters** and
+a zero-allocation `findAll`-style iterator.
