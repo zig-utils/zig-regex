@@ -21,3 +21,7 @@ Thumbs.db
 *.test
 *.log
 pantry
+
+# Rust benchmark build artifacts
+benchmarks/rust-bench/target/
+haystack.txt

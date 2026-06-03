@@ -458,6 +458,28 @@ pub fn build(b: *std.Build) void {
     const prefix_bench_step = b.step("bench-prefix", "Run prefix optimization benchmarks");
     prefix_bench_step.dependOn(&prefix_bench_run.step);
 
+    // findAll throughput benchmark (issue #10) — also the head-to-head program
+    // used by benchmarks/compare.sh against the Rust regex crate.
+    const findall_bench = b.addExecutable(.{
+        .name = "findall_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/findall_throughput.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    // clock_gettime for monotonic timing.
+    findall_bench.root_module.link_libc = true;
+    b.installArtifact(findall_bench);
+
+    const findall_bench_run = b.addRunArtifact(findall_bench);
+    if (b.args) |args| findall_bench_run.addArgs(args);
+    const findall_bench_step = b.step("bench-findall", "Run findAll throughput benchmark (issue #10)");
+    findall_bench_step.dependOn(&findall_bench_run.step);
+
     // Add debug visualization example
     const debug_example = b.addExecutable(.{
         .name = "debug_visualization",
