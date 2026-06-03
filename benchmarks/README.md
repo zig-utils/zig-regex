@@ -34,23 +34,28 @@ from the issue (which used the allocating `findAll`); "ratio" is zig ÷ rust
 
 | pattern               | zig `count` | rust | ratio |
 |-----------------------|--------:|-----:|------:|
-| `hello`               |  0.31 ms | 0.37 ms | **0.83x** |
-| `hello\|world\|test`  |  2.26 ms | 2.51 ms | **0.90x** |
-| `\d+`                 |  0.86 ms | 3.27 ms | **0.26x** |
-| `\w+`                 |  1.61 ms | 4.21 ms | **0.38x** |
-| `[A-Za-z]+`           |  1.73 ms | 6.12 ms | **0.28x** |
-| `\d{1,3}`             |  0.88 ms | 2.92 ms | **0.30x** |
-| `foo[0-9]+`           |  0.93 ms | 1.04 ms | **0.90x** |
-| `([a-z]+)([0-9]+)`    |  4.82 ms | 3.78 ms | 1.27x |
-| `a.c`                 |  1.09 ms | 0.66 ms | 1.66x |
-| `\w+[0-9]`            |  8.23 ms | 4.25 ms | 1.94x |
+| `hello`               |  0.5 ms | 0.63 ms | **0.81x** |
+| `hello\|world\|test`  |  2.4 ms | 2.7 ms | **0.87x** |
+| `\d+`                 |  0.9 ms | 3.4 ms | **0.27x** |
+| `\w+`                 |  1.8 ms | 5.6 ms | **0.32x** |
+| `[A-Za-z]+`           |  2.3 ms | 7.8 ms | **0.30x** |
+| `\d{1,3}`             |  1.0 ms | 3.6 ms | **0.28x** |
+| `foo[0-9]+`           |  0.9 ms | 1.1 ms | **0.82x** |
+| `a.c`                 |  0.7 ms | 0.7 ms | **0.99x** |
+| `x.y.z`               |  0.34 ms | 0.42 ms | **0.81x** |
+| `([a-z]+)([0-9]+)`    |  5.1 ms | 3.3 ms | 1.5x |
+| `\w+[0-9]`            |  6.0 ms | 4.0 ms | 1.5x |
 
 (`Regex.count` vs `find_iter().count()` — both lazy & allocation-free. Match
 counts verified identical.) The original #10 baseline (allocating `findAll`) was
-13–118x **slower** than Rust; the engine is now **faster on most patterns** (down
-to ~0.26x) and within ~2x on the rest. Single `find` is a few nanoseconds.
-`findAll` materializes a `Match[]`, so use `count` when you only need the tally.
-Numbers vary by machine; run `compare.sh` for your own.
+13–118x **slower** than Rust; the engine is now **faster on 9 of these 12
+patterns** (down to ~0.27x) and within ~1.5x on the rest. Single `find` is a few
+nanoseconds. `findAll` materializes a `Match[]`, so use `count` when you only need
+the tally. Numbers vary by machine; run `compare.sh` for your own.
+
+The remaining `~1.5x` cases (`\w+[0-9]`, `([a-z]+)([0-9]+)`) are already O(n) —
+the gap is pure constant factor in the per-byte DFA/plan step vs Rust's
+hand-tuned compiled DFA, not an algorithmic deficit.
 
 Case-insensitive search is also fast-pathed: `(?i)hello` via the global flag
 counts in ~0.4 ms (≈3x faster than Rust), and `[a-z]+`/`\w+`/`\d+` keep the byte
@@ -91,6 +96,21 @@ plus allocation cuts in the VM:
   | `\w+[0-9]`   | ~145 ms | ~6.7 ms | ~2.9 ms | 2.3x |
   | `a.c`        | —       | ~0.8 ms | ~0.6 ms | 1.3x |
 
+- **Required-literal fast-fail.** If a mandatory literal substring (one outside
+  `?`/`*`/alternation) is absent, there's no match — return immediately. Works for
+  every engine; e.g. `(\d+)-(\d+)` on dash-free input went ~2.5 ms → ~20 µs.
+- **Leading-class run-skip.** When a pattern starts with an unbounded class
+  (`\w+…`), a failed anchored match skips that class's whole run (no start within
+  it can match), removing O(word²) rescans.
+- **SIMD single-byte prefilter + flat DFA table.** When the first-byte set is a
+  single byte, candidates are found with a SIMD `indexOfScalar`; the lazy DFA uses
+  a flat `state*256+byte` transition table with a cached hot loop. Took `a.c` to
+  parity and `\w+[0-9]` from ~1.9x to ~1.3–1.5x.
+- **One-pass capture plan** (`src/onepass.zig`) — disjoint-boundary atom sequences
+  (`(\w+)@(\w+)`, `([a-z]+)([0-9]+)`) extract captures with a deterministic byte
+  walk, differential-tested against the NFA.
+- **Case-insensitive fast paths** — exact-literal (SIMD dual-case scan) and folded
+  repeated-atom tables, so the `i` flag keeps the fast loop.
 - **The benchmark uses the release-grade SMP allocator** (not a debug allocator),
   for a fair comparison with Rust's global allocator.
 
