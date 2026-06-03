@@ -289,7 +289,12 @@ test "lazy quantifier at end of pattern" {
 test "lazy vs greedy performance comparison" {
     const allocator = std.testing.allocator;
 
-    const input = "a" ** 100 ++ "b";
+    // "a"*100 ++ "b", built at runtime (the `**` array-repeat operator does not
+    // compile under zig 0.17-dev — this branch's target toolchain).
+    const input = try allocator.alloc(u8, 101);
+    defer allocator.free(input);
+    @memset(input[0..100], 'a');
+    input[100] = 'b';
 
     // Both should match the entire input since 'b' only appears at the end
     var greedy = try Regex.compile(allocator, "a*b");

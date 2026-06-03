@@ -1,0 +1,16 @@
+[package]
+name = "rust-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-bench"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

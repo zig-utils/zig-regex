@@ -199,6 +199,7 @@ pub const Regex = struct {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
                 var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+                defer virtual_machine.deinit();
                 return try virtual_machine.isMatch(input);
             },
             .backtracking => {
@@ -270,6 +271,7 @@ pub const Regex = struct {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
                 var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+                defer virtual_machine.deinit();
 
                 // Use literal prefix optimization if available (but not in case-insensitive mode)
                 if (self.opt_info.literal_prefix) |prefix| {
@@ -313,42 +315,56 @@ pub const Regex = struct {
         errdefer matches.deinit(allocator);
 
         var pos: usize = 0;
-        while (pos < input.len) {
-            switch (self.engine_type) {
-                .thompson_nfa => {
-                    const nfa_mut = @constCast(&self.nfa);
-                    var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
 
-                    if (try virtual_machine.find(input[pos..])) |result| {
-                        // Adjust positions relative to original input
-                        const adjusted_start = pos + result.start;
-                        const adjusted_end = pos + result.end;
+        // Thompson path: reuse a single VM across all matches (VM.init does not
+        // allocate) and, when the pattern has a literal prefix, use it as a
+        // prefilter — `std.mem.indexOf` skips whole non-matching regions instead
+        // of running the NFA at every byte. This is the same prefilter `find`
+        // uses; `findAll` previously rescanned every position, which is why it
+        // was orders of magnitude slower on literal-led patterns.
+        if (self.engine_type == .thompson_nfa) {
+            const nfa_mut = @constCast(&self.nfa);
+            var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+            defer virtual_machine.deinit();
+            const prefix: ?[]const u8 = if (self.flags.case_insensitive) null else self.opt_info.literal_prefix;
 
-                        var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
-                        errdefer captures_list.deinit(allocator);
-
-                        for (result.captures) |cap| {
-                            try captures_list.append(allocator, cap.text);
-                        }
-
-                        const captures = try captures_list.toOwnedSlice(allocator);
-
-                        try matches.append(allocator, Match{
-                            .slice = input[adjusted_start..adjusted_end],
-                            .start = adjusted_start,
-                            .end = adjusted_end,
-                            .captures = captures,
-                        });
-
-                        // Free the VM result
-                        self.allocator.free(result.captures);
-
-                        // Move past this match (avoid infinite loop on zero-width matches)
-                        pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
-                    } else {
+            while (pos <= input.len) {
+                // Locate the next position >= pos where a match starts.
+                var scan = pos;
+                var result: ?vm.MatchResult = null;
+                while (scan <= input.len) {
+                    if (prefix) |p| {
+                        const rel = std.mem.indexOf(u8, input[scan..], p) orelse break;
+                        scan += rel;
+                    }
+                    if (try virtual_machine.matchAt(input, scan)) |r| {
+                        result = r;
                         break;
                     }
-                },
+                    scan += 1;
+                }
+                const r = result orelse break;
+                // matchAt reports absolute positions; captures index into `input`.
+                const captures = try allocator.alloc([]const u8, r.captures.len);
+                for (r.captures, 0..) |cap, i| captures[i] = cap.text;
+                self.allocator.free(r.captures);
+
+                try matches.append(allocator, Match{
+                    .slice = input[r.start..r.end],
+                    .start = r.start,
+                    .end = r.end,
+                    .captures = captures,
+                });
+
+                // Advance past the match (avoid looping on zero-width matches).
+                pos = if (r.end > r.start) r.end else r.end + 1;
+            }
+            return matches.toOwnedSlice(allocator);
+        }
+
+        while (pos < input.len) {
+            switch (self.engine_type) {
+                .thompson_nfa => unreachable, // handled above
                 .backtracking => {
                     const engine_mut = @constCast(&self.backtrack_engine.?);
                     if (engine_mut.find(input[pos..])) |result| {
@@ -552,6 +568,7 @@ pub const Regex = struct {
                             self.regex.capture_count,
                             self.regex.flags,
                         );
+                        defer virtual_machine.deinit();
 
                         if (try virtual_machine.matchAt(self.input, self.pos)) |result| {
                             const adjusted_start = result.start;

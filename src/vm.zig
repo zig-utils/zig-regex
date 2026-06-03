@@ -63,6 +63,10 @@ pub const VM = struct {
     allocator: std.mem.Allocator,
     num_captures: usize,
     flags: common.CompileFlags,
+    /// Scratch "visited" bitmap for epsilon-closure, allocated once and reused
+    /// across every `matchAt`. Sized to the NFA state count. Reuse matters
+    /// because `find`/`findAll` call `matchAt` once per input position.
+    visited: []bool = &.{},
 
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, num_captures: usize, flags: common.CompileFlags) VM {
         return .{
@@ -71,6 +75,12 @@ pub const VM = struct {
             .num_captures = num_captures,
             .flags = flags,
         };
+    }
+
+    /// Release scratch buffers. Safe to call on a VM that never ran.
+    pub fn deinit(self: *VM) void {
+        if (self.visited.len != 0) self.allocator.free(self.visited);
+        self.visited = &.{};
     }
 
     /// Helper to compare characters with case-insensitive support
@@ -111,10 +121,14 @@ pub const VM = struct {
             next_threads.deinit(self.allocator);
         }
 
-        // Pre-allocate visited array for epsilon closure (reused across iterations)
+        // Visited bitmap for epsilon closure — reused across matchAt calls
+        // (grown once to the state count) rather than reallocated per position.
         const num_states = self.nfa.states.items.len;
-        const visited_buf = try self.allocator.alloc(bool, num_states);
-        defer self.allocator.free(visited_buf);
+        if (self.visited.len < num_states) {
+            if (self.visited.len != 0) self.allocator.free(self.visited);
+            self.visited = try self.allocator.alloc(bool, num_states);
+        }
+        const visited_buf = self.visited[0..num_states];
 
         // Start with initial thread at start state
         var initial_thread = try Thread.init(self.allocator, self.nfa.start_state, self.num_captures);
@@ -403,6 +417,7 @@ test "vm match literal" {
     try state0.addTransition(compiler.Transition.char('a', s1));
 
     var vm = VM.init(allocator, &nfa, 0, .{});
+    defer vm.deinit();
     const result = try vm.matchAt("a", 0);
     try std.testing.expect(result != null);
     if (result) |res| {
@@ -430,6 +445,7 @@ test "vm find in string" {
     try state0.addTransition(compiler.Transition.char('b', s1));
 
     var vm = VM.init(allocator, &nfa, 0, .{});
+    defer vm.deinit();
     const result = try vm.find("abc");
     try std.testing.expect(result != null);
     if (result) |res| {
