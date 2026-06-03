@@ -534,20 +534,9 @@ pub const Regex = struct {
                 return false;
             }
         }
-        // One-pass plan (bounds only).
-        if (self.onepass) |plan| {
-            const fb = self.opt_info.first_bytes;
-            var scan: usize = 0;
-            while (scan <= input.len) {
-                if (fb) |t| {
-                    while (scan < input.len and !t[input[scan]]) scan += 1;
-                    if (scan >= input.len) break;
-                }
-                if (plan.matchEndAt(input, scan)) |_| return true;
-                scan = plan.nextScan(input, scan);
-            }
-            return false;
-        }
+        // count/isMatch need no captures, so the lazy DFA (faster, with the
+        // death-position skip) handles one-pass patterns too — every one-pass
+        // pattern is DFA-eligible. The plan is reserved for find/findAll captures.
         // Lazy-DFA path for eligible general patterns.
         if (self.dfaEligible()) {
             if (self.isMatchWithDfa(input)) |b| {
@@ -1032,29 +1021,8 @@ pub const Regex = struct {
             }
         }
 
-        // One-pass plan (bounds only) — counts non-overlapping matches.
-        if (self.onepass) |plan| {
-            const fb = self.opt_info.first_bytes;
-            while (pos <= input.len) {
-                var scan = pos;
-                var matched_end: ?usize = null;
-                while (scan <= input.len) {
-                    if (fb) |t| {
-                        while (scan < input.len and !t[input[scan]]) scan += 1;
-                        if (scan >= input.len) break;
-                    }
-                    if (plan.matchEndAt(input, scan)) |end| {
-                        matched_end = end;
-                        break;
-                    }
-                    scan = plan.nextScan(input, scan);
-                }
-                const end = matched_end orelse break;
-                n += 1;
-                pos = if (end > scan) end else end + 1;
-            }
-            return n;
-        }
+        // count needs no captures, so the lazy DFA (with the death-position skip)
+        // handles one-pass patterns too. The plan is reserved for find/findAll.
         // Lazy-DFA path for eligible general patterns.
         if (self.dfaEligible()) {
             if (self.countWithDfa(input)) |c| {
