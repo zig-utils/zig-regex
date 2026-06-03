@@ -199,6 +199,20 @@ pub const Regex = struct {
         if (self.opt_info.exact_literal) |lit| {
             if (!self.flags.case_insensitive) return std.mem.indexOf(u8, input, lit) != null;
         }
+        // Repeated-atom fast path: a match exists iff some run of `table` bytes
+        // reaches the minimum length.
+        if (self.opt_info.repeat_atom) |ra| {
+            if (!self.flags.case_insensitive) {
+                var p: usize = 0;
+                while (p < input.len) {
+                    while (p < input.len and !ra.table[input[p]]) p += 1;
+                    var count: usize = 0;
+                    while (p < input.len and ra.table[input[p]]) : (p += 1) count += 1;
+                    if (count >= ra.min) return true;
+                }
+                return false;
+            }
+        }
         switch (self.engine_type) {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
@@ -280,6 +294,22 @@ pub const Regex = struct {
                 return null;
             }
         }
+        // Repeated-atom fast path: leftmost maximal run of `table` bytes.
+        if (self.opt_info.repeat_atom) |ra| {
+            if (!self.flags.case_insensitive) {
+                const max = ra.max orelse std.math.maxInt(usize);
+                var p: usize = 0;
+                while (p < input.len) {
+                    while (p < input.len and !ra.table[input[p]]) p += 1;
+                    if (p >= input.len) break;
+                    const start = p;
+                    var count: usize = 0;
+                    while (p < input.len and ra.table[input[p]] and count < max) : (p += 1) count += 1;
+                    if (count >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
+                }
+                return null;
+            }
+        }
         switch (self.engine_type) {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
@@ -336,6 +366,25 @@ pub const Regex = struct {
                     const i = pos + rel;
                     try matches.append(allocator, Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len });
                     pos = i + lit.len;
+                }
+                return matches.toOwnedSlice(allocator);
+            }
+        }
+        // Repeated-atom fast path: each leftmost maximal run of `table` bytes
+        // (capped at max) is one non-overlapping match. No NFA, no per-match
+        // capture allocation.
+        if (self.opt_info.repeat_atom) |ra| {
+            if (!self.flags.case_insensitive) {
+                const max = ra.max orelse std.math.maxInt(usize);
+                while (pos < input.len) {
+                    while (pos < input.len and !ra.table[input[pos]]) pos += 1;
+                    if (pos >= input.len) break;
+                    const start = pos;
+                    var count: usize = 0;
+                    while (pos < input.len and ra.table[input[pos]] and count < max) : (pos += 1) count += 1;
+                    if (count >= ra.min) {
+                        try matches.append(allocator, Match{ .slice = input[start..pos], .start = start, .end = pos });
+                    }
                 }
                 return matches.toOwnedSlice(allocator);
             }

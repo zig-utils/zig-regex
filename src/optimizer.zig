@@ -13,6 +13,12 @@ pub const OptimizationInfo = struct {
     /// search, bypassing the NFA entirely.
     exact_literal: ?[]const u8 = null,
 
+    /// Set when the whole pattern is a single greedy-repeated byte atom with a
+    /// minimum of at least one (`\w+`, `\d+`, `[a-z]+`, `a+`, `x{2,5}`, or a bare
+    /// `\d`). Such a pattern is matched by a tight byte loop — maximal runs of
+    /// bytes in `table` — instead of the NFA. Null otherwise.
+    repeat_atom: ?RepeatAtom = null,
+
     /// The set of bytes that can begin a match, when the pattern always consumes
     /// at least one byte and that first byte is statically known (e.g. literal
     /// alternations, `\d+`). Lets the search skip positions whose byte can't
@@ -31,6 +37,14 @@ pub const OptimizationInfo = struct {
 
     /// Maximum length of any match (if bounded)
     max_length: ?usize = null,
+
+    pub const RepeatAtom = struct {
+        /// Membership table for the repeated byte atom.
+        table: [256]bool,
+        min: usize,
+        /// Null means unbounded (`+`, `{m,}`).
+        max: ?usize,
+    };
 
     pub fn deinit(self: *OptimizationInfo, allocator: std.mem.Allocator) void {
         if (self.literal_prefix) |prefix| {
@@ -93,6 +107,9 @@ pub const Optimizer = struct {
             }
         }
 
+        // Single repeated-atom fast path (greedy, min >= 1).
+        info.repeat_atom = detectRepeatAtom(root);
+
         // First-byte set: usable only when every match consumes at least one
         // byte (min_length >= 1) and the leading byte set is fully determined.
         if (info.min_length >= 1) {
@@ -108,6 +125,44 @@ pub const Optimizer = struct {
         }
 
         return info;
+    }
+
+    /// Detect a whole-pattern single greedy-repeated byte atom (min >= 1). Lazy
+    /// quantifiers, nullable quantifiers (`*`, `?`, `{0,n}`), and non-byte atoms
+    /// (Unicode property / set classes) are rejected — they keep NFA semantics.
+    fn detectRepeatAtom(root: *ast.Node) ?OptimizationInfo.RepeatAtom {
+        var node = root;
+        var min: usize = 1;
+        var max: ?usize = 1;
+        switch (root.node_type) {
+            .plus => {
+                if (!root.data.plus.greedy) return null;
+                min = 1;
+                max = null;
+                node = root.data.plus.child;
+            },
+            .repeat => {
+                const r = root.data.repeat;
+                if (!r.greedy or r.bounds.min < 1) return null;
+                min = r.bounds.min;
+                max = r.bounds.max;
+                node = r.child;
+            },
+            else => {}, // bare atom: min = max = 1
+        }
+        var table = [_]bool{false} ** 256;
+        switch (node.node_type) {
+            .literal => table[node.data.literal] = true,
+            .char_class => {
+                const cc = node.data.char_class;
+                var b: usize = 0;
+                while (b < 256) : (b += 1) {
+                    if (cc.matches(@intCast(b))) table[b] = true;
+                }
+            },
+            else => return null,
+        }
+        return .{ .table = table, .min = min, .max = max };
     }
 
     /// Whether the pattern is exactly a fixed string: only literals,
