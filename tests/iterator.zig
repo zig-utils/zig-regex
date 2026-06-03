@@ -221,3 +221,32 @@ test "count: agrees with findAll across pattern shapes" {
         try std.testing.expectEqual(matches.len, n);
     }
 }
+
+// The capture-aware DFA hybrid (DFA locates the match, NFA fills captures for
+// greedy/anchor-free capture patterns) must produce correct captures.
+test "DFA hybrid: captures correct for greedy capture patterns" {
+    const allocator = std.testing.allocator;
+
+    var re = try Regex.compile(allocator, "(\\d+)-(\\d+)");
+    defer re.deinit();
+
+    const matches = try re.findAll(allocator, "ab 12-34 xx 5-6 cd");
+    defer {
+        for (matches) |*m| m.deinit(allocator);
+        allocator.free(matches);
+    }
+    try std.testing.expectEqual(@as(usize, 2), matches.len);
+    try std.testing.expectEqualStrings("12-34", matches[0].slice);
+    try std.testing.expectEqualStrings("12", matches[0].captures[0]);
+    try std.testing.expectEqualStrings("34", matches[0].captures[1]);
+    try std.testing.expectEqualStrings("5-6", matches[1].slice);
+    try std.testing.expectEqualStrings("5", matches[1].captures[0]);
+    try std.testing.expectEqualStrings("6", matches[1].captures[1]);
+
+    // find() through the same hybrid.
+    var m = (try re.find("xx 78-90 yy")).?;
+    defer m.deinit(allocator);
+    try std.testing.expectEqualStrings("78-90", m.slice);
+    try std.testing.expectEqualStrings("78", m.captures[0]);
+    try std.testing.expectEqualStrings("90", m.captures[1]);
+}
