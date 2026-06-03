@@ -70,6 +70,14 @@ pub const Regex = struct {
         // Parse the pattern into an AST
         var p = try parser.Parser.init(allocator, pattern);
         p.unicode_sets = flags.unicode_sets;
+        // The global `x` (extended) flag affects lexing from the first token, so
+        // enable it on the lexer and re-lex the already-fetched first token.
+        if (flags.extended) {
+            p.extended = true;
+            p.lexer.extended = true;
+            p.lexer.reset();
+            p.current_token = try p.lexer.next();
+        }
         var tree = try p.parse();
         errdefer tree.deinit(); // Free AST if compilation fails
 

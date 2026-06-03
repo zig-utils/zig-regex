@@ -114,3 +114,126 @@ test "early error: flag both added and removed is rejected" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, "(?i-i:a)"));
 }
+
+// ---------------------------------------------------------------------------
+// x (extended/verbose), u (unicode), U (swap-greedy)
+// ---------------------------------------------------------------------------
+
+test "extended (?x:…) ignores unescaped whitespace" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?x: a b c )");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abc"));
+    try std.testing.expect(!try re.isMatch("a b c")); // the spaces aren't literal
+}
+
+test "extended (?x:…) supports # line comments" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?x: a b # the comment\n c )");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abc"));
+}
+
+test "extended mode keeps whitespace literal inside a character class" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?x:[a b]+)");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch(" ")); // space is a class member
+    try std.testing.expect(try re.isMatch("a b a"));
+}
+
+test "extended mode: escaped whitespace is literal" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?x:a\\ b)");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("a b"));
+    try std.testing.expect(!try re.isMatch("ab"));
+}
+
+test "extended mode is scoped to the group" {
+    const allocator = std.testing.allocator;
+    // Inside (?x:…) the space is ignored; outside, the space is literal.
+    var re = try Regex.compile(allocator, "(?x:a b)c d");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abc d"));
+    try std.testing.expect(!try re.isMatch("abcd"));
+}
+
+test "global extended flag (compileWithFlags)" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "a b c", .{ .extended = true });
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abc"));
+}
+
+test "extended composes with case-insensitive (?ix:…)" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?ix: A B C )");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("abc"));
+    try std.testing.expect(try re.isMatch("ABC"));
+}
+
+test "swap-greedy (?U:…) makes + lazy" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?U:a+)");
+    defer re.deinit();
+
+    const m = (try re.find("aaa")).?;
+    try std.testing.expectEqual(@as(usize, 1), m.slice.len); // lazy: minimal
+}
+
+test "swap-greedy (?U:…) makes +? greedy" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?U:a+?)");
+    defer re.deinit();
+
+    const m = (try re.find("aaa")).?;
+    try std.testing.expectEqual(@as(usize, 3), m.slice.len); // greedy: maximal
+}
+
+test "swap-greedy standalone (?U) applies to the rest" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?U)a+");
+    defer re.deinit();
+
+    const m = (try re.find("aaa")).?;
+    try std.testing.expectEqual(@as(usize, 1), m.slice.len);
+}
+
+test "swap-greedy is scoped: outer quantifier stays greedy" {
+    const allocator = std.testing.allocator;
+    // x+ outside is greedy (matches "xx"); y+ inside (?U:…) is lazy (matches "y").
+    var re = try Regex.compile(allocator, "x+(?U:y+)");
+    defer re.deinit();
+
+    const m = (try re.find("xxyy")).?;
+    try std.testing.expectEqual(@as(usize, 3), m.slice.len); // "xxy"
+}
+
+test "unicode (?u:…) / (?-u:…) compile and compose" {
+    const allocator = std.testing.allocator;
+    inline for (.{ "(?u:abc)", "(?-u:abc)", "a(?u:b)c" }) |pat| {
+        var re = try Regex.compile(allocator, pat);
+        re.deinit();
+    }
+
+    // u composes with i — the i still folds case.
+    var re = try Regex.compile(allocator, "(?iu:abc)");
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("ABC"));
+}
+
+test "early error: unknown / repeated new flags" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, "(?z:a)")); // unknown flag
+    try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, "(?xx:a)")); // repeated
+    try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, "(?U-U:a)")); // add+remove
+}

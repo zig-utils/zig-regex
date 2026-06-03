@@ -239,9 +239,23 @@ pub const Node = struct {
         greedy: bool = true,
     };
 
-    /// A per-group flag override from inline modifiers `(?ims-ims:...)`: each
-    /// field is null (inherit), true (add) or false (remove) for i/m/s.
-    pub const FlagDelta = struct { i: ?bool = null, m: ?bool = null, s: ?bool = null };
+    /// A per-group flag override from inline modifiers `(?imsu-imsu:...)`: each
+    /// field is null (inherit), true (add) or false (remove). Only the
+    /// match-time flags live here (i/m/s/u); the parse-time flags `x`
+    /// (extended) and `U` (swap-greedy) are consumed by the parser and never
+    /// reach the AST.
+    pub const FlagDelta = struct {
+        i: ?bool = null,
+        m: ?bool = null,
+        s: ?bool = null,
+        u: ?bool = null,
+
+        /// True if any match-time flag is set, i.e. this delta affects matching
+        /// and the group must be carried by the backtracking engine.
+        pub fn any(self: FlagDelta) bool {
+            return self.i != null or self.m != null or self.s != null or self.u != null;
+        }
+    };
 
     pub const Group = struct {
         child: *Node,

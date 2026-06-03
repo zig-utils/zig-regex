@@ -60,6 +60,13 @@ pub const Lexer = struct {
     pending: [3]u8 = undefined,
     pending_len: u8 = 0,
     pending_pos: u8 = 0,
+    /// `x` (extended/verbose) mode: unescaped whitespace and `#`-to-end-of-line
+    /// comments are ignored outside character classes. Toggled by the parser
+    /// for global flags and scoped `(?x:...)` groups.
+    extended: bool = false,
+    /// Whether the lexer is currently between `[` and `]`. In `x` mode
+    /// whitespace inside a class is literal, so skipping is suppressed here.
+    in_class: bool = false,
 
     pub fn init(input: []const u8) Lexer {
         return .{
@@ -67,6 +74,23 @@ pub const Lexer = struct {
             .pos = 0,
             .start_pos = 0,
         };
+    }
+
+    /// In `x` mode, advance past unescaped whitespace and `#` line comments.
+    fn skipExtended(self: *Lexer) void {
+        while (self.pos < self.input.len) {
+            const c = self.input[self.pos];
+            switch (c) {
+                ' ', '\t', '\n', '\r', 0x0B, 0x0C => self.pos += 1,
+                '#' => {
+                    // Comment runs to the next newline (or end of input).
+                    while (self.pos < self.input.len and self.input[self.pos] != '\n') {
+                        self.pos += 1;
+                    }
+                },
+                else => return,
+            }
+        }
     }
 
     fn peek(self: *Lexer) ?u8 {
@@ -251,6 +275,9 @@ pub const Lexer = struct {
             self.pending_pos += 1;
             return Token{ .token_type = .literal, .value = b, .span = common.Span.init(self.start_pos, self.pos) };
         }
+        // In `x` mode, ignore unescaped whitespace and `#` comments — but never
+        // inside a character class, where whitespace is literal.
+        if (self.extended and !self.in_class) self.skipExtended();
         self.start_pos = self.pos;
 
         const c = self.advance() orelse {
@@ -265,8 +292,14 @@ pub const Lexer = struct {
             '|' => self.makeToken(.pipe, 0),
             '(' => self.makeToken(.lparen, 0),
             ')' => self.makeToken(.rparen, 0),
-            '[' => self.makeToken(.lbracket, 0),
-            ']' => self.makeToken(.rbracket, 0),
+            '[' => blk: {
+                self.in_class = true;
+                break :blk self.makeToken(.lbracket, 0);
+            },
+            ']' => blk: {
+                self.in_class = false;
+                break :blk self.makeToken(.rbracket, 0);
+            },
             '{' => self.makeToken(.lbrace, 0),
             '}' => self.makeToken(.rbrace, 0),
             '^' => self.makeToken(.caret, 0),
@@ -279,8 +312,20 @@ pub const Lexer = struct {
     pub fn reset(self: *Lexer) void {
         self.pos = 0;
         self.start_pos = 0;
+        self.pending_len = 0;
+        self.pending_pos = 0;
+        self.in_class = false;
     }
 };
+
+/// Whether `c` can begin an inline-modifier flag run after `(?` — one of the
+/// recognized flag letters (i/m/s/x/u/U) or the `-` that starts the unset group.
+fn isInlineFlagStart(c: u8) bool {
+    return switch (c) {
+        'i', 'm', 's', 'x', 'u', 'U', '-' => true,
+        else => false,
+    };
+}
 
 /// Parser for regex patterns
 pub const Parser = struct {
@@ -291,6 +336,12 @@ pub const Parser = struct {
     nesting_depth: usize,
     /// The `v` flag: parse character classes with set notation.
     unicode_sets: bool = false,
+    /// Current `x` (extended/verbose) state. Kept in sync with `lexer.extended`;
+    /// pushed/popped around `(?x:...)` / `(?-x:...)` scopes.
+    extended: bool = false,
+    /// Current `U` state: when set, quantifier greediness is swapped (so `a+`
+    /// is lazy and `a+?` is greedy) for the duration of the scope.
+    swap_greedy: bool = false,
 
     /// Maximum nesting depth to prevent stack overflow from patterns like (((((...
     pub const MAX_NESTING_DEPTH: usize = 100;
@@ -396,6 +447,23 @@ pub const Parser = struct {
         return result;
     }
 
+    /// Set the parse-time flag state (`x` extended, `U` swap-greedy), keeping
+    /// the lexer's view of extended mode in sync. Used to push and restore the
+    /// flag scope around `(?x:...)` / `(?U:...)` and their standalone forms.
+    fn setParseFlags(self: *Parser, extended: bool, swap_greedy: bool) void {
+        self.extended = extended;
+        self.lexer.extended = extended;
+        self.swap_greedy = swap_greedy;
+    }
+
+    /// Determine a quantifier's greediness, consuming a trailing lazy `?` if
+    /// present. Under `U` (swap-greedy) the default and lazy senses are flipped.
+    fn quantifierGreedy(self: *Parser) !bool {
+        const explicit_lazy = self.peek() == .question;
+        if (explicit_lazy) try self.advance();
+        return if (self.swap_greedy) explicit_lazy else !explicit_lazy;
+    }
+
     /// Parse repetition operators (*, +, ?, {m,n})
     fn parseRepeat(self: *Parser) !*ast.Node {
         var node = try self.parsePrimary();
@@ -410,22 +478,19 @@ pub const Parser = struct {
                 .star => {
                     try self.advance();
                     // Check for lazy quantifier (? after *)
-                    const greedy = self.peek() != .question;
-                    if (!greedy) try self.advance();
+                    const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createStar(self.allocator, node, greedy, span);
                 },
                 .plus => {
                     try self.advance();
                     // Check for lazy quantifier (? after +)
-                    const greedy = self.peek() != .question;
-                    if (!greedy) try self.advance();
+                    const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createPlus(self.allocator, node, greedy, span);
                 },
                 .question => {
                     try self.advance();
                     // Check for lazy quantifier (? after ?)
-                    const greedy = self.peek() != .question;
-                    if (!greedy) try self.advance();
+                    const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createOptional(self.allocator, node, greedy, span);
                 },
                 .lbrace => {
@@ -497,8 +562,7 @@ pub const Parser = struct {
 
                     const bounds = ast.RepeatBounds.init(min, max);
                     // Check for lazy quantifier (? after {m,n})
-                    const greedy = self.peek() != .question;
-                    if (!greedy) try self.advance();
+                    const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createRepeat(self.allocator, node, bounds, greedy, span);
                 },
                 else => break,
@@ -621,7 +685,9 @@ pub const Parser = struct {
                 // Check for group extensions (?...)
                 var capture_index: ?usize = null;
                 var group_name: ?[]const u8 = null;
-                var group_mod: ?ast.Node.FlagDelta = null;
+                // Inline-modifier groups early-return below; regular/named/`(?:`
+                // groups carry no flag delta.
+                const group_mod: ?ast.Node.FlagDelta = null;
 
                 if (self.current_token.token_type == .question) {
                     try self.advance(); // consume ?
@@ -691,21 +757,24 @@ pub const Parser = struct {
                             } else {
                                 return RegexError.UnexpectedCharacter;
                             }
-                        } else if (self.current_token.value == 'i' or self.current_token.value == 'm' or
-                            self.current_token.value == 's' or self.current_token.value == '-')
-                        {
-                            // Inline modifiers: `(?ims-ims:...)` scopes a group
-                            // body; `(?ims-ims)` (no body) scopes the rest of the
-                            // enclosing sequence.
+                        } else if (isInlineFlagStart(self.current_token.value)) {
+                            // Inline modifiers: `(?imsxuU-imsxuU:...)` scopes a
+                            // group body; `(?imsxuU-imsxuU)` (no body) scopes the
+                            // rest of the enclosing sequence. The match-time flags
+                            // i/m/s/u become a FlagDelta on the group; the
+                            // parse-time flags x (extended) and U (swap-greedy)
+                            // are applied to the parser/lexer for the scope.
                             var mod = ast.Node.FlagDelta{};
+                            var new_extended = self.extended;
+                            var new_swap_greedy = self.swap_greedy;
                             var removing = false;
                             var standalone = false;
                             // Early errors: a flag may not repeat within, or appear
-                            // in both, the add and remove groups (and only i/m/s
-                            // are permitted — any other code point falls through to
-                            // a syntax error).
-                            var add_mask: u3 = 0;
-                            var remove_mask: u3 = 0;
+                            // in both, the add and remove groups (and only the
+                            // recognized flags i/m/s/x/u/U are permitted — any
+                            // other code point is a syntax error).
+                            var add_mask: u6 = 0;
+                            var remove_mask: u6 = 0;
                             while (true) {
                                 if (self.peek() == .rparen) {
                                     standalone = true;
@@ -714,45 +783,82 @@ pub const Parser = struct {
                                 if (self.current_token.token_type != .literal) return RegexError.UnexpectedCharacter;
                                 const v = self.current_token.value;
                                 if (v == ':') {
-                                    try self.advance(); // consume :
+                                    // Stop here WITHOUT consuming `:` — the parse-
+                                    // time flags are applied below so the first body
+                                    // token lexes under them.
                                     break;
                                 } else if (v == '-') {
                                     if (removing) return RegexError.UnexpectedCharacter;
                                     removing = true;
                                     try self.advance();
-                                } else if (v == 'i' or v == 'm' or v == 's') {
-                                    const on = !removing;
-                                    const bit: u3 = switch (v) {
-                                        'i' => 0b001,
-                                        'm' => 0b010,
-                                        's' => 0b100,
-                                        else => unreachable,
+                                } else {
+                                    const bit: u6 = switch (v) {
+                                        'i' => 1 << 0,
+                                        'm' => 1 << 1,
+                                        's' => 1 << 2,
+                                        'x' => 1 << 3,
+                                        'u' => 1 << 4,
+                                        'U' => 1 << 5,
+                                        else => return RegexError.UnexpectedCharacter,
                                     };
                                     const side = if (removing) &remove_mask else &add_mask;
                                     if (side.* & bit != 0) return RegexError.UnexpectedCharacter; // repeated flag
                                     side.* |= bit;
                                     if (add_mask & remove_mask != 0) return RegexError.UnexpectedCharacter; // added and removed
+                                    const on = !removing;
                                     switch (v) {
                                         'i' => mod.i = on,
                                         'm' => mod.m = on,
                                         's' => mod.s = on,
+                                        'u' => mod.u = on,
+                                        'x' => new_extended = on,
+                                        'U' => new_swap_greedy = on,
                                         else => unreachable,
                                     }
                                     try self.advance();
-                                } else return RegexError.UnexpectedCharacter;
+                                }
                             }
-                            group_mod = mod;
+
+                            // Push the parse-time flag scope; restore on all exits.
+                            const saved_extended = self.extended;
+                            const saved_swap_greedy = self.swap_greedy;
+                            self.setParseFlags(new_extended, new_swap_greedy);
+
                             if (standalone) {
-                                // `(?ims)` directive: close its paren, then wrap the
-                                // remainder of the current alternative under the new
-                                // flags.
-                                try self.expect(.rparen);
-                                const body = try self.parseConcat();
+                                // `(?...)` directive: close its paren, then wrap the
+                                // remainder of the current alternative. Parse-time
+                                // flags apply to that remainder, then are restored
+                                // so siblings of the enclosing group are unaffected.
+                                self.expect(.rparen) catch |e| {
+                                    self.setParseFlags(saved_extended, saved_swap_greedy);
+                                    return e;
+                                };
+                                const body = self.parseConcat() catch |e| {
+                                    self.setParseFlags(saved_extended, saved_swap_greedy);
+                                    return e;
+                                };
+                                self.setParseFlags(saved_extended, saved_swap_greedy);
                                 const node = try ast.Node.createGroup(self.allocator, body, null, span);
-                                node.data.group.mod = mod;
+                                if (mod.any()) node.data.group.mod = mod;
                                 return node;
                             }
-                            // capture_index stays null (non-capturing)
+
+                            // Scoped group `(?...:body)`: consume `:` (now under the
+                            // new lexer.extended), parse the body, restore, close.
+                            self.advance() catch |e| {
+                                self.setParseFlags(saved_extended, saved_swap_greedy);
+                                return e;
+                            };
+                            const body = self.parseAlternation() catch |e| {
+                                self.setParseFlags(saved_extended, saved_swap_greedy);
+                                return e;
+                            };
+                            self.setParseFlags(saved_extended, saved_swap_greedy);
+                            errdefer body.destroy(self.allocator);
+                            try self.expect(.rparen);
+                            const node = try ast.Node.createGroup(self.allocator, body, null, span);
+                            if (mod.any()) node.data.group.mod = mod;
+                            return node;
                         } else {
                             // Unknown group extension
                             return RegexError.UnexpectedCharacter;
