@@ -108,3 +108,32 @@ test "case insensitive: with numbers and special chars" {
     try std.testing.expect(try regex.isMatch("Test123"));
     try std.testing.expect(!try regex.isMatch("test124"));
 }
+
+test "case-insensitive exact-literal fast path: find/findAll/count/isMatch" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "hello", .{ .case_insensitive = true });
+    defer re.deinit();
+
+    const text = "HELLO hello HeLLo world hELLO";
+
+    try std.testing.expect(try re.isMatch(text));
+    try std.testing.expect(!try re.isMatch("nope"));
+
+    try std.testing.expectEqual(@as(usize, 4), try re.count(text));
+
+    var m = (try re.find(text)).?;
+    defer m.deinit(allocator);
+    try std.testing.expectEqualStrings("HELLO", m.slice);
+    try std.testing.expectEqual(@as(usize, 0), m.start);
+
+    const all = try re.findAll(allocator, text);
+    defer {
+        for (all) |*x| x.deinit(allocator);
+        allocator.free(all);
+    }
+    try std.testing.expectEqual(@as(usize, 4), all.len);
+    try std.testing.expectEqualStrings("HeLLo", all[2].slice);
+
+    // No false positives across case-folding of non-matching letters.
+    try std.testing.expectEqual(@as(usize, 0), try re.count("help hell oh hallo"));
+}

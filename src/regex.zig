@@ -221,6 +221,74 @@ pub const Regex = struct {
         return null;
     }
 
+    /// Stateful case-insensitive substring scanner. Keeps a SIMD cursor for each
+    /// case of the first byte so it never rescans for an absent case (which would
+    /// make repeated searches O(n²)). Yields non-overlapping match starts.
+    const CiLiteralScanner = struct {
+        input: []const u8,
+        lit: []const u8,
+        last: usize, // last viable start index
+        lo: u8,
+        hi: u8,
+        c_lo: ?usize,
+        c_hi: ?usize,
+        done: bool,
+
+        fn init(input: []const u8, lit: []const u8, from: usize) CiLiteralScanner {
+            if (lit.len > input.len) {
+                return .{ .input = input, .lit = lit, .last = 0, .lo = 0, .hi = 0, .c_lo = null, .c_hi = null, .done = true };
+            }
+            const lo = std.ascii.toLower(lit[0]);
+            const hi = std.ascii.toUpper(lit[0]);
+            return .{
+                .input = input,
+                .lit = lit,
+                .last = input.len - lit.len,
+                .lo = lo,
+                .hi = hi,
+                .c_lo = std.mem.indexOfScalarPos(u8, input, from, lo),
+                .c_hi = if (lo != hi) std.mem.indexOfScalarPos(u8, input, from, hi) else null,
+                .done = false,
+            };
+        }
+
+        fn advanceCursorsAt(self: *CiLiteralScanner, p: usize) void {
+            if (self.c_lo) |x| {
+                if (x <= p) self.c_lo = std.mem.indexOfScalarPos(u8, self.input, p + 1, self.lo);
+            }
+            if (self.c_hi) |x| {
+                if (x <= p) self.c_hi = std.mem.indexOfScalarPos(u8, self.input, p + 1, self.hi);
+            }
+        }
+
+        fn next(self: *CiLiteralScanner) ?usize {
+            while (!self.done) {
+                const p = blk: {
+                    if (self.c_lo) |a| {
+                        if (self.c_hi) |b| break :blk @min(a, b);
+                        break :blk a;
+                    }
+                    break :blk self.c_hi orelse {
+                        self.done = true;
+                        return null;
+                    };
+                };
+                if (p > self.last) {
+                    self.done = true;
+                    return null;
+                }
+                const matched = std.ascii.eqlIgnoreCase(self.input[p .. p + self.lit.len], self.lit);
+                if (matched) {
+                    // Non-overlapping: skip both cursors past the matched region.
+                    self.advanceCursorsAt(p + self.lit.len - 1);
+                    return p;
+                }
+                self.advanceCursorsAt(p);
+            }
+            return null;
+        }
+    };
+
     /// Whether the lazy DFA can be used for capture-less search (count/isMatch):
     /// the fast byte-at-a-time engine for general patterns. Requires the Thompson
     /// engine, ASCII-exact matching, no position assertions, and all-greedy
@@ -372,7 +440,11 @@ pub const Regex = struct {
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
-            if (!self.flags.case_insensitive) return literalSearch(input, lit, 0) != null;
+            if (self.flags.case_insensitive) {
+                var sc = CiLiteralScanner.init(input, lit, 0);
+                return sc.next() != null;
+            }
+            return literalSearch(input, lit, 0) != null;
         }
         // Repeated-atom fast path: a match exists iff some run of `table` bytes
         // reaches the minimum length.
@@ -504,12 +576,14 @@ pub const Regex = struct {
     pub fn find(self: *const Regex, input: []const u8) !?Match {
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
-            if (!self.flags.case_insensitive) {
-                if (literalSearch(input, lit, 0)) |i| {
-                    return Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len };
-                }
-                return null;
+            const found = if (self.flags.case_insensitive) blk: {
+                var sc = CiLiteralScanner.init(input, lit, 0);
+                break :blk sc.next();
+            } else literalSearch(input, lit, 0);
+            if (found) |i| {
+                return Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len };
             }
+            return null;
         }
         // Repeated-atom fast path: leftmost maximal run of `table` bytes.
         if (self.opt_info.repeat_atom) |ra| {
@@ -638,13 +712,18 @@ pub const Regex = struct {
 
         // Exact-literal fast path: repeated substring search, no NFA.
         if (self.opt_info.exact_literal) |lit| {
-            if (!self.flags.case_insensitive) {
-                while (literalSearch(input, lit, pos)) |i| {
+            if (self.flags.case_insensitive) {
+                var sc = CiLiteralScanner.init(input, lit, 0);
+                while (sc.next()) |i| {
                     try matches.append(allocator, Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len });
-                    pos = i + lit.len;
                 }
                 return matches.toOwnedSlice(allocator);
             }
+            while (literalSearch(input, lit, pos)) |i| {
+                try matches.append(allocator, Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len });
+                pos = i + lit.len;
+            }
+            return matches.toOwnedSlice(allocator);
         }
         // Repeated-atom fast path: each leftmost maximal run of `table` bytes
         // (capped at max) is one non-overlapping match. No NFA, no per-match
@@ -835,13 +914,16 @@ pub const Regex = struct {
 
         // Exact-literal: repeated substring search.
         if (self.opt_info.exact_literal) |lit| {
-            if (!self.flags.case_insensitive) {
-                while (literalSearch(input, lit, pos)) |i| {
-                    n += 1;
-                    pos = i + lit.len;
-                }
+            if (self.flags.case_insensitive) {
+                var sc = CiLiteralScanner.init(input, lit, 0);
+                while (sc.next()) |_| n += 1;
                 return n;
             }
+            while (literalSearch(input, lit, pos)) |i| {
+                n += 1;
+                pos = i + lit.len;
+            }
+            return n;
         }
         // Repeated-atom: count maximal runs of >= min table bytes.
         if (self.opt_info.repeat_atom) |ra| {
