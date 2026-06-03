@@ -78,6 +78,11 @@ pub const VM = struct {
     /// `findAll` makes, instead of being reallocated each call.
     cur_threads: std.ArrayList(Thread) = .empty,
     nxt_threads: std.ArrayList(Thread) = .empty,
+    /// Free-list of reusable capture buffers (each `num_captures` long). Thread
+    /// cloning in the hot loop otherwise allocates and frees two of these per
+    /// surviving transition; pooling removes that malloc churn for capture
+    /// patterns.
+    cap_pool: std.ArrayList([]?usize) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, num_captures: usize, flags: common.CompileFlags) VM {
         return .{
@@ -96,12 +101,53 @@ pub const VM = struct {
         self.clearThreadList(&self.nxt_threads);
         self.cur_threads.deinit(self.allocator);
         self.nxt_threads.deinit(self.allocator);
+        for (self.cap_pool.items) |buf| self.allocator.free(buf);
+        self.cap_pool.deinit(self.allocator);
+    }
+
+    /// Take a capture buffer from the pool, or allocate one.
+    fn acquireCaps(self: *VM) ![]?usize {
+        if (self.cap_pool.pop()) |buf| return buf;
+        return try self.allocator.alloc(?usize, self.num_captures);
+    }
+
+    /// Return a capture buffer to the pool (or free it if the pool can't grow).
+    fn releaseCaps(self: *VM, buf: []?usize) void {
+        self.cap_pool.append(self.allocator, buf) catch self.allocator.free(buf);
+    }
+
+    /// Create a fresh thread (capture slots cleared), using pooled buffers.
+    fn newThread(self: *VM, state: compiler.StateId) !Thread {
+        if (self.num_captures == 0) return .{ .state = state, .capture_starts = &.{}, .capture_ends = &.{} };
+        const s = try self.acquireCaps();
+        errdefer self.releaseCaps(s);
+        const e = try self.acquireCaps();
+        @memset(s, null);
+        @memset(e, null);
+        return .{ .state = state, .capture_starts = s, .capture_ends = e };
+    }
+
+    /// Clone a thread (copying capture slots), using pooled buffers.
+    fn cloneThread(self: *VM, t: Thread) !Thread {
+        if (self.num_captures == 0) return .{ .state = t.state, .capture_starts = &.{}, .capture_ends = &.{} };
+        const s = try self.acquireCaps();
+        errdefer self.releaseCaps(s);
+        const e = try self.acquireCaps();
+        @memcpy(s, t.capture_starts);
+        @memcpy(e, t.capture_ends);
+        return .{ .state = t.state, .capture_starts = s, .capture_ends = e };
+    }
+
+    /// Return a thread's capture buffers to the pool.
+    fn freeThread(self: *VM, t: *Thread) void {
+        if (t.capture_starts.len != 0) self.releaseCaps(t.capture_starts);
+        if (t.capture_ends.len != 0) self.releaseCaps(t.capture_ends);
     }
 
     /// Free the per-thread state in a list and reset its length (keeping the
     /// backing capacity for reuse by the next matchAt).
     fn clearThreadList(self: *VM, list: *std.ArrayList(Thread)) void {
-        for (list.items) |*thread| thread.deinit(self.allocator);
+        for (list.items) |*thread| self.freeThread(thread);
         list.clearRetainingCapacity();
     }
 
@@ -149,7 +195,7 @@ pub const VM = struct {
         const visited_buf = self.visited[0..num_states];
 
         // Start with initial thread at start state
-        var initial_thread = try Thread.init(self.allocator, self.nfa.start_state, self.num_captures);
+        var initial_thread = try self.newThread(self.nfa.start_state);
 
         // Check if initial state has capture markers
         const initial_state = self.nfa.getState(self.nfa.start_state);
@@ -231,7 +277,7 @@ pub const VM = struct {
                     };
 
                     if (matches) {
-                        var new_thread = try thread.clone(self.allocator);
+                        var new_thread = try self.cloneThread(thread.*);
                         new_thread.state = transition.to;
 
                         // Update captures if this state marks a capture boundary
@@ -261,10 +307,7 @@ pub const VM = struct {
             next_threads = tmp;
 
             // Clear next threads for next iteration
-            for (next_threads.items) |*thread| {
-                thread.deinit(self.allocator);
-            }
-            next_threads.clearRetainingCapacity();
+            self.clearThreadList(&next_threads);
 
             pos += 1;
 
@@ -342,7 +385,7 @@ pub const VM = struct {
                     // Check if we've already visited this state
                     if (visited[transition.to]) continue;
 
-                    var new_thread = try thread.clone(self.allocator);
+                    var new_thread = try self.cloneThread(thread);
                     new_thread.state = transition.to;
 
                     // Update captures if this state marks a capture boundary
@@ -383,7 +426,7 @@ pub const VM = struct {
                         // Check if we've already visited this state
                         if (visited[transition.to]) continue;
 
-                        var new_thread = try thread.clone(self.allocator);
+                        var new_thread = try self.cloneThread(thread);
                         new_thread.state = transition.to;
 
                         // Update captures if this state marks a capture boundary
