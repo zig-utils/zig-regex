@@ -32,18 +32,29 @@ apples-to-apples comparison. The "#10 baseline" column is the original numbers
 from the issue (which used the allocating `findAll`); "ratio" is zig ÷ rust
 (< 1.0 means zig is faster).
 
-| pattern            | matches | #10 baseline | zig `count` | rust | ratio |
-|--------------------|--------:|------------:|--------:|-----:|------:|
-| `hello`            |  22,202 |      ~60 ms |  ~0.27 ms | ~0.40 ms | **0.7x** |
-| `hello\|world\|test` |  66,631 |     ~173 ms | ~2.2 ms | ~2.5 ms  | **0.9x** |
-| `\d+`              |  66,651 |      ~83 ms | ~0.85 ms | ~2.9 ms  | **0.3x** |
-| `\w+`              | 200,000 |      ~83 ms | ~1.6 ms | ~5.1 ms  | **0.3x** |
+| pattern               | zig `count` | rust | ratio |
+|-----------------------|--------:|-----:|------:|
+| `hello`               |  0.31 ms | 0.37 ms | **0.83x** |
+| `hello\|world\|test`  |  2.26 ms | 2.51 ms | **0.90x** |
+| `\d+`                 |  0.86 ms | 3.27 ms | **0.26x** |
+| `\w+`                 |  1.61 ms | 4.21 ms | **0.38x** |
+| `[A-Za-z]+`           |  1.73 ms | 6.12 ms | **0.28x** |
+| `\d{1,3}`             |  0.88 ms | 2.92 ms | **0.30x** |
+| `foo[0-9]+`           |  0.93 ms | 1.04 ms | **0.90x** |
+| `([a-z]+)([0-9]+)`    |  4.82 ms | 3.78 ms | 1.27x |
+| `a.c`                 |  1.09 ms | 0.66 ms | 1.66x |
+| `\w+[0-9]`            |  8.23 ms | 4.25 ms | 1.94x |
 
-From 13–118x slower at the time of #10 to **faster than the Rust regex crate on
-all four patterns** (≈3x faster on `\d+`/`\w+`). Single `find` is now a few
-nanoseconds. `findAll` (which materializes a `Match[]`) is a bit slower than
-`count` because of that allocation — use `count` when you only need the tally.
+(`Regex.count` vs `find_iter().count()` — both lazy & allocation-free. Match
+counts verified identical.) The original #10 baseline (allocating `findAll`) was
+13–118x **slower** than Rust; the engine is now **faster on most patterns** (down
+to ~0.26x) and within ~2x on the rest. Single `find` is a few nanoseconds.
+`findAll` materializes a `Match[]`, so use `count` when you only need the tally.
 Numbers vary by machine; run `compare.sh` for your own.
+
+Case-insensitive search is also fast-pathed: `(?i)hello` via the global flag
+counts in ~0.4 ms (≈3x faster than Rust), and `[a-z]+`/`\w+`/`\d+` keep the byte
+loop under the `i` flag.
 
 ### What changed
 
