@@ -13,6 +13,11 @@ pub const OptimizationInfo = struct {
     /// search, bypassing the NFA entirely.
     exact_literal: ?[]const u8 = null,
 
+    /// A literal substring that must appear in every match (not under `?`/`*`/
+    /// `{0,n}`/alternation). If it's absent from the input, there can be no
+    /// match — a universal fast-fail that works for every engine. Owned.
+    required_literal: ?[]const u8 = null,
+
     /// Set when the whole pattern is an alternation of two or more exact
     /// literals (`foo|bar|baz`). Matched by trying each literal directly
     /// (longest wins, matching the engine's alternation semantics) instead of
@@ -71,6 +76,7 @@ pub const OptimizationInfo = struct {
             for (set) |s| allocator.free(s);
             allocator.free(set);
         }
+        if (self.required_literal) |s| allocator.free(s);
     }
 };
 
@@ -128,6 +134,21 @@ pub const Optimizer = struct {
         // Feature scan for lazy-DFA eligibility.
         scanFeatures(root, &info);
 
+        // Longest mandatory literal substring (required-literal fast-fail).
+        {
+            var cur = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+            defer cur.deinit(self.allocator);
+            var best = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+            errdefer best.deinit(self.allocator);
+            try collectMandatory(self.allocator, root, &cur, &best);
+            flushMandatory(self.allocator, &cur, &best) catch {};
+            if (best.items.len >= 1) {
+                info.required_literal = try best.toOwnedSlice(self.allocator);
+            } else {
+                best.deinit(self.allocator);
+            }
+        }
+
         // Single repeated-atom fast path (greedy, min >= 1).
         info.repeat_atom = detectRepeatAtom(root);
 
@@ -161,6 +182,39 @@ pub const Optimizer = struct {
         }
 
         return info;
+    }
+
+    /// Keep `best` as the longest run seen, then reset `cur`.
+    fn flushMandatory(allocator: std.mem.Allocator, cur: *std.ArrayList(u8), best: *std.ArrayList(u8)) !void {
+        if (cur.items.len > best.items.len) {
+            best.clearRetainingCapacity();
+            try best.appendSlice(allocator, cur.items);
+        }
+        cur.clearRetainingCapacity();
+    }
+
+    /// Accumulate the longest run of literals that must appear in every match.
+    /// Only literals reached through concatenation and plain (min>=1) groups are
+    /// mandatory; `?`/`*`/`{0,n}`/alternation and any non-literal break the run.
+    fn collectMandatory(allocator: std.mem.Allocator, node: *ast.Node, cur: *std.ArrayList(u8), best: *std.ArrayList(u8)) !void {
+        switch (node.node_type) {
+            .literal => try cur.append(allocator, node.data.literal),
+            .concat => {
+                try collectMandatory(allocator, node.data.concat.left, cur, best);
+                try collectMandatory(allocator, node.data.concat.right, cur, best);
+            },
+            .group => {
+                // A plain group (always matched once) preserves the run.
+                if (node.data.group.mod != null) {
+                    try flushMandatory(allocator, cur, best);
+                } else {
+                    try collectMandatory(allocator, node.data.group.child, cur, best);
+                }
+            },
+            // Anything else (quantifiers, alternation, classes, anchors, ...) is
+            // not a guaranteed literal here: break the current run.
+            else => try flushMandatory(allocator, cur, best),
+        }
     }
 
     /// Walk the AST recording features that disqualify the lazy DFA: position

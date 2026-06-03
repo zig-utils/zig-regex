@@ -250,3 +250,33 @@ test "DFA hybrid: captures correct for greedy capture patterns" {
     try std.testing.expectEqualStrings("78", m.captures[0]);
     try std.testing.expectEqualStrings("90", m.captures[1]);
 }
+
+// Required-literal fast-fail must never skip a real match: a mandatory literal
+// is only "required" when it's outside ?/*/{0,n}/alternation.
+test "required-literal fast-fail correctness" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pat: []const u8, input: []const u8, n: usize };
+    const cases = [_]Case{
+        .{ .pat = "(\\d+)-(\\d+)", .input = "12-34 x 5-6", .n = 2 }, // dash present
+        .{ .pat = "(\\d+)-(\\d+)", .input = "12 34 56", .n = 0 }, // dash absent -> fast-fail
+        .{ .pat = "a.c", .input = "abc axc qqq", .n = 2 }, // 'a' required
+        .{ .pat = "a.c", .input = "xyz www", .n = 0 }, // no 'a' -> fast-fail
+        .{ .pat = "(ab)?cd", .input = "cd abcd", .n = 2 }, // 'ab' optional, 'cd' required
+        .{ .pat = "(ab)?cd", .input = "ab ab", .n = 0 }, // no 'cd' -> fast-fail
+        .{ .pat = "cat|dog", .input = "dog cat", .n = 2 }, // no required literal (alternation)
+        .{ .pat = "x\\d+y", .input = "x1y x22y zz", .n = 2 }, // 'x' and 'y' required
+        .{ .pat = "x\\d+y", .input = "x123 456y", .n = 0 }, // present bytes but no full match
+    };
+    inline for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pat);
+        defer re.deinit();
+        try std.testing.expectEqual(c.n, try re.count(c.input));
+        const all = try re.findAll(allocator, c.input);
+        defer {
+            for (all) |*m| m.deinit(allocator);
+            allocator.free(all);
+        }
+        try std.testing.expectEqual(c.n, all.len);
+        try std.testing.expectEqual(c.n != 0, try re.isMatch(c.input));
+    }
+}

@@ -425,6 +425,19 @@ pub const Regex = struct {
         return false;
     }
 
+    /// Required-literal fast-fail: true when a mandatory literal substring is
+    /// absent, so there can be no match. Skipped under the `i` flag and when the
+    /// exact-literal path already covers the pattern. Uses the SIMD first-byte
+    /// `literalSearch`.
+    fn requiredAbsent(self: *const Regex, input: []const u8) bool {
+        if (self.flags.case_insensitive) return false;
+        if (self.opt_info.exact_literal != null) return false;
+        if (self.opt_info.required_literal) |req| {
+            return literalSearch(input, req, 0) == null;
+        }
+        return false;
+    }
+
     /// ASCII case-fold a byte-membership table: include both cases of every set
     /// byte. Lets the repeated-atom fast path handle the case-insensitive flag.
     fn foldTableCI(t: [256]bool) [256]bool {
@@ -452,6 +465,9 @@ pub const Regex = struct {
 
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
+        // Required-literal fast-fail: a mandatory substring that's absent means
+        // there can be no match (works for every engine).
+        if (self.requiredAbsent(input)) return false;
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
             if (self.flags.case_insensitive) {
@@ -587,6 +603,7 @@ pub const Regex = struct {
 
     /// Find the first match in the input string
     pub fn find(self: *const Regex, input: []const u8) !?Match {
+        if (self.requiredAbsent(input)) return null;
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
             const found = if (self.flags.case_insensitive) blk: {
@@ -721,6 +738,8 @@ pub const Regex = struct {
         errdefer matches.deinit(allocator);
 
         var pos: usize = 0;
+
+        if (self.requiredAbsent(input)) return matches.toOwnedSlice(allocator);
 
         // Exact-literal fast path: repeated substring search, no NFA.
         if (self.opt_info.exact_literal) |lit| {
@@ -922,6 +941,8 @@ pub const Regex = struct {
     pub fn count(self: *const Regex, input: []const u8) !usize {
         var n: usize = 0;
         var pos: usize = 0;
+
+        if (self.requiredAbsent(input)) return 0;
 
         // Exact-literal: repeated substring search.
         if (self.opt_info.exact_literal) |lit| {
