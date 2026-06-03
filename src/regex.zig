@@ -7,6 +7,7 @@ const ast = @import("ast.zig");
 const common = @import("common.zig");
 const optimizer = @import("optimizer.zig");
 const backtrack = @import("backtrack.zig");
+const dfa = @import("dfa.zig");
 
 /// Represents a match result from a regex operation
 pub const Match = struct {
@@ -210,6 +211,63 @@ pub const Regex = struct {
         return null;
     }
 
+    /// Whether the lazy DFA can be used for capture-less search (count/isMatch):
+    /// the fast byte-at-a-time engine for general patterns. Requires the Thompson
+    /// engine, ASCII-exact matching, no position assertions, and all-greedy
+    /// quantifiers (so longest-match equals the engine's semantics).
+    fn dfaEligible(self: *const Regex) bool {
+        return self.engine_type == .thompson_nfa and
+            !self.flags.case_insensitive and
+            !self.opt_info.has_assertions and
+            !self.opt_info.has_lazy;
+    }
+
+    /// count() via the lazy DFA. Returns error.DfaOverflow if the DFA exceeds its
+    /// state cap, so the caller can fall back to the NFA.
+    fn countWithDfa(self: *const Regex, input: []const u8) dfa.Error!usize {
+        var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
+        defer d.deinit();
+        const fb = self.opt_info.first_bytes;
+        var n: usize = 0;
+        var pos: usize = 0;
+        while (pos <= input.len) {
+            var scan = pos;
+            var found_end: ?usize = null;
+            while (scan <= input.len) {
+                if (fb) |t| {
+                    while (scan < input.len and !t[input[scan]]) scan += 1;
+                    if (scan >= input.len) break;
+                }
+                if (try d.longestMatchFrom(input, scan)) |end| {
+                    found_end = end;
+                    break;
+                }
+                scan += 1;
+            }
+            const end = found_end orelse break;
+            n += 1;
+            pos = if (end > scan) end else end + 1;
+        }
+        return n;
+    }
+
+    /// isMatch() via the lazy DFA.
+    fn isMatchWithDfa(self: *const Regex, input: []const u8) dfa.Error!bool {
+        var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
+        defer d.deinit();
+        const fb = self.opt_info.first_bytes;
+        var pos: usize = 0;
+        while (pos <= input.len) {
+            if (fb) |t| {
+                while (pos < input.len and !t[input[pos]]) pos += 1;
+                if (pos >= input.len) break;
+            }
+            if (try d.longestMatchFrom(input, pos)) |_| return true;
+            pos += 1;
+        }
+        return false;
+    }
+
     /// Longest literal in `set` that matches at `input[pos..]`, or 0 if none.
     /// Longest wins, matching the engine's alternation semantics (`a|ab` → "ab").
     fn longestLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
@@ -255,6 +313,15 @@ pub const Regex = struct {
                     p += 1;
                 }
                 return false;
+            }
+        }
+        // Lazy-DFA path for eligible general patterns.
+        if (self.dfaEligible()) {
+            if (self.isMatchWithDfa(input)) |b| {
+                return b;
+            } else |err| switch (err) {
+                error.DfaOverflow => {}, // fall back to NFA
+                else => |e| return e,
             }
         }
         switch (self.engine_type) {
@@ -651,6 +718,16 @@ pub const Regex = struct {
                     } else pos += 1;
                 }
                 return n;
+            }
+        }
+
+        // Lazy-DFA path for eligible general patterns.
+        if (self.dfaEligible()) {
+            if (self.countWithDfa(input)) |c| {
+                return c;
+            } else |err| switch (err) {
+                error.DfaOverflow => {}, // fall back to NFA
+                else => |e| return e,
             }
         }
 

@@ -66,17 +66,31 @@ plus allocation cuts in the VM:
 - **`Regex.count`** — allocation-free match counting (no `Match[]`, no capture
   slices), reusing every fast path and a single VM. The benchmark uses it for the
   head-to-head, matching Rust's lazy `find_iter().count()`.
+- **Lazy DFA** (`src/dfa.zig`) — for general patterns that don't hit a fast path,
+  `count`/`isMatch` run a DFA built on demand (each state is a set of NFA states;
+  each byte is a cached table lookup) instead of per-byte thread simulation. Used
+  only where longest-match equals the engine's semantics: all-greedy, no anchors /
+  `\b`, ASCII-exact; falls back to the NFA otherwise or if the DFA would exceed its
+  state cap. This took general patterns from 7–51x slower to ~1–2x:
+
+  | pattern | before | after | rust | ratio |
+  |---|--:|--:|--:|--:|
+  | `foo[0-9]+`  | ~5.8 ms | ~1.3 ms | ~0.7 ms | 1.8x |
+  | `ba[rz][0-9]+` | ~12 ms | ~1.4 ms | ~1.3 ms | 1.1x |
+  | `\w+[0-9]`   | ~145 ms | ~6.7 ms | ~2.9 ms | 2.3x |
+  | `a.c`        | —       | ~0.8 ms | ~0.6 ms | 1.3x |
+
 - **The benchmark uses the release-grade SMP allocator** (not a debug allocator),
   for a fair comparison with Rust's global allocator.
 
-All fast paths preserve the engine's exact match semantics (verified by the full
-test suite) and fall back to the NFA whenever they don't apply (captures,
-case-insensitive, lazy/nullable quantifiers, lookaround, Unicode classes, …).
+All fast paths and the DFA preserve the engine's exact match semantics (verified
+by the full test suite, including count-vs-findAll cross-checks) and fall back to
+the NFA whenever they don't apply (captures, case-insensitive, lazy/nullable
+quantifiers, anchors, lookaround, Unicode classes, …).
 
 ### What's left
 
-The fast paths cover the common shapes; arbitrary patterns that don't match one
-still run the Thompson NFA (`matchAt` per position). Pushing those to Rust's level
-needs a **lazy DFA** and **Teddy-style SIMD multi-literal prefilters**. A
-zero-allocation `findAll`-style iterator (so the materializing path is as cheap as
-`count`) is also open. Tracked as the #10 roadmap.
+`find`/`findAll` (which build captures) still use the NFA on general patterns —
+only `count`/`isMatch` use the DFA so far. Remaining roadmap: a capture-aware
+hybrid (DFA to find bounds, NFA for captures), **Teddy-style SIMD multi-literal
+prefilters**, and a zero-allocation `findAll`-style iterator.

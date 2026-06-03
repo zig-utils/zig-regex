@@ -32,6 +32,14 @@ pub const OptimizationInfo = struct {
     /// Null when unknown / unhelpful (e.g. `.`, nullable patterns).
     first_bytes: ?[256]bool = null,
 
+    /// Whether the pattern contains any position assertion (^ $ \A \z \b \B).
+    /// The lazy DFA can't represent these, so it's disabled when true.
+    has_assertions: bool = false,
+
+    /// Whether the pattern contains any lazy (non-greedy) quantifier. Lazy
+    /// matching isn't longest-match, so the lazy DFA is disabled when true.
+    has_lazy: bool = false,
+
     /// Whether the pattern is anchored at start (^)
     anchored_start: bool = false,
 
@@ -117,6 +125,9 @@ pub const Optimizer = struct {
             }
         }
 
+        // Feature scan for lazy-DFA eligibility.
+        scanFeatures(root, &info);
+
         // Single repeated-atom fast path (greedy, min >= 1).
         info.repeat_atom = detectRepeatAtom(root);
 
@@ -150,6 +161,43 @@ pub const Optimizer = struct {
         }
 
         return info;
+    }
+
+    /// Walk the AST recording features that disqualify the lazy DFA: position
+    /// assertions (not representable) and lazy quantifiers (not longest-match).
+    fn scanFeatures(node: *ast.Node, info: *OptimizationInfo) void {
+        switch (node.node_type) {
+            .anchor => info.has_assertions = true,
+            .literal, .any, .char_class, .empty, .unicode_property, .class_set, .backref => {},
+            .star => {
+                if (!node.data.star.greedy) info.has_lazy = true;
+                scanFeatures(node.data.star.child, info);
+            },
+            .plus => {
+                if (!node.data.plus.greedy) info.has_lazy = true;
+                scanFeatures(node.data.plus.child, info);
+            },
+            .optional => {
+                if (!node.data.optional.greedy) info.has_lazy = true;
+                scanFeatures(node.data.optional.child, info);
+            },
+            .repeat => {
+                if (!node.data.repeat.greedy) info.has_lazy = true;
+                scanFeatures(node.data.repeat.child, info);
+            },
+            .concat => {
+                scanFeatures(node.data.concat.left, info);
+                scanFeatures(node.data.concat.right, info);
+            },
+            .alternation => {
+                scanFeatures(node.data.alternation.left, info);
+                scanFeatures(node.data.alternation.right, info);
+            },
+            .group => scanFeatures(node.data.group.child, info),
+            // Assertions/captures inside lookaround route to backtracking; flag
+            // conservatively so the DFA is not used.
+            .lookahead, .lookbehind => info.has_assertions = true,
+        }
     }
 
     /// Collect, into `list`, the exact-literal strings of an alternation tree.

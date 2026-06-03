@@ -199,8 +199,14 @@ test "count: agrees with findAll across pattern shapes" {
         .{ "\\w+", "foo bar123 baz qux" }, // repeated atom
         .{ "\\d+", "a1 bb 22 ccc 333" }, // repeated atom (digits)
         .{ "cat|dog|bird", "cat dog fish bird cat" }, // literal alternation
-        .{ "a.c", "abc axc adc xyz aqc" }, // NFA path
-        .{ "a+b", "aab ab aaab b" }, // NFA path
+        .{ "a.c", "abc axc adc xyz aqc" }, // lazy-DFA path
+        .{ "a+b", "aab ab aaab b" }, // lazy-DFA path
+        .{ "foo[0-9]+", "foo12 foo bar foo345 foobar" }, // literal-prefix + DFA
+        .{ "ba[rz][0-9]+", "bar1 baz22 bat3 bar baz9" }, // DFA
+        .{ "\\w+[0-9]", "abc1 word hello42 x9 noend" }, // DFA, greedy backtrack
+        .{ "[a-z]+[0-9]+", "ab12 cd ef34 5 gh5" }, // DFA
+        .{ "a.*c", "axxc a c abc xyz" }, // DFA, greedy star
+        .{ "(ab|abc)(d|cd)", "abcd abd" }, // DFA, longest alternation
         .{ "x", "" }, // empty input
     };
     inline for (cases) |c| {
