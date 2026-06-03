@@ -251,6 +251,55 @@ pub const Regex = struct {
         return n;
     }
 
+    /// find() via the lazy DFA, for capture-free patterns — the DFA gives the
+    /// match bounds directly, no NFA pass needed. Returns error.DfaOverflow to
+    /// signal fallback.
+    fn findWithDfa(self: *const Regex, input: []const u8) dfa.Error!?Match {
+        var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
+        defer d.deinit();
+        const fb = self.opt_info.first_bytes;
+        var scan: usize = 0;
+        while (scan <= input.len) {
+            if (fb) |t| {
+                while (scan < input.len and !t[input[scan]]) scan += 1;
+                if (scan >= input.len) break;
+            }
+            if (try d.longestMatchFrom(input, scan)) |end| {
+                return Match{ .slice = input[scan..end], .start = scan, .end = end };
+            }
+            scan += 1;
+        }
+        return null;
+    }
+
+    /// findAll() via the lazy DFA, for capture-free patterns. Fills `matches`
+    /// with bound-only matches (no captures). Returns error.DfaOverflow to signal
+    /// fallback (the caller clears any partial results first).
+    fn findAllWithDfa(self: *const Regex, allocator: std.mem.Allocator, matches: *std.ArrayList(Match), input: []const u8) dfa.Error!void {
+        var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
+        defer d.deinit();
+        const fb = self.opt_info.first_bytes;
+        var pos: usize = 0;
+        while (pos <= input.len) {
+            var scan = pos;
+            var matched_end: ?usize = null;
+            while (scan <= input.len) {
+                if (fb) |t| {
+                    while (scan < input.len and !t[input[scan]]) scan += 1;
+                    if (scan >= input.len) break;
+                }
+                if (try d.longestMatchFrom(input, scan)) |end| {
+                    matched_end = end;
+                    break;
+                }
+                scan += 1;
+            }
+            const end = matched_end orelse break;
+            try matches.append(allocator, Match{ .slice = input[scan..end], .start = scan, .end = end });
+            pos = if (end > scan) end else end + 1;
+        }
+    }
+
     /// isMatch() via the lazy DFA.
     fn isMatchWithDfa(self: *const Regex, input: []const u8) dfa.Error!bool {
         var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
@@ -455,6 +504,16 @@ pub const Regex = struct {
                 return null;
             }
         }
+        // Lazy-DFA path for eligible capture-free general patterns: the DFA gives
+        // the match bounds directly, no NFA pass.
+        if (self.dfaEligible() and self.capture_count == 0) {
+            if (self.findWithDfa(input)) |maybe| {
+                return maybe;
+            } else |err| switch (err) {
+                error.DfaOverflow => {}, // fall back to NFA
+                else => |e| return e,
+            }
+        }
         switch (self.engine_type) {
             .thompson_nfa => {
                 const nfa_mut = @constCast(&self.nfa);
@@ -568,6 +627,18 @@ pub const Regex = struct {
                     }
                 }
                 return matches.toOwnedSlice(allocator);
+            }
+        }
+
+        // Lazy-DFA path for eligible capture-free general patterns: DFA bounds,
+        // no NFA pass. On overflow, drop partial (bound-only, no owned captures)
+        // results and fall back to the NFA.
+        if (self.dfaEligible() and self.capture_count == 0) {
+            if (self.findAllWithDfa(allocator, &matches, input)) |_| {
+                return matches.toOwnedSlice(allocator);
+            } else |err| switch (err) {
+                error.DfaOverflow => matches.clearRetainingCapacity(),
+                else => |e| return e,
             }
         }
 
