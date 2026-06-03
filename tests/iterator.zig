@@ -188,3 +188,30 @@ test "iterator: overlapping matches prevention" {
     const no_match = try iter.next(allocator);
     try std.testing.expect(no_match == null);
 }
+
+// count(): allocation-free match counting must agree with findAll().len
+// across the fast paths (exact literal, repeated atom, literal alternation)
+// and the NFA path.
+test "count: agrees with findAll across pattern shapes" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "hello", "hello world hello there hello" }, // exact literal
+        .{ "\\w+", "foo bar123 baz qux" }, // repeated atom
+        .{ "\\d+", "a1 bb 22 ccc 333" }, // repeated atom (digits)
+        .{ "cat|dog|bird", "cat dog fish bird cat" }, // literal alternation
+        .{ "a.c", "abc axc adc xyz aqc" }, // NFA path
+        .{ "a+b", "aab ab aaab b" }, // NFA path
+        .{ "x", "" }, // empty input
+    };
+    inline for (cases) |c| {
+        var re = try Regex.compile(allocator, c[0]);
+        defer re.deinit();
+        const matches = try re.findAll(allocator, c[1]);
+        defer {
+            for (matches) |*m| m.deinit(allocator);
+            allocator.free(matches);
+        }
+        const n = try re.count(c[1]);
+        try std.testing.expectEqual(matches.len, n);
+    }
+}

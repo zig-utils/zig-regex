@@ -26,20 +26,24 @@ binaries so the comparison is apples-to-apples.
 
 ### Results (Apple M4, Zig 0.16, regex crate 1.x, 50 iterations)
 
-`findAll` time per scan of the 1.17 MB haystack. The "#10 baseline" column is the
-original numbers from the issue; "ratio" is zig-now ÷ rust (< 1.0 means zig is
-faster).
+Time per scan of the 1.17 MB haystack, counting all matches — `Regex.count`
+(zig) vs `find_iter().count()` (rust): both lazy, allocation-free, so it's an
+apples-to-apples comparison. The "#10 baseline" column is the original numbers
+from the issue (which used the allocating `findAll`); "ratio" is zig ÷ rust
+(< 1.0 means zig is faster).
 
-| pattern            | matches | #10 baseline | zig now | rust | ratio |
+| pattern            | matches | #10 baseline | zig `count` | rust | ratio |
 |--------------------|--------:|------------:|--------:|-----:|------:|
-| `hello`            |  22,202 |      ~60 ms |  ~0.6 ms | ~0.7 ms | **0.8x** |
-| `hello\|world\|test` |  66,631 |     ~173 ms | ~2.8 ms | ~2.3 ms  | 1.2x |
-| `\d+`              |  66,651 |      ~83 ms | ~1.7 ms | ~2.8 ms  | **0.6x** |
-| `\w+`              | 200,000 |      ~83 ms | ~4.7 ms | ~4.6 ms  | 1.2x |
+| `hello`            |  22,202 |      ~60 ms |  ~0.27 ms | ~0.40 ms | **0.7x** |
+| `hello\|world\|test` |  66,631 |     ~173 ms | ~2.2 ms | ~2.5 ms  | **0.9x** |
+| `\d+`              |  66,651 |      ~83 ms | ~0.85 ms | ~2.9 ms  | **0.3x** |
+| `\w+`              | 200,000 |      ~83 ms | ~1.6 ms | ~5.1 ms  | **0.3x** |
 
-From 13–118x slower at the time of #10 to **0.6–1.2x** — faster than the Rust
-regex crate on `hello` and `\d+`, near parity on the rest. Single `find` is now a
-few nanoseconds. Numbers vary by machine; run `compare.sh` for your own.
+From 13–118x slower at the time of #10 to **faster than the Rust regex crate on
+all four patterns** (≈3x faster on `\d+`/`\w+`). Single `find` is now a few
+nanoseconds. `findAll` (which materializes a `Match[]`) is a bit slower than
+`count` because of that allocation — use `count` when you only need the tally.
+Numbers vary by machine; run `compare.sh` for your own.
 
 ### What changed
 
@@ -59,6 +63,9 @@ plus allocation cuts in the VM:
 - **VM allocation cuts.** The epsilon-closure `visited` bitmap and the two thread
   lists are allocated once per VM and reused across positions; capture-less
   threads allocate nothing. `findAll` reuses a single VM.
+- **`Regex.count`** — allocation-free match counting (no `Match[]`, no capture
+  slices), reusing every fast path and a single VM. The benchmark uses it for the
+  head-to-head, matching Rust's lazy `find_iter().count()`.
 - **The benchmark uses the release-grade SMP allocator** (not a debug allocator),
   for a fair comparison with Rust's global allocator.
 
@@ -70,5 +77,6 @@ case-insensitive, lazy/nullable quantifiers, lookaround, Unicode classes, …).
 
 The fast paths cover the common shapes; arbitrary patterns that don't match one
 still run the Thompson NFA (`matchAt` per position). Pushing those to Rust's level
-needs a **lazy DFA** and **Teddy-style SIMD multi-literal prefilters**, plus a
-**zero-allocation match iterator** for counting. Tracked as the #10 roadmap.
+needs a **lazy DFA** and **Teddy-style SIMD multi-literal prefilters**. A
+zero-allocation `findAll`-style iterator (so the materializing path is as cheap as
+`count`) is also open. Tracked as the #10 roadmap.

@@ -108,12 +108,14 @@ pub fn main(init: std.process.Init) !void {
         var re = try Regex.compile(gpa, pattern);
         defer re.deinit();
 
-        _ = try countFindAll(gpa, &re, haystack); // warmup
+        // Use count() — the allocation-free counterpart of Rust's
+        // find_iter().count(), so the head-to-head is apples-to-apples.
+        _ = try re.count(haystack); // warmup
 
         const start = monotonicNs();
         var total: usize = 0;
         var i: usize = 0;
-        while (i < iterations) : (i += 1) total += try countFindAll(gpa, &re, haystack);
+        while (i < iterations) : (i += 1) total += try re.count(haystack);
         const elapsed = monotonicNs() - start;
 
         var buf: [128]u8 = undefined;

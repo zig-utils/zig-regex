@@ -234,9 +234,9 @@ pub const Regex = struct {
                 var p: usize = 0;
                 while (p < input.len) {
                     while (p < input.len and !ra.table[input[p]]) p += 1;
-                    var count: usize = 0;
-                    while (p < input.len and ra.table[input[p]]) : (p += 1) count += 1;
-                    if (count >= ra.min) return true;
+                    var run: usize = 0;
+                    while (p < input.len and ra.table[input[p]]) : (p += 1) run += 1;
+                    if (run >= ra.min) return true;
                 }
                 return false;
             }
@@ -347,9 +347,9 @@ pub const Regex = struct {
                     while (p < input.len and !ra.table[input[p]]) p += 1;
                     if (p >= input.len) break;
                     const start = p;
-                    var count: usize = 0;
-                    while (p < input.len and ra.table[input[p]] and count < max) : (p += 1) count += 1;
-                    if (count >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
+                    var run: usize = 0;
+                    while (p < input.len and ra.table[input[p]] and run < max) : (p += 1) run += 1;
+                    if (run >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
                 }
                 return null;
             }
@@ -440,9 +440,9 @@ pub const Regex = struct {
                     while (pos < input.len and !ra.table[input[pos]]) pos += 1;
                     if (pos >= input.len) break;
                     const start = pos;
-                    var count: usize = 0;
-                    while (pos < input.len and ra.table[input[pos]] and count < max) : (pos += 1) count += 1;
-                    if (count >= ra.min) {
+                    var run: usize = 0;
+                    while (pos < input.len and ra.table[input[pos]] and run < max) : (pos += 1) run += 1;
+                    if (run >= ra.min) {
                         try matches.append(allocator, Match{ .slice = input[start..pos], .start = start, .end = pos });
                     }
                 }
@@ -567,6 +567,106 @@ pub const Regex = struct {
         }
 
         return matches.toOwnedSlice(allocator);
+    }
+
+    /// Count all non-overlapping matches without materializing them. This is the
+    /// allocation-free counterpart to `findAll().len` and the fair counterpart to
+    /// Rust's `find_iter().count()`. Reuses every fast path and, on the NFA path,
+    /// a single VM with the prefilter — no `Match` structs, no capture slices.
+    pub fn count(self: *const Regex, input: []const u8) !usize {
+        var n: usize = 0;
+        var pos: usize = 0;
+
+        // Exact-literal: repeated substring search.
+        if (self.opt_info.exact_literal) |lit| {
+            if (!self.flags.case_insensitive) {
+                while (literalSearch(input, lit, pos)) |i| {
+                    n += 1;
+                    pos = i + lit.len;
+                }
+                return n;
+            }
+        }
+        // Repeated-atom: count maximal runs of >= min table bytes.
+        if (self.opt_info.repeat_atom) |ra| {
+            if (!self.flags.case_insensitive) {
+                const max = ra.max orelse std.math.maxInt(usize);
+                while (pos < input.len) {
+                    while (pos < input.len and !ra.table[input[pos]]) pos += 1;
+                    if (pos >= input.len) break;
+                    var run: usize = 0;
+                    while (pos < input.len and ra.table[input[pos]] and run < max) : (pos += 1) run += 1;
+                    if (run >= ra.min) n += 1;
+                }
+                return n;
+            }
+        }
+        // Literal-alternation: leftmost-longest literal at each candidate.
+        if (self.opt_info.literal_set) |set| {
+            if (!self.flags.case_insensitive) {
+                const fb = self.opt_info.first_bytes;
+                while (pos < input.len) {
+                    if (fb) |t| {
+                        while (pos < input.len and !t[input[pos]]) pos += 1;
+                        if (pos >= input.len) break;
+                    }
+                    const best = longestLiteralAt(set, input, pos);
+                    if (best > 0) {
+                        n += 1;
+                        pos += best;
+                    } else pos += 1;
+                }
+                return n;
+            }
+        }
+
+        switch (self.engine_type) {
+            .thompson_nfa => {
+                const nfa_mut = @constCast(&self.nfa);
+                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+                defer virtual_machine.deinit();
+                const prefix: ?[]const u8 = if (self.flags.case_insensitive) null else self.opt_info.literal_prefix;
+                const first_bytes: ?[256]bool = if (self.flags.case_insensitive or prefix != null) null else self.opt_info.first_bytes;
+
+                while (pos <= input.len) {
+                    var scan = pos;
+                    var result: ?vm.MatchResult = null;
+                    while (scan <= input.len) {
+                        if (prefix) |p| {
+                            const rel = std.mem.indexOf(u8, input[scan..], p) orelse break;
+                            scan += rel;
+                        } else if (first_bytes) |fb| {
+                            while (scan < input.len and !fb[input[scan]]) scan += 1;
+                            if (scan >= input.len) break;
+                        }
+                        if (try virtual_machine.matchAt(input, scan)) |r| {
+                            result = r;
+                            break;
+                        }
+                        scan += 1;
+                    }
+                    var r = result orelse break;
+                    r.deinit(self.allocator);
+                    n += 1;
+                    pos = if (r.end > r.start) r.end else r.end + 1;
+                }
+                return n;
+            },
+            .backtracking => {
+                const engine_mut = @constCast(&self.backtrack_engine.?);
+                while (pos < input.len) {
+                    if (engine_mut.find(input[pos..])) |result| {
+                        var mut_result = result;
+                        mut_result.deinit(self.allocator);
+                        const adjusted_start = pos + result.start;
+                        const adjusted_end = pos + result.end;
+                        n += 1;
+                        pos = if (adjusted_end > adjusted_start) adjusted_end else adjusted_end + 1;
+                    } else break;
+                }
+                return n;
+            },
+        }
     }
 
     /// Expand replacement string with backreferences ($1, $2, etc.)
