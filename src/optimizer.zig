@@ -138,7 +138,7 @@ pub const Optimizer = struct {
         // First-byte set: usable only when every match consumes at least one
         // byte (min_length >= 1) and the leading byte set is fully determined.
         if (info.min_length >= 1) {
-            var set = [_]bool{false} ** 256;
+            var set = std.mem.zeroes([256]bool);
             if (collectFirstBytes(root, &set) == .ok_consumed) {
                 // Only worthwhile if it actually rules some bytes out.
                 var count: usize = 0;
@@ -200,7 +200,7 @@ pub const Optimizer = struct {
             },
             else => {}, // bare atom: min = max = 1
         }
-        var table = [_]bool{false} ** 256;
+        var table = std.mem.zeroes([256]bool);
         switch (node.node_type) {
             .literal => table[node.data.literal] = true,
             .char_class => {
