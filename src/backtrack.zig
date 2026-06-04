@@ -452,18 +452,16 @@ pub const BacktrackEngine = struct {
             },
             .optional => {
                 const quant = node.data.optional;
+                // Enumerate ALL of the child's possible endings (not just its
+                // single greedy match) so a later element — e.g. a backreference
+                // after `(.*-)?` — can drive the optional's inner quantifier to a
+                // shorter match. Greedy tries the matched branch first, then zero.
                 if (quant.greedy) {
-                    // Greedy: try matching first, then zero
-                    if (self.matchNode(quant.child, pos)) |end| {
-                        try positions.append(self.allocator, end);
-                    }
+                    try self.collectAllMatches(quant.child, pos, positions);
                     try positions.append(self.allocator, pos); // zero matches
                 } else {
-                    // Lazy: try zero first, then matching
                     try positions.append(self.allocator, pos); // zero matches first
-                    if (self.matchNode(quant.child, pos)) |end| {
-                        try positions.append(self.allocator, end);
-                    }
+                    try self.collectAllMatches(quant.child, pos, positions);
                 }
             },
             .repeat => {
