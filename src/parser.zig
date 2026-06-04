@@ -43,6 +43,7 @@ pub const TokenType = enum {
 pub const Token = struct {
     token_type: TokenType,
     value: u8 = 0,
+    name: ?[]const u8 = null,
     /// For `escape_p`/`escape_P`: the resolved Unicode property operand.
     prop: ?unicode.PropSpec = null,
     span: common.Span,
@@ -135,6 +136,27 @@ pub const Lexer = struct {
             '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
                 // Backreference \1, \2, etc.
                 return self.makeToken(.backref, c - '0');
+            },
+            'k' => {
+                // ECMAScript named backreference: \k<name>
+                if (self.peek() == '<') {
+                    _ = self.advance();
+                    const name_start = self.pos;
+                    while (self.peek()) |p| {
+                        if (p == '>') {
+                            const name = self.input[name_start..self.pos];
+                            _ = self.advance();
+                            if (name.len == 0) return RegexError.InvalidEscapeSequence;
+                            var tok = self.makeToken(.backref, 0);
+                            tok.name = name;
+                            return tok;
+                        }
+                        if (!std.ascii.isAlphanumeric(p) and p != '_') return RegexError.InvalidEscapeSequence;
+                        _ = self.advance();
+                    }
+                    return RegexError.UnexpectedEndOfPattern;
+                }
+                return self.makeToken(.literal, 'k');
             },
             'f' => self.makeToken(.escape_char, 0x0C), // form feed
             'v' => self.makeToken(.escape_char, 0x0B), // vertical tab
@@ -665,8 +687,10 @@ pub const Parser = struct {
             },
             .backref => {
                 try self.advance();
-                const index = token.value; // 1-based capture group index
-                return ast.Node.createBackreference(self.allocator, index, null, span);
+                const name = if (token.name) |n| try self.allocator.dupe(u8, n) else null;
+                errdefer if (name) |n| self.allocator.free(n);
+                const index = token.value; // 1-based capture group index; 0 for named-only references
+                return ast.Node.createBackreference(self.allocator, index, name, span);
             },
             .escape_p, .escape_P => {
                 try self.advance();

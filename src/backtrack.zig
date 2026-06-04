@@ -354,6 +354,7 @@ pub const BacktrackEngine = struct {
                 var current = pos;
                 var count: usize = 0;
                 while (current < target_end) {
+                    self.clearCapturesIn(child);
                     if (self.matchNode(child, current)) |next| {
                         if (next <= current) return false;
                         current = next;
@@ -421,6 +422,35 @@ pub const BacktrackEngine = struct {
         };
     }
 
+    fn clearCapturesIn(self: *BacktrackEngine, node: *ast.Node) void {
+        switch (node.node_type) {
+            .group => {
+                const group = node.data.group;
+                if (group.capture_index) |index| {
+                    if (index > 0 and index <= self.captures.len) {
+                        self.captures[index - 1] = .{ .start = 0, .end = 0, .matched = false };
+                    }
+                }
+                self.clearCapturesIn(group.child);
+            },
+            .concat => {
+                self.clearCapturesIn(node.data.concat.left);
+                self.clearCapturesIn(node.data.concat.right);
+            },
+            .alternation => {
+                self.clearCapturesIn(node.data.alternation.left);
+                self.clearCapturesIn(node.data.alternation.right);
+            },
+            .star => self.clearCapturesIn(node.data.star.child),
+            .plus => self.clearCapturesIn(node.data.plus.child),
+            .optional => self.clearCapturesIn(node.data.optional.child),
+            .repeat => self.clearCapturesIn(node.data.repeat.child),
+            .lookahead => self.clearCapturesIn(node.data.lookahead.child),
+            .lookbehind => self.clearCapturesIn(node.data.lookbehind.child),
+            else => {},
+        }
+    }
+
     /// Collect all possible ending positions for matching a node at a given position
     /// For lazy quantifiers, this returns positions in order: minimal first
     /// For greedy quantifiers, this returns positions in order: maximal first
@@ -439,6 +469,7 @@ pub const BacktrackEngine = struct {
             .plus => {
                 const quant = node.data.plus;
                 // Must match at least once
+                self.clearCapturesIn(quant.child);
                 const first_match = self.matchNode(quant.child, pos) orelse return;
 
                 if (quant.greedy) {
@@ -561,7 +592,9 @@ pub const BacktrackEngine = struct {
         try all_positions.append(self.allocator, pos); // zero matches
 
         var current_pos = pos;
-        while (self.matchNode(child, current_pos)) |next_pos| {
+        while (true) {
+            self.clearCapturesIn(child);
+            const next_pos = self.matchNode(child, current_pos) orelse break;
             if (next_pos == current_pos) break; // Prevent infinite loop
             current_pos = next_pos;
             try all_positions.append(self.allocator, current_pos);
@@ -580,7 +613,9 @@ pub const BacktrackEngine = struct {
         try positions.append(self.allocator, pos); // zero matches first
 
         var current_pos = pos;
-        while (self.matchNode(child, current_pos)) |next_pos| {
+        while (true) {
+            self.clearCapturesIn(child);
+            const next_pos = self.matchNode(child, current_pos) orelse break;
             if (next_pos == current_pos) break; // Prevent infinite loop
             current_pos = next_pos;
             try positions.append(self.allocator, current_pos);
@@ -595,6 +630,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         var i: usize = 0;
         while (i < min) : (i += 1) {
+            self.clearCapturesIn(repeat.child);
             current_pos = self.matchNode(repeat.child, current_pos) orelse return;
         }
 
@@ -606,6 +642,7 @@ pub const BacktrackEngine = struct {
 
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
+                self.clearCapturesIn(repeat.child);
                 if (self.matchNode(repeat.child, current_pos)) |next_pos| {
                     if (next_pos == current_pos) break;
                     current_pos = next_pos;
@@ -614,7 +651,9 @@ pub const BacktrackEngine = struct {
             }
         } else {
             // Unbounded: keep matching until we can't
-            while (self.matchNode(repeat.child, current_pos)) |next_pos| {
+            while (true) {
+                self.clearCapturesIn(repeat.child);
+                const next_pos = self.matchNode(repeat.child, current_pos) orelse break;
                 if (next_pos == current_pos) break;
                 current_pos = next_pos;
                 try all_positions.append(self.allocator, current_pos);
@@ -637,6 +676,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         var i: usize = 0;
         while (i < min) : (i += 1) {
+            self.clearCapturesIn(repeat.child);
             current_pos = self.matchNode(repeat.child, current_pos) orelse return;
         }
 
@@ -645,6 +685,7 @@ pub const BacktrackEngine = struct {
 
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
+                self.clearCapturesIn(repeat.child);
                 if (self.matchNode(repeat.child, current_pos)) |next_pos| {
                     if (next_pos == current_pos) break;
                     current_pos = next_pos;
@@ -653,7 +694,9 @@ pub const BacktrackEngine = struct {
             }
         } else {
             // Unbounded: keep matching until we can't
-            while (self.matchNode(repeat.child, current_pos)) |next_pos| {
+            while (true) {
+                self.clearCapturesIn(repeat.child);
+                const next_pos = self.matchNode(repeat.child, current_pos) orelse break;
                 if (next_pos == current_pos) break;
                 current_pos = next_pos;
                 try positions.append(self.allocator, current_pos);
@@ -689,7 +732,9 @@ pub const BacktrackEngine = struct {
         match_positions.append(self.allocator, current_pos) catch return null;
 
         // Collect all possible match positions
-        while (self.matchNode(child, current_pos)) |next_pos| {
+        while (true) {
+            self.clearCapturesIn(child);
+            const next_pos = self.matchNode(child, current_pos) orelse break;
             if (next_pos == current_pos) break; // Prevent infinite loop on empty matches
             current_pos = next_pos;
             match_positions.append(self.allocator, current_pos) catch break;
@@ -709,6 +754,7 @@ pub const BacktrackEngine = struct {
 
     fn matchPlus(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
         // Must match at least once
+        self.clearCapturesIn(quant.child);
         const first_match = self.matchNode(quant.child, pos) orelse return null;
 
         if (quant.greedy) {
@@ -739,6 +785,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         var i: usize = 0;
         while (i < min) : (i += 1) {
+            self.clearCapturesIn(repeat.child);
             current_pos = self.matchNode(repeat.child, current_pos) orelse return null;
         }
 
@@ -756,6 +803,7 @@ pub const BacktrackEngine = struct {
         if (repeat.greedy) {
             // Greedy: try to match as many as possible
             while (i < max_count) : (i += 1) {
+                self.clearCapturesIn(repeat.child);
                 if (self.matchNode(repeat.child, current_pos)) |next_pos| {
                     if (next_pos == current_pos) break;
                     current_pos = next_pos;
@@ -896,8 +944,13 @@ pub const BacktrackEngine = struct {
 
     fn matchBackreference(self: *BacktrackEngine, backref: ast.Node.Backreference, pos: usize) ?usize {
         // Backreference: match the same text that was captured by a previous group
-        const capture_index = backref.index;
+        if (backref.name) |name| return self.matchNamedBackreference(self.ast_root, name, pos);
 
+        const capture_index = backref.index;
+        return self.matchCaptureBackreference(capture_index, pos);
+    }
+
+    fn matchCaptureBackreference(self: *BacktrackEngine, capture_index: usize, pos: usize) ?usize {
         // Validate capture index (1-based)
         if (capture_index == 0 or capture_index > self.captures.len) {
             return null;
@@ -935,6 +988,37 @@ pub const BacktrackEngine = struct {
         }
 
         return null;
+    }
+
+    fn matchNamedBackreference(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize) ?usize {
+        switch (node.node_type) {
+            .group => {
+                const group = node.data.group;
+                if (group.name) |group_name| {
+                    if (std.mem.eql(u8, group_name, name)) {
+                        if (group.capture_index) |index| {
+                            if (self.matchCaptureBackreference(index, pos)) |end| return end;
+                        }
+                    }
+                }
+                return self.matchNamedBackreference(group.child, name, pos);
+            },
+            .concat => {
+                if (self.matchNamedBackreference(node.data.concat.left, name, pos)) |end| return end;
+                return self.matchNamedBackreference(node.data.concat.right, name, pos);
+            },
+            .alternation => {
+                if (self.matchNamedBackreference(node.data.alternation.left, name, pos)) |end| return end;
+                return self.matchNamedBackreference(node.data.alternation.right, name, pos);
+            },
+            .star => return self.matchNamedBackreference(node.data.star.child, name, pos),
+            .plus => return self.matchNamedBackreference(node.data.plus.child, name, pos),
+            .optional => return self.matchNamedBackreference(node.data.optional.child, name, pos),
+            .repeat => return self.matchNamedBackreference(node.data.repeat.child, name, pos),
+            .lookahead => return self.matchNamedBackreference(node.data.lookahead.child, name, pos),
+            .lookbehind => return self.matchNamedBackreference(node.data.lookbehind.child, name, pos),
+            else => return null,
+        }
     }
 };
 

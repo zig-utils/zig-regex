@@ -284,3 +284,40 @@ test "named group: findAll preserves names" {
     try std.testing.expectEqualStrings("456", num2.?);
     try std.testing.expectEqualStrings("789", num3.?);
 }
+
+test "named group: named backreference" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "(?<word>\\w+)\\s+\\k<word>");
+    defer regex.deinit();
+
+    if (try regex.find("hello hello")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+
+        try std.testing.expectEqualStrings("hello hello", match.slice);
+        try std.testing.expectEqualStrings("hello", regex.getNamedCapture(&match, "word").?);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
+test "named group: duplicate names in alternatives use participating capture" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "(?:(?:(?<a>x)|(?<a>y))\\k<a>){2}");
+    defer regex.deinit();
+
+    if (try regex.find("xxyy")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+
+        try std.testing.expectEqualStrings("xxyy", match.slice);
+        try std.testing.expectEqual(@as(usize, 2), match.captures.len);
+        try std.testing.expectEqual(@as(usize, 2), match.captures_present.len);
+        try std.testing.expect(!match.captures_present[0]);
+        try std.testing.expect(match.captures_present[1]);
+        try std.testing.expectEqualStrings("y", match.captures[1]);
+        try std.testing.expectEqualStrings("y", regex.getNamedCapture(&match, "a").?);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
