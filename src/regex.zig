@@ -503,6 +503,17 @@ pub const Regex = struct {
         return best;
     }
 
+    fn repeatRunAt(input: []const u8, table: [256]bool, start: usize, max: usize) usize {
+        var p = start;
+        var run: usize = 0;
+        while (p < input.len and table[input[p]] and run < max) : (p += 1) run += 1;
+        return run;
+    }
+
+    fn repeatBoundsOk(run: usize, min: usize, max: usize) bool {
+        return run >= min and run <= max;
+    }
+
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
         // Required-literal fast-fail: a mandatory substring that's absent means
@@ -518,8 +529,17 @@ pub const Regex = struct {
         }
         // Repeated-atom fast path: a match exists iff some run of `table` bytes
         // reaches the minimum length.
-        if (self.opt_info.repeat_atom) |ra| {
+        if (self.opt_info.repeat_atom) |ra| if (!(self.flags.multiline and self.opt_info.has_assertions)) {
             const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const max = ra.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
+                const run = repeatRunAt(input, table, 0, max);
+                return run == input.len and repeatBoundsOk(run, ra.min, max);
+            }
+            if (self.opt_info.anchored_start) {
+                const run = repeatRunAt(input, table, 0, max);
+                return repeatBoundsOk(run, ra.min, max);
+            }
             var p: usize = 0;
             while (p < input.len) {
                 while (p < input.len and !table[input[p]]) p += 1;
@@ -528,7 +548,7 @@ pub const Regex = struct {
                 if (run >= ra.min) return true;
             }
             return false;
-        }
+        };
         // Literal-alternation fast path.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
@@ -659,9 +679,23 @@ pub const Regex = struct {
             return null;
         }
         // Repeated-atom fast path: leftmost maximal run of `table` bytes.
-        if (self.opt_info.repeat_atom) |ra| {
+        if (self.opt_info.repeat_atom) |ra| if (!(self.flags.multiline and self.opt_info.has_assertions)) {
             const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
             const max = ra.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
+                const run = repeatRunAt(input, table, 0, max);
+                if (run == input.len and repeatBoundsOk(run, ra.min, max)) {
+                    return Match{ .slice = input[0..run], .start = 0, .end = run };
+                }
+                return null;
+            }
+            if (self.opt_info.anchored_start) {
+                const run = repeatRunAt(input, table, 0, max);
+                if (repeatBoundsOk(run, ra.min, max)) {
+                    return Match{ .slice = input[0..run], .start = 0, .end = run };
+                }
+                return null;
+            }
             var p: usize = 0;
             while (p < input.len) {
                 while (p < input.len and !table[input[p]]) p += 1;
@@ -672,7 +706,7 @@ pub const Regex = struct {
                 if (run >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
             }
             return null;
-        }
+        };
         // Literal-alternation fast path: leftmost position, longest literal.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {

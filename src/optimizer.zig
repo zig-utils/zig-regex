@@ -104,23 +104,8 @@ pub const Optimizer = struct {
     pub fn analyze(self: *Optimizer, root: *ast.Node) !OptimizationInfo {
         var info = OptimizationInfo{};
 
-        // Check for anchors
-        if (root.node_type == .concat) {
-            const concat = root.data.concat;
-            // Check if starts with ^
-            if (concat.left.node_type == .anchor and
-                concat.left.data.anchor == .start_line)
-            {
-                info.anchored_start = true;
-            }
-        } else if (root.node_type == .anchor) {
-            if (root.data.anchor == .start_line) {
-                info.anchored_start = true;
-            }
-            if (root.data.anchor == .end_line) {
-                info.anchored_end = true;
-            }
-        }
+        info.anchored_start = hasLeadingStartAnchor(root);
+        info.anchored_end = hasTrailingEndAnchor(root);
 
         // Extract literal prefix
         if (try self.extractLiteralPrefix(root)) |prefix| {
@@ -161,8 +146,9 @@ pub const Optimizer = struct {
             }
         }
 
-        // Single repeated-atom fast path (greedy, min >= 1).
-        info.repeat_atom = detectRepeatAtom(root);
+        // Single repeated-atom fast path (greedy, min >= 1), including the
+        // common anchored wrapper `^ atom+ $`.
+        info.repeat_atom = detectRepeatAtom(anchoredCore(root) orelse root);
 
         // Leading unbounded greedy class (for the DFA-search run-skip).
         info.first_unbounded_class = detectFirstUnboundedClass(root);
@@ -337,6 +323,48 @@ pub const Optimizer = struct {
             },
             else => null,
         };
+    }
+
+    fn isStartAnchor(node: *ast.Node) bool {
+        return node.node_type == .anchor and node.data.anchor == .start_line;
+    }
+
+    fn isEndAnchor(node: *ast.Node) bool {
+        return node.node_type == .anchor and node.data.anchor == .end_line;
+    }
+
+    fn stripLeadingStart(node: *ast.Node) ?*ast.Node {
+        if (isStartAnchor(node)) return null;
+        if (node.node_type == .concat and isStartAnchor(node.data.concat.left)) return node.data.concat.right;
+        return null;
+    }
+
+    fn stripTrailingEnd(node: *ast.Node) ?*ast.Node {
+        if (isEndAnchor(node)) return null;
+        if (node.node_type == .concat and isEndAnchor(node.data.concat.right)) return node.data.concat.left;
+        return null;
+    }
+
+    fn hasLeadingStartAnchor(node: *ast.Node) bool {
+        const core = stripTrailingEnd(node) orelse node;
+        if (isStartAnchor(core)) return true;
+        return core.node_type == .concat and isStartAnchor(core.data.concat.left);
+    }
+
+    fn hasTrailingEndAnchor(node: *ast.Node) bool {
+        const core = stripLeadingStart(node) orelse node;
+        if (isEndAnchor(core)) return true;
+        return core.node_type == .concat and isEndAnchor(core.data.concat.right);
+    }
+
+    fn anchoredCore(node: *ast.Node) ?*ast.Node {
+        if (stripTrailingEnd(node)) |without_end| {
+            if (stripLeadingStart(without_end)) |core| return core;
+        }
+        if (stripLeadingStart(node)) |without_start| {
+            if (stripTrailingEnd(without_start)) |core| return core;
+        }
+        return null;
     }
 
     /// Detect a whole-pattern single greedy-repeated byte atom (min >= 1). Lazy

@@ -267,3 +267,22 @@ test "regression: findAll scales linearly (no O(n^2) blowup)" {
     try std.testing.expect(r1.ns > 0);
     try std.testing.expect(r2.ns * 10 < r1.ns * 30); // r2/r1 < 3.0
 }
+
+test "regression: anchored repeated class matches large UTF-8 input quickly" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "^\\D+$");
+    defer regex.deinit();
+
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 64 * 1024);
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < 16 * 1024) : (i += 1) try buf.appendSlice(allocator, "é");
+
+    try std.testing.expect(try regex.isMatch(buf.items));
+    try std.testing.expect((try regex.find(buf.items)) != null);
+
+    try buf.append(allocator, '5');
+    try std.testing.expect(!try regex.isMatch(buf.items));
+    try std.testing.expect((try regex.find(buf.items)) == null);
+}
