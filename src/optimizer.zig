@@ -30,6 +30,12 @@ pub const OptimizationInfo = struct {
     /// bytes in `table` — instead of the NFA. Null otherwise.
     repeat_atom: ?RepeatAtom = null,
 
+    /// Set when the whole pattern is a single greedy-repeated Unicode property
+    /// atom (`\p{...}+`, `\P{...}+`, or bounded `{m,n}`). These cannot use the
+    /// byte-table fast path, but they can still be matched by one linear
+    /// code-point scan instead of the general backtracker.
+    unicode_repeat_atom: ?UnicodeRepeatAtom = null,
+
     /// Set when the pattern begins with an unbounded greedy repeat (`+`/`*`/
     /// `{m,}`) of a byte class — the table is that class. If an anchored match
     /// fails at some position, no start within the class's run can match (a later
@@ -72,6 +78,13 @@ pub const OptimizationInfo = struct {
     pub const RepeatAtom = struct {
         /// Membership table for the repeated byte atom.
         table: [256]bool,
+        min: usize,
+        /// Null means unbounded (`+`, `{m,}`).
+        max: ?usize,
+    };
+
+    pub const UnicodeRepeatAtom = struct {
+        property: ast.Node.UnicodeProp,
         min: usize,
         /// Null means unbounded (`+`, `{m,}`).
         max: ?usize,
@@ -149,6 +162,7 @@ pub const Optimizer = struct {
         // Single repeated-atom fast path (greedy, min >= 1), including the
         // common anchored wrapper `^ atom+ $`.
         info.repeat_atom = detectRepeatAtom(anchoredCore(root) orelse root);
+        info.unicode_repeat_atom = detectUnicodeRepeatAtom(anchoredCore(root) orelse root);
 
         // Leading unbounded greedy class (for the DFA-search run-skip).
         info.first_unbounded_class = detectFirstUnboundedClass(root);
@@ -403,6 +417,33 @@ pub const Optimizer = struct {
             else => return null,
         }
         return .{ .table = table, .min = min, .max = max };
+    }
+
+    /// Detect a whole-pattern single greedy-repeated Unicode property atom
+    /// (min >= 1). This mirrors `detectRepeatAtom` for code-point classes that
+    /// cannot be represented as a 256-byte table.
+    fn detectUnicodeRepeatAtom(root: *ast.Node) ?OptimizationInfo.UnicodeRepeatAtom {
+        var node = root;
+        var min: usize = 1;
+        var max: ?usize = 1;
+        switch (root.node_type) {
+            .plus => {
+                if (!root.data.plus.greedy) return null;
+                min = 1;
+                max = null;
+                node = root.data.plus.child;
+            },
+            .repeat => {
+                const r = root.data.repeat;
+                if (!r.greedy or r.bounds.min < 1) return null;
+                min = r.bounds.min;
+                max = r.bounds.max;
+                node = r.child;
+            },
+            else => {}, // bare atom: min = max = 1
+        }
+        if (node.node_type != .unicode_property) return null;
+        return .{ .property = node.data.unicode_property, .min = min, .max = max };
     }
 
     /// Whether the pattern is exactly a fixed string: only literals,

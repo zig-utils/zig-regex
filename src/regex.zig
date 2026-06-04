@@ -9,6 +9,7 @@ const optimizer = @import("optimizer.zig");
 const backtrack = @import("backtrack.zig");
 const dfa = @import("dfa.zig");
 const onepass = @import("onepass.zig");
+const unicode_mod = @import("unicode.zig");
 
 /// Represents a match result from a regex operation
 pub const Match = struct {
@@ -514,6 +515,30 @@ pub const Regex = struct {
         return run >= min and run <= max;
     }
 
+    const UnicodeRepeatRun = struct { count: usize, end: usize };
+
+    fn unicodePropMatches(cp: unicode_mod.Codepoint, up: ast.Node.UnicodeProp) bool {
+        return unicode_mod.matchesSpec(cp, up.spec) != up.negated;
+    }
+
+    fn unicodeRepeatRunAt(input: []const u8, up: ast.Node.UnicodeProp, start: usize, max: usize) UnicodeRepeatRun {
+        var p = start;
+        var run: usize = 0;
+        while (p < input.len and run < max) {
+            const dec = unicode_mod.decodeUtf8Lenient(input[p..]) orelse break;
+            if (!unicodePropMatches(dec.codepoint, up)) break;
+            p += dec.len;
+            run += 1;
+        }
+        return .{ .count = run, .end = p };
+    }
+
+    fn nextCodepointStart(input: []const u8, pos: usize) usize {
+        if (pos >= input.len) return input.len + 1;
+        const dec = unicode_mod.decodeUtf8Lenient(input[pos..]) orelse return pos + 1;
+        return pos + dec.len;
+    }
+
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
         // Required-literal fast-fail: a mandatory substring that's absent means
@@ -546,6 +571,27 @@ pub const Regex = struct {
                 var run: usize = 0;
                 while (p < input.len and table[input[p]]) : (p += 1) run += 1;
                 if (run >= ra.min) return true;
+            }
+            return false;
+        };
+        // Repeated Unicode-property atom fast path. Keep `/i` on the general
+        // path for now: complemented properties under ignore-case have
+        // spec-specific folding semantics.
+        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and !(self.flags.multiline and self.opt_info.has_assertions)) {
+            const max = ura.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
+                const run = unicodeRepeatRunAt(input, ura.property, 0, max);
+                return run.end == input.len and repeatBoundsOk(run.count, ura.min, max);
+            }
+            if (self.opt_info.anchored_start) {
+                const run = unicodeRepeatRunAt(input, ura.property, 0, max);
+                return repeatBoundsOk(run.count, ura.min, max);
+            }
+            var p: usize = 0;
+            while (p < input.len) {
+                const run = unicodeRepeatRunAt(input, ura.property, p, max);
+                if (run.count >= ura.min) return true;
+                p = nextCodepointStart(input, p);
             }
             return false;
         };
@@ -704,6 +750,33 @@ pub const Regex = struct {
                 var run: usize = 0;
                 while (p < input.len and table[input[p]] and run < max) : (p += 1) run += 1;
                 if (run >= ra.min) return Match{ .slice = input[start..p], .start = start, .end = p };
+            }
+            return null;
+        };
+        // Repeated Unicode-property atom fast path.
+        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and !(self.flags.multiline and self.opt_info.has_assertions)) {
+            const max = ura.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
+                const run = unicodeRepeatRunAt(input, ura.property, 0, max);
+                if (run.end == input.len and repeatBoundsOk(run.count, ura.min, max)) {
+                    return Match{ .slice = input[0..run.end], .start = 0, .end = run.end };
+                }
+                return null;
+            }
+            if (self.opt_info.anchored_start) {
+                const run = unicodeRepeatRunAt(input, ura.property, 0, max);
+                if (repeatBoundsOk(run.count, ura.min, max)) {
+                    return Match{ .slice = input[0..run.end], .start = 0, .end = run.end };
+                }
+                return null;
+            }
+            var p: usize = 0;
+            while (p < input.len) {
+                const run = unicodeRepeatRunAt(input, ura.property, p, max);
+                if (run.count >= ura.min) {
+                    return Match{ .slice = input[p..run.end], .start = p, .end = run.end };
+                }
+                p = nextCodepointStart(input, p);
             }
             return null;
         };

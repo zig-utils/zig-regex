@@ -286,3 +286,24 @@ test "regression: anchored repeated class matches large UTF-8 input quickly" {
     try std.testing.expect(!try regex.isMatch(buf.items));
     try std.testing.expect((try regex.find(buf.items)) == null);
 }
+
+test "regression: anchored repeated Unicode property scans large UTF-8 input quickly" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compileWithFlags(allocator, "^\\p{Script_Extensions=Han}+$", .{ .unicode = true });
+    defer regex.deinit();
+
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 64 * 1024);
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < 16 * 1024) : (i += 1) try buf.appendSlice(allocator, "一");
+
+    try std.testing.expect(try regex.isMatch(buf.items));
+    const m = (try regex.find(buf.items)).?;
+    try std.testing.expectEqual(@as(usize, 0), m.start);
+    try std.testing.expectEqual(buf.items.len, m.end);
+
+    try buf.append(allocator, 'a');
+    try std.testing.expect(!try regex.isMatch(buf.items));
+    try std.testing.expect((try regex.find(buf.items)) == null);
+}
