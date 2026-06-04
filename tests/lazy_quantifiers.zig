@@ -1,6 +1,16 @@
 const std = @import("std");
 const Regex = @import("regex").Regex;
 
+/// Comptime string repetition (the `**` operator is unavailable in this Zig).
+fn repeatStr(comptime s: []const u8, comptime n: usize) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var i: usize = 0;
+        while (i < n) : (i += 1) out = out ++ s;
+        return out;
+    }
+}
+
 // Tests for lazy/non-greedy quantifiers (*?, +?, ??, {m,n}?)
 //
 // Key principle: lazy quantifiers try the minimum first, but WILL backtrack
@@ -289,7 +299,7 @@ test "lazy quantifier at end of pattern" {
 test "lazy vs greedy performance comparison" {
     const allocator = std.testing.allocator;
 
-    const input = "a" ** 100 ++ "b";
+    const input = comptime repeatStr("a", 100) ++ "b";
 
     // Both should match the entire input since 'b' only appears at the end
     var greedy = try Regex.compile(allocator, "a*b");

@@ -2,6 +2,16 @@ const std = @import("std");
 const Regex = @import("regex").Regex;
 const benchmark = @import("benchmark");
 
+/// Comptime string repetition (the `**` operator is unavailable in this Zig).
+fn repeatStr(comptime s: []const u8, comptime n: usize) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var i: usize = 0;
+        while (i < n) : (i += 1) out = out ++ s;
+        return out;
+    }
+}
+
 test "benchmark: simple literal" {
     const allocator = std.testing.allocator;
     try benchmark.benchmark(allocator, "Simple literal", "hello", "hello world", 1000);
@@ -45,7 +55,7 @@ test "benchmark: URL matching" {
 
 test "benchmark: repeated pattern in long text" {
     const allocator = std.testing.allocator;
-    const text = "The quick brown fox jumps over the lazy dog. " ** 20;
+    const text = comptime repeatStr("The quick brown fox jumps over the lazy dog. ", 20);
     try benchmark.benchmark(allocator, "Long text search", "fox", text, 1000);
 }
 

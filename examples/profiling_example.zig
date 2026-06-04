@@ -3,6 +3,16 @@ const Regex = @import("regex").Regex;
 const Profiler = @import("regex").Profiler;
 const ScopedTimer = @import("regex").ScopedTimer;
 
+/// Comptime string repetition (the `**` operator is unavailable in this Zig).
+fn repeatStr(comptime s: []const u8, comptime n: usize) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var i: usize = 0;
+        while (i < n) : (i += 1) out = out ++ s;
+        return out;
+    }
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -74,7 +84,7 @@ pub fn main() !void {
             "hello.*world",    // Prefix optimization
         };
 
-        const test_text = ("some random text " ** 10) ++ "hello world";
+        const test_text = comptime repeatStr("some random text ", 10) ++ "hello world";
 
         for (patterns) |pattern| {
             var profiler = Profiler.init(allocator, true);

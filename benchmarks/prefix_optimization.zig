@@ -7,6 +7,16 @@ const Timer = struct {
 };
 const Regex = @import("regex").Regex;
 
+/// Comptime string repetition (the `**` operator is unavailable in this Zig).
+fn repeatStr(comptime s: []const u8, comptime n: usize) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var i: usize = 0;
+        while (i < n) : (i += 1) out = out ++ s;
+        return out;
+    }
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -15,7 +25,7 @@ pub fn main() !void {
     std.debug.print("=== Literal Prefix Optimization Benchmarks ===\n\n", .{});
 
     // Create a long text where the pattern appears at the end
-    const long_text = "The quick brown fox jumps over the lazy dog. " ** 100 ++ "FOUND_IT!";
+    const long_text = comptime repeatStr("The quick brown fox jumps over the lazy dog. ", 100) ++ "FOUND_IT!";
 
     // Test 1: Pattern with literal prefix (should use optimization)
     {
@@ -88,7 +98,7 @@ pub fn main() !void {
     // Test 3: Pattern with prefix that allows skipping ahead
     {
         std.debug.print("Test 3: Prefix with complex suffix (hello.*world)...\n", .{});
-        const text_with_hello = "blah blah " ** 50 ++ "hello there world";
+        const text_with_hello = comptime repeatStr("blah blah ", 50) ++ "hello there world";
         var regex = try Regex.compile(allocator, "hello.*world");
         defer regex.deinit();
 
@@ -154,7 +164,7 @@ pub fn main() !void {
     // Test 5: Email-like pattern with literal prefix
     {
         std.debug.print("Test 5: Email pattern (user@example.com)...\n", .{});
-        const email_text = "Contact us at " ++ ("some filler text here. " ** 20) ++ "user@example.com for support";
+        const email_text = "Contact us at " ++ comptime repeatStr("some filler text here. ", 20) ++ "user@example.com for support";
         var regex = try Regex.compile(allocator, "user@example.com");
         defer regex.deinit();
 
