@@ -271,7 +271,10 @@ pub const VM = struct {
                             true
                         else
                             c != '\n',
-                        .char_class => transition.data.char_class.matches(c),
+                        .char_class => if (self.flags.case_insensitive)
+                            transition.data.char_class.matchesCI(c)
+                        else
+                            transition.data.char_class.matches(c),
                         .anchor => false, // Anchors don't consume input
                         .epsilon => false, // Already handled in epsilon closure
                     };
