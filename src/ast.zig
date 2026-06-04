@@ -466,6 +466,9 @@ pub const Node = struct {
                 repeat.child.destroy(allocator);
             },
             .group => |group| {
+                if (group.name) |name| {
+                    allocator.free(name);
+                }
                 group.child.destroy(allocator);
             },
             .lookahead, .lookbehind => |assertion| {
