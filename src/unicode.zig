@@ -573,6 +573,9 @@ fn cachedRangeIndexStartEnd(ranges: []const gc_data.GcRange, idx: *usize, cp: Co
     var i = idx.*;
     const cur = ranges[i];
     if (cp >= cur.start and cp <= cur.end) return i;
+    if (cp < cur.start) {
+        if (i == 0 or cp > ranges[i - 1].end) return null;
+    }
     if (cp > cur.end) {
         while (i + 1 < ranges.len and cp > ranges[i].end) i += 1;
         idx.* = i;
@@ -588,6 +591,9 @@ fn cachedRangeIndexLoHi(comptime Range: type, ranges: []const Range, idx: *usize
     var i = idx.*;
     const cur = ranges[i];
     if (cp >= cur.lo and cp <= cur.hi) return i;
+    if (cp < cur.lo) {
+        if (i == 0 or cp > ranges[i - 1].hi) return null;
+    }
     if (cp > cur.hi) {
         while (i + 1 < ranges.len and cp > ranges[i].hi) i += 1;
         idx.* = i;
