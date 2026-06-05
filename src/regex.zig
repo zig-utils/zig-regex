@@ -524,9 +524,10 @@ pub const Regex = struct {
     fn unicodeRepeatRunAt(input: []const u8, up: ast.Node.UnicodeProp, start: usize, max: usize) UnicodeRepeatRun {
         var p = start;
         var run: usize = 0;
+        var matcher = unicode_mod.SpecMatcher.init(up.spec);
         while (p < input.len and run < max) {
             const dec = unicode_mod.decodeUtf8Lenient(input[p..]) orelse break;
-            if (!unicodePropMatches(dec.codepoint, up)) break;
+            if (matcher.matches(dec.codepoint) == up.negated) break;
             p += dec.len;
             run += 1;
         }

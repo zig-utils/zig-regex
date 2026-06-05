@@ -332,7 +332,10 @@ pub const UnicodeProperty = enum {
 /// Check if codepoint matches a Unicode General_Category property (a single
 /// category like `Lu`, or a super-category like `L`/`N`/`P`/…).
 pub fn matchesProperty(cp: Codepoint, property: UnicodeProperty) bool {
-    const c = getGeneralCategory(cp);
+    return matchesCategory(getGeneralCategory(cp), property);
+}
+
+fn matchesCategory(c: GeneralCategory, property: UnicodeProperty) bool {
     return switch (property) {
         .Letter, .L => c == .Lu or c == .Ll or c == .Lt or c == .Lm or c == .Lo,
         .Lowercase_Letter, .Ll => c == .Ll,
@@ -488,6 +491,148 @@ pub fn matchesSpec(cp: Codepoint, spec: PropSpec) bool {
         .script_extensions => |id| matchScriptExtensions(cp, id),
         .binary => |bp| matchBinary(cp, bp),
     };
+}
+
+/// Stateful property matcher for repeated scans. Generated Test262 property
+/// escape tests feed code points in ascending order, so reusing the current
+/// Unicode range avoids doing a fresh binary search for every code point.
+pub const SpecMatcher = struct {
+    spec: PropSpec,
+    gc_idx: usize = 0,
+    sc_idx: usize = 0,
+    scx_idx: usize = 0,
+    binary_idx: usize = 0,
+
+    pub fn init(spec: PropSpec) SpecMatcher {
+        return .{ .spec = spec };
+    }
+
+    pub fn matches(self: *SpecMatcher, cp: Codepoint) bool {
+        return switch (self.spec) {
+            .gc => |p| matchesCategory(self.generalCategoryOf(cp), p),
+            .script => |id| self.scriptOf(cp) == id,
+            .script_extensions => |id| self.matchScriptExtensions(cp, id),
+            .binary => |bp| self.matchBinary(cp, bp),
+        };
+    }
+
+    fn generalCategoryOf(self: *SpecMatcher, cp: Codepoint) GeneralCategory {
+        const ranges = &gc_data.gc_ranges;
+        if (cachedGcRangeIndex(ranges, &self.gc_idx, cp)) |idx| return ranges[idx].cat;
+        return .Cn;
+    }
+
+    fn scriptOf(self: *SpecMatcher, cp: Codepoint) u16 {
+        const ranges = &prop_data.sc_ranges;
+        if (cachedScRangeIndex(ranges, &self.sc_idx, cp)) |idx| return ranges[idx].sc;
+        return prop_data.unknown_script;
+    }
+
+    fn matchScriptExtensions(self: *SpecMatcher, cp: Codepoint, sc: u16) bool {
+        const ranges = &prop_data.scx_ranges;
+        if (cachedScxRangeIndex(ranges, &self.scx_idx, cp)) |idx| {
+            const r = ranges[idx];
+            for (prop_data.scx_pool[r.start .. r.start + r.len]) |id| if (id == sc) return true;
+            return false;
+        }
+        return self.scriptOf(cp) == sc;
+    }
+
+    fn matchBinary(self: *SpecMatcher, cp: Codepoint, bp: prop_data.BinaryProp) bool {
+        return switch (bp) {
+            .ASCII => cp <= 0x7F,
+            .Any => true,
+            .Assigned => self.generalCategoryOf(cp) != .Cn,
+            else => cachedBinaryRangeContains(prop_data.binaryRanges(bp), &self.binary_idx, cp),
+        };
+    }
+};
+
+fn cachedGcRangeIndex(ranges: []const gc_data.GcRange, idx: *usize, cp: Codepoint) ?usize {
+    if (cachedRangeIndexStartEnd(ranges, idx, cp)) |i| return i;
+    return null;
+}
+
+fn cachedScRangeIndex(ranges: []const prop_data.ScRange, idx: *usize, cp: Codepoint) ?usize {
+    if (cachedRangeIndexLoHi(prop_data.ScRange, ranges, idx, cp)) |i| return i;
+    return null;
+}
+
+fn cachedScxRangeIndex(ranges: []const prop_data.ScxRange, idx: *usize, cp: Codepoint) ?usize {
+    if (cachedRangeIndexLoHi(prop_data.ScxRange, ranges, idx, cp)) |i| return i;
+    return null;
+}
+
+fn cachedBinaryRangeContains(ranges: []const prop_data.R, idx: *usize, cp: Codepoint) bool {
+    return cachedRangeIndexLoHi(prop_data.R, ranges, idx, cp) != null;
+}
+
+fn cachedRangeIndexStartEnd(ranges: []const gc_data.GcRange, idx: *usize, cp: Codepoint) ?usize {
+    if (ranges.len == 0) return null;
+    if (idx.* >= ranges.len) idx.* = ranges.len - 1;
+    var i = idx.*;
+    const cur = ranges[i];
+    if (cp >= cur.start and cp <= cur.end) return i;
+    if (cp > cur.end) {
+        while (i + 1 < ranges.len and cp > ranges[i].end) i += 1;
+        idx.* = i;
+        const r = ranges[i];
+        return if (cp >= r.start and cp <= r.end) i else null;
+    }
+    return binaryGcRangeIndex(ranges, idx, cp);
+}
+
+fn cachedRangeIndexLoHi(comptime Range: type, ranges: []const Range, idx: *usize, cp: Codepoint) ?usize {
+    if (ranges.len == 0) return null;
+    if (idx.* >= ranges.len) idx.* = ranges.len - 1;
+    var i = idx.*;
+    const cur = ranges[i];
+    if (cp >= cur.lo and cp <= cur.hi) return i;
+    if (cp > cur.hi) {
+        while (i + 1 < ranges.len and cp > ranges[i].hi) i += 1;
+        idx.* = i;
+        const r = ranges[i];
+        return if (cp >= r.lo and cp <= r.hi) i else null;
+    }
+    return binaryLoHiRangeIndex(Range, ranges, idx, cp);
+}
+
+fn binaryGcRangeIndex(ranges: []const gc_data.GcRange, idx: *usize, cp: Codepoint) ?usize {
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (cp < r.start) {
+            hi = mid;
+        } else if (cp > r.end) {
+            lo = mid + 1;
+        } else {
+            idx.* = mid;
+            return mid;
+        }
+    }
+    idx.* = @min(lo, ranges.len - 1);
+    return null;
+}
+
+fn binaryLoHiRangeIndex(comptime Range: type, ranges: []const Range, idx: *usize, cp: Codepoint) ?usize {
+    var lo: usize = 0;
+    var hi: usize = ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = ranges[mid];
+        if (cp < r.lo) {
+            hi = mid;
+        } else if (cp > r.hi) {
+            lo = mid + 1;
+        } else {
+            idx.* = mid;
+            return mid;
+        }
+    }
+    idx.* = @min(lo, ranges.len - 1);
+    return null;
 }
 
 test "Unicode categories" {
