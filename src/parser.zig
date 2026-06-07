@@ -651,19 +651,11 @@ pub const Parser = struct {
             },
             .escape_s => {
                 try self.advance();
-                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.whitespace.ranges);
-                return ast.Node.createCharClass(self.allocator, .{
-                    .ranges = ranges,
-                    .negated = common.CharClasses.whitespace.negated,
-                }, span);
+                return self.createBuiltinClassSet('s', span);
             },
             .escape_S => {
                 try self.advance();
-                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_whitespace.ranges);
-                return ast.Node.createCharClass(self.allocator, .{
-                    .ranges = ranges,
-                    .negated = common.CharClasses.non_whitespace.negated,
-                }, span);
+                return self.createBuiltinClassSet('S', span);
             },
             .escape_b => {
                 try self.advance();
@@ -1000,10 +992,7 @@ pub const Parser = struct {
             .dollar => '$',
             .lbracket => '[', // Allow [ as literal (for non-POSIX cases)
             // These should not appear here
-            .rbracket, .caret, .backslash,
-            .escape_d, .escape_D, .escape_w, .escape_W,
-            .escape_s, .escape_S, .escape_b, .escape_B,
-            .escape_A, .escape_z, .escape_Z, .backref, .escape_p, .escape_P, .eof => null,
+            .rbracket, .caret, .backslash, .escape_d, .escape_D, .escape_w, .escape_W, .escape_s, .escape_S, .escape_b, .escape_B, .escape_A, .escape_z, .escape_Z, .backref, .escape_p, .escape_P, .eof => null,
         };
     }
 
@@ -1064,12 +1053,30 @@ pub const Parser = struct {
             const e = input[i.* + 1];
             switch (e) {
                 'd', 'D', 'w', 'W', 's', 'S', 'p', 'P', 'q' => return null, // operand-level escapes
-                'n' => { i.* += 2; return '\n'; },
-                'r' => { i.* += 2; return '\r'; },
-                't' => { i.* += 2; return '\t'; },
-                'f' => { i.* += 2; return 0x0C; },
-                'v' => { i.* += 2; return 0x0B; },
-                '0' => { i.* += 2; return 0; },
+                'n' => {
+                    i.* += 2;
+                    return '\n';
+                },
+                'r' => {
+                    i.* += 2;
+                    return '\r';
+                },
+                't' => {
+                    i.* += 2;
+                    return '\t';
+                },
+                'f' => {
+                    i.* += 2;
+                    return 0x0C;
+                },
+                'v' => {
+                    i.* += 2;
+                    return 0x0B;
+                },
+                '0' => {
+                    i.* += 2;
+                    return 0;
+                },
                 'x' => {
                     i.* += 2;
                     return classHex(input, i, 2) orelse return RegexError.InvalidEscapeSequence;
@@ -1106,9 +1113,27 @@ pub const Parser = struct {
         return dec.codepoint;
     }
 
-    /// A `\d\w\s` (and negations) shorthand as a nested set of code-point ranges.
-    fn builtinClassItem(self: *Parser, kind: u8) RegexError!ast.Node.ClassItem {
+    fn appendEcmaWhitespaceItems(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) !void {
+        for ([_]ast.Node.CpRange{
+            .{ .lo = 0x0009, .hi = 0x000D },
+            .{ .lo = 0x0020, .hi = 0x0020 },
+            .{ .lo = 0x00A0, .hi = 0x00A0 },
+            .{ .lo = 0x1680, .hi = 0x1680 },
+            .{ .lo = 0x2000, .hi = 0x200A },
+            .{ .lo = 0x2028, .hi = 0x2029 },
+            .{ .lo = 0x202F, .hi = 0x202F },
+            .{ .lo = 0x205F, .hi = 0x205F },
+            .{ .lo = 0x3000, .hi = 0x3000 },
+            .{ .lo = 0xFEFF, .hi = 0xFEFF },
+        }) |range| {
+            try items.append(self.allocator, .{ .range = range });
+        }
+    }
+
+    fn buildBuiltinClassSet(self: *Parser, kind: u8) RegexError!*ast.Node.ClassSet {
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        errdefer items.deinit(self.allocator);
+
         const lower = std.ascii.toLower(kind);
         const negated = std.ascii.isUpper(kind);
         if (lower == 'd') {
@@ -1119,12 +1144,21 @@ pub const Parser = struct {
             try items.append(self.allocator, .{ .range = .{ .lo = 'a', .hi = 'z' } });
             try items.append(self.allocator, .{ .range = .{ .lo = '_', .hi = '_' } });
         } else { // 's'
-            for ([_]u21{ ' ', '\t', '\n', '\r', 0x0B, 0x0C, 0xA0, 0xFEFF }) |c|
-                try items.append(self.allocator, .{ .range = .{ .lo = c, .hi = c } });
-            try items.append(self.allocator, .{ .range = .{ .lo = 0x2028, .hi = 0x2029 } });
+            try self.appendEcmaWhitespaceItems(&items);
         }
+
         const set = try self.allocator.create(ast.Node.ClassSet);
         set.* = .{ .op = .union_, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
+        return set;
+    }
+
+    fn createBuiltinClassSet(self: *Parser, kind: u8, span: common.Span) RegexError!*ast.Node {
+        return ast.Node.createClassSet(self.allocator, try self.buildBuiltinClassSet(kind), span);
+    }
+
+    /// A `\d\w\s` (and negations) shorthand as a nested set of code-point ranges.
+    fn builtinClassItem(self: *Parser, kind: u8) RegexError!ast.Node.ClassItem {
+        const set = try self.buildBuiltinClassSet(kind);
         return .{ .nested = set };
     }
 
@@ -1324,7 +1358,8 @@ pub const Parser = struct {
 
             if (current_pos + 1 < self.lexer.input.len and
                 self.lexer.input[current_pos] == '[' and
-                self.lexer.input[current_pos + 1] == ':') {
+                self.lexer.input[current_pos + 1] == ':')
+            {
 
                 // Find the closing :]
                 var found_posix = false;
@@ -1332,7 +1367,7 @@ pub const Parser = struct {
                 while (i + 1 < self.lexer.input.len) : (i += 1) {
                     if (self.lexer.input[i] == ':' and self.lexer.input[i + 1] == ']') {
                         // Found [:name:]
-                        const class_name = self.lexer.input[current_pos + 2..i];
+                        const class_name = self.lexer.input[current_pos + 2 .. i];
 
                         // Skip to the character AFTER ':]' which should be the outer ']' or more chars
                         // We want the lexer to be positioned so that the NEXT token read will be correct

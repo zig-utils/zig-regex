@@ -6,7 +6,6 @@ const unicode_mod = @import("unicode.zig");
 /// Backtracking-based regex engine
 /// Supports: lazy quantifiers, lookahead/lookbehind, backreferences
 /// Trade-off: O(2^n) worst case, but supports features impossible in Thompson NFA
-
 /// Match result from backtracking engine
 pub const BacktrackMatch = struct {
     start: usize,
@@ -81,8 +80,9 @@ pub const BacktrackEngine = struct {
     pub fn find(self: *BacktrackEngine, input: []const u8) ?BacktrackMatch {
         self.input = input;
 
+        const codepoint_search = containsCodepointAtom(self.ast_root);
         var pos: usize = 0;
-        while (pos <= input.len) : (pos += 1) {
+        while (pos <= input.len) {
             self.resetCaptures();
             self.step_count = 0; // Reset step counter per starting position
             if (self.matchNode(self.ast_root, pos)) |end_pos| {
@@ -104,8 +104,31 @@ pub const BacktrackEngine = struct {
                     };
                 }
             }
+            if (pos == input.len) break;
+            pos = if (codepoint_search) nextCodepointStart(input, pos) else pos + 1;
         }
         return null;
+    }
+
+    fn containsCodepointAtom(node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .unicode_property, .class_set => true,
+            .concat => containsCodepointAtom(node.data.concat.left) or containsCodepointAtom(node.data.concat.right),
+            .alternation => containsCodepointAtom(node.data.alternation.left) or containsCodepointAtom(node.data.alternation.right),
+            .star => containsCodepointAtom(node.data.star.child),
+            .plus => containsCodepointAtom(node.data.plus.child),
+            .optional => containsCodepointAtom(node.data.optional.child),
+            .repeat => containsCodepointAtom(node.data.repeat.child),
+            .group => containsCodepointAtom(node.data.group.child),
+            .lookahead => containsCodepointAtom(node.data.lookahead.child),
+            .lookbehind => containsCodepointAtom(node.data.lookbehind.child),
+            else => false,
+        };
+    }
+
+    fn nextCodepointStart(input: []const u8, pos: usize) usize {
+        const dec = unicode_mod.decodeUtf8Lenient(input[pos..]) orelse return pos + 1;
+        return pos + dec.len;
     }
 
     /// Reset all capture groups

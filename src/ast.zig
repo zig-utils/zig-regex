@@ -491,9 +491,22 @@ pub const Node = struct {
                 // For now, we'll free all of them - predefined classes aren't created via createCharClass from parser
                 allocator.free(char_class.ranges);
             },
+            .class_set => |set| {
+                destroyClassSet(allocator, set);
+            },
             else => {},
         }
         allocator.destroy(self);
+    }
+
+    fn destroyClassSet(allocator: std.mem.Allocator, set: *ClassSet) void {
+        for (set.items) |item| switch (item) {
+            .nested => |nested| destroyClassSet(allocator, nested),
+            .string => |string| allocator.free(string),
+            .range, .property => {},
+        };
+        allocator.free(set.items);
+        allocator.destroy(set);
     }
 };
 
