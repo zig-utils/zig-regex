@@ -25,3 +25,4 @@ pantry
 # Rust benchmark build artifacts
 benchmarks/rust-bench/target/
 haystack.txt
+/.zig-global-cache
