@@ -1419,6 +1419,16 @@ pub const Parser = struct {
                     };
                     try self.advance();
 
+                    // NonemptyClassRanges: a range whose start code point is
+                    // greater than its end (e.g. `[d-G]`/`[z-a]`) is a SyntaxError
+                    // in every mode (not an Annex B exception). This parser is
+                    // byte-based, so a `\u`/multibyte escape expands to several
+                    // bytes whose individual order is not the code-point order —
+                    // only flag ranges whose BOTH bounds are single ASCII bytes
+                    // (< 0x80), where byte order is code-point order. (A reversed
+                    // multibyte range is rare and unreliable to detect by byte.)
+                    if (first_char < 0x80 and second_char < 0x80 and first_char > second_char)
+                        return RegexError.InvalidCharacterClass;
                     try ranges.append(self.allocator, common.CharRange.init(first_char, second_char));
                 }
             } else {
