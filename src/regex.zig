@@ -25,6 +25,10 @@ pub const Match = struct {
     /// that did not match (an unmatched optional), so a caller can distinguish
     /// it from a group that matched the empty string. Empty when not provided.
     captures_present: []const bool = &.{},
+    /// Per-capture `[start, end]` byte offsets into the input (parallel to
+    /// `captures`), for the `d`/`hasIndices` flag's match-indices array. Only
+    /// meaningful where `captures_present[i]` is true. Empty when not provided.
+    capture_spans: []const [2]usize = &.{},
 
     pub fn init(slice: []const u8, start: usize, end: usize) Match {
         return .{
@@ -37,6 +41,7 @@ pub const Match = struct {
     pub fn deinit(self: *Match, allocator: std.mem.Allocator) void {
         allocator.free(self.captures);
         if (self.captures_present.len != 0) allocator.free(self.captures_present);
+        if (self.capture_spans.len != 0) allocator.free(self.capture_spans);
     }
 };
 
@@ -662,10 +667,13 @@ pub const Regex = struct {
         errdefer captures_list.deinit(self.allocator);
         const present = try self.allocator.alloc(bool, result.captures.len);
         errdefer self.allocator.free(present);
+        const spans = try self.allocator.alloc([2]usize, result.captures.len);
+        errdefer self.allocator.free(spans);
 
         for (result.captures, 0..) |cap, i| {
             try captures_list.append(self.allocator, cap.text);
             present[i] = cap.matched;
+            spans[i] = .{ cap.start, cap.end };
         }
 
         const captures = try captures_list.toOwnedSlice(self.allocator);
@@ -676,6 +684,7 @@ pub const Regex = struct {
             .end = result.end,
             .captures = captures,
             .captures_present = present,
+            .capture_spans = spans,
         };
 
         // Free the VM result (but not the capture text which is from input)
@@ -690,9 +699,12 @@ pub const Regex = struct {
         errdefer captures_list.deinit(self.allocator);
         const present = try self.allocator.alloc(bool, result.captures.len);
         errdefer self.allocator.free(present);
+        const spans = try self.allocator.alloc([2]usize, result.captures.len);
+        errdefer self.allocator.free(spans);
 
         for (result.captures, 0..) |cap, i| {
             present[i] = cap.matched;
+            spans[i] = .{ cap.start, cap.end };
             if (cap.matched) {
                 try captures_list.append(self.allocator, input[cap.start..cap.end]);
             } else {
@@ -708,6 +720,7 @@ pub const Regex = struct {
             .end = result.end,
             .captures = captures,
             .captures_present = present,
+            .capture_spans = spans,
         };
     }
 
