@@ -1758,3 +1758,49 @@ test "compile accepts safe complex patterns" {
     var regex = try Regex.compile(allocator, "a+b*c?d{2,5}");
     defer regex.deinit();
 }
+
+test "out-of-order ASCII character-class range is rejected" {
+    const allocator = std.testing.allocator;
+    // start code point > end code point (e.g. 'd' > 'G', 'z' > 'a') is a SyntaxError.
+    try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compile(allocator, "[d-G]"));
+    try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compile(allocator, "[z-a]"));
+    try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compile(allocator, "[\\nd-G]"));
+    // Valid ranges (ascending, single-point) still compile.
+    inline for (.{ "[a-z]", "[0-9]", "[a-a]", "[A-Za-z0-9_]", "[a-]" }) |pat| {
+        var ok = try Regex.compile(allocator, pat);
+        ok.deinit();
+    }
+    // A multibyte (\u) range must NOT be falsely flagged by the byte-based check.
+    var mb = try Regex.compile(allocator, "[\\u2000-\\u200A]");
+    defer mb.deinit();
+    try std.testing.expect(try mb.isMatch("\u{2005}"));
+}
+
+test "capture spans give per-group byte offsets" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "(\\d+)-(\\d+)");
+    defer regex.deinit();
+    if (try regex.find("ab12-345cd")) |match_result| {
+        var m = match_result;
+        defer m.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), m.capture_spans.len);
+        // "12" at [2,4), "345" at [5,8)
+        try std.testing.expectEqual([2]usize{ 2, 4 }, m.capture_spans[0]);
+        try std.testing.expectEqual([2]usize{ 5, 8 }, m.capture_spans[1]);
+        try std.testing.expect(m.captures_present[0] and m.captures_present[1]);
+    } else try std.testing.expect(false);
+}
+
+test "capture spans: an unmatched optional group is marked absent" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "(a)|(b)");
+    defer regex.deinit();
+    if (try regex.find("b")) |match_result| {
+        var m = match_result;
+        defer m.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), m.capture_spans.len);
+        try std.testing.expect(!m.captures_present[0]); // (a) did not participate
+        try std.testing.expect(m.captures_present[1]); // (b) matched
+        try std.testing.expectEqual([2]usize{ 0, 1 }, m.capture_spans[1]);
+    } else try std.testing.expect(false);
+}
