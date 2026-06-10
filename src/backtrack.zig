@@ -937,30 +937,33 @@ pub const BacktrackEngine = struct {
         // This is complex because we need to search backwards
 
         if (assertion.positive) {
-            // Positive lookbehind (?<=...): must match immediately before pos
-            // Try matching from various positions before pos
+            // Positive lookbehind (?<=...): the child must match a substring that
+            // ends exactly at `pos`. First try the plain (greedy) match at each
+            // start, which also SETS the child's capture groups — preserving the
+            // existing behavior for the common case. If no start's greedy match
+            // happens to end at `pos`, fall back to the constrained matcher, which
+            // explores backtracking choices (e.g. `(?<=\w*)`, where the greedy
+            // `\w*` overshoots `pos` but a shorter match ends there).
             var start: usize = 0;
             while (start <= pos) : (start += 1) {
                 if (self.matchNode(assertion.child, start)) |end| {
-                    if (end == pos) {
-                        // Pattern matched and ended exactly at current position
-                        return pos;
-                    }
+                    if (end == pos) return pos;
                 }
+            }
+            start = 0;
+            while (start <= pos) : (start += 1) {
+                if (self.matchNodeConstrained(assertion.child, start, pos)) return pos;
             }
             return null;
         } else {
-            // Negative lookbehind (?<!...): must NOT match immediately before pos
+            // Negative lookbehind (?<!...): succeeds iff NO substring ending at
+            // `pos` matches the child. The constrained matcher explores backtracking
+            // choices, so a non-greedy match that ends at `pos` is not missed (a
+            // greedy-only probe could overshoot and wrongly let the assertion pass).
             var start: usize = 0;
             while (start <= pos) : (start += 1) {
-                if (self.matchNode(assertion.child, start)) |end| {
-                    if (end == pos) {
-                        // Pattern matched, so negative lookbehind fails
-                        return null;
-                    }
-                }
+                if (self.matchNodeConstrained(assertion.child, start, pos)) return null;
             }
-            // No match found, so negative lookbehind succeeds
             return pos;
         }
     }

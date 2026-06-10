@@ -1804,3 +1804,25 @@ test "capture spans: an unmatched optional group is marked absent" {
         try std.testing.expectEqual([2]usize{ 0, 1 }, m.capture_spans[1]);
     } else try std.testing.expect(false);
 }
+
+test "variable-length lookbehind explores backtracking (constrained match)" {
+    const allocator = std.testing.allocator;
+    // `\w*` greedily overshoots the lookbehind point, but a shorter match ends
+    // there — the constrained matcher must find it.
+    var re = try Regex.compile(allocator, "(?<=\\w*)[^a-c]{3}");
+    defer re.deinit();
+    if (try re.find("abcdef")) |mr| {
+        var m = mr;
+        defer m.deinit(allocator);
+        try std.testing.expectEqualStrings("def", m.slice);
+    } else try std.testing.expect(false);
+    // A fixed-length positive lookbehind with a capture still matches + captures.
+    var re2 = try Regex.compile(allocator, "(?<=(c))def");
+    defer re2.deinit();
+    try std.testing.expect(try re2.isMatch("abcdef"));
+    // Negative lookbehind: `(?<!ab)c` must reject "c" preceded by "ab".
+    var re3 = try Regex.compile(allocator, "(?<!ab)c");
+    defer re3.deinit();
+    try std.testing.expect(!(try re3.isMatch("abc")));
+    try std.testing.expect(try re3.isMatch("xbc")); // not preceded by "ab"
+}
