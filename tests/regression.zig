@@ -307,3 +307,42 @@ test "regression: anchored repeated Unicode property scans large UTF-8 input qui
     try std.testing.expect(!try regex.isMatch(buf.items));
     try std.testing.expect((try regex.find(buf.items)) == null);
 }
+
+fn appendScalarUtf8(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !void {
+    var tmp: [4]u8 = undefined;
+    const len = try std.unicode.utf8Encode(cp, &tmp);
+    try buf.appendSlice(allocator, tmp[0..len]);
+}
+
+fn isCypriotScriptExtensionTestPoint(cp: u21) bool {
+    return (cp >= 0x010100 and cp <= 0x010102) or
+        (cp >= 0x010107 and cp <= 0x010133) or
+        (cp >= 0x010137 and cp <= 0x01013F) or
+        (cp >= 0x010800 and cp <= 0x010805) or
+        cp == 0x010808 or
+        (cp >= 0x01080A and cp <= 0x010835) or
+        (cp >= 0x010837 and cp <= 0x010838) or
+        cp == 0x01083C or
+        cp == 0x01083F;
+}
+
+test "regression: Script_Extensions complement scans generated Cypriot gaps quickly" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compileWithFlags(allocator, "^\\P{Script_Extensions=Cypriot}+$", .{ .unicode = true });
+    defer regex.deinit();
+
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 512 * 1024);
+    defer buf.deinit(allocator);
+
+    var cp: u21 = 0;
+    while (cp <= 0x020000) : (cp += 1) {
+        if (cp >= 0x00D800 and cp <= 0x00DFFF) continue;
+        if (isCypriotScriptExtensionTestPoint(cp)) continue;
+        try appendScalarUtf8(&buf, allocator, cp);
+    }
+
+    try std.testing.expect(try regex.isMatch(buf.items));
+    try appendScalarUtf8(&buf, allocator, 0x010100);
+    try std.testing.expect(!try regex.isMatch(buf.items));
+}
