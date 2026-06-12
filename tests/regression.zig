@@ -60,6 +60,17 @@ test "regression: case-sensitive backreference rejects case mismatch" {
     try std.testing.expect(try regex.isMatch("hello hello"));
 }
 
+test "regression: unmatched named backreference matches empty" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}");
+    defer regex.deinit();
+
+    var match = (try regex.find("aac")).?;
+    defer match.deinit(allocator);
+    try std.testing.expectEqualStrings("aac", match.slice);
+    try std.testing.expect(regex.getNamedCapture(&match, "x") == null);
+}
+
 // --- min > max quantifier rejection ---
 
 test "regression: {10,5} is rejected as invalid" {

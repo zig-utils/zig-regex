@@ -986,11 +986,23 @@ pub const BacktrackEngine = struct {
 
         const capture = self.captures[capture_index - 1];
 
-        // If capture group hasn't matched yet, backreference fails
+        // ECMAScript: a backreference to a group that has not participated
+        // matches the empty string.
         if (!capture.matched) {
-            return null;
+            return pos;
         }
 
+        return self.matchCaptureText(capture, pos);
+    }
+
+    fn matchPresentCaptureBackreference(self: *BacktrackEngine, capture_index: usize, pos: usize) ?usize {
+        if (capture_index == 0 or capture_index > self.captures.len) return null;
+        const capture = self.captures[capture_index - 1];
+        if (!capture.matched) return null;
+        return self.matchCaptureText(capture, pos);
+    }
+
+    fn matchCaptureText(self: *BacktrackEngine, capture: CaptureGroup, pos: usize) ?usize {
         // Get the captured text
         const captured_text = self.input[capture.start..capture.end];
 
@@ -1019,32 +1031,39 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchNamedBackreference(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize) ?usize {
+        var found_name = false;
+        if (self.matchNamedBackreferenceParticipating(node, name, pos, &found_name)) |end| return end;
+        return if (found_name) pos else null;
+    }
+
+    fn matchNamedBackreferenceParticipating(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize, found_name: *bool) ?usize {
         switch (node.node_type) {
             .group => {
                 const group = node.data.group;
                 if (group.name) |group_name| {
                     if (std.mem.eql(u8, group_name, name)) {
+                        found_name.* = true;
                         if (group.capture_index) |index| {
-                            if (self.matchCaptureBackreference(index, pos)) |end| return end;
+                            if (self.matchPresentCaptureBackreference(index, pos)) |end| return end;
                         }
                     }
                 }
-                return self.matchNamedBackreference(group.child, name, pos);
+                return self.matchNamedBackreferenceParticipating(group.child, name, pos, found_name);
             },
             .concat => {
-                if (self.matchNamedBackreference(node.data.concat.left, name, pos)) |end| return end;
-                return self.matchNamedBackreference(node.data.concat.right, name, pos);
+                if (self.matchNamedBackreferenceParticipating(node.data.concat.left, name, pos, found_name)) |end| return end;
+                return self.matchNamedBackreferenceParticipating(node.data.concat.right, name, pos, found_name);
             },
             .alternation => {
-                if (self.matchNamedBackreference(node.data.alternation.left, name, pos)) |end| return end;
-                return self.matchNamedBackreference(node.data.alternation.right, name, pos);
+                if (self.matchNamedBackreferenceParticipating(node.data.alternation.left, name, pos, found_name)) |end| return end;
+                return self.matchNamedBackreferenceParticipating(node.data.alternation.right, name, pos, found_name);
             },
-            .star => return self.matchNamedBackreference(node.data.star.child, name, pos),
-            .plus => return self.matchNamedBackreference(node.data.plus.child, name, pos),
-            .optional => return self.matchNamedBackreference(node.data.optional.child, name, pos),
-            .repeat => return self.matchNamedBackreference(node.data.repeat.child, name, pos),
-            .lookahead => return self.matchNamedBackreference(node.data.lookahead.child, name, pos),
-            .lookbehind => return self.matchNamedBackreference(node.data.lookbehind.child, name, pos),
+            .star => return self.matchNamedBackreferenceParticipating(node.data.star.child, name, pos, found_name),
+            .plus => return self.matchNamedBackreferenceParticipating(node.data.plus.child, name, pos, found_name),
+            .optional => return self.matchNamedBackreferenceParticipating(node.data.optional.child, name, pos, found_name),
+            .repeat => return self.matchNamedBackreferenceParticipating(node.data.repeat.child, name, pos, found_name),
+            .lookahead => return self.matchNamedBackreferenceParticipating(node.data.lookahead.child, name, pos, found_name),
+            .lookbehind => return self.matchNamedBackreferenceParticipating(node.data.lookbehind.child, name, pos, found_name),
             else => return null,
         }
     }
