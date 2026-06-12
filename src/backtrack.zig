@@ -328,30 +328,31 @@ pub const BacktrackEngine = struct {
                         return self.matchNodeConstrained(c.right, split, target_end);
                     }
                     return false;
-                } else if (!self.hasQuantifiers(c.right)) {
-                    // Left has quantifiers, right is deterministic
-                    // Must constrain left first (sets captures needed by backrefs on right)
-                    var split = pos;
-                    while (split <= target_end) : (split += 1) {
-                        if (self.matchNodeConstrained(c.left, pos, split)) {
-                            if (self.matchNode(c.right, split)) |right_end| {
-                                if (right_end == target_end) {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                    return false;
                 } else {
-                    // Both have quantifiers - try all splits
-                    var split = pos;
-                    while (split <= target_end) : (split += 1) {
-                        if (self.matchNodeConstrained(c.left, pos, split)) {
-                            if (self.matchNodeConstrained(c.right, split, target_end)) {
-                                return true;
-                            }
+                    // Left has quantifiers: enumerate its endpoints in the
+                    // quantifier's own greedy/lazy order. Raw ascending splits
+                    // choose the shortest valid capture and break ECMAScript
+                    // backreference backtracking semantics.
+                    const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+                    defer self.allocator.free(base_captures);
+                    @memcpy(base_captures, self.captures);
+
+                    var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+                    defer splits.deinit(self.allocator);
+                    self.collectAllMatches(c.left, pos, &splits) catch return false;
+
+                    for (splits.items) |split| {
+                        if (split > target_end) continue;
+                        @memcpy(self.captures, base_captures);
+                        if (!self.matchNodeConstrained(c.left, pos, split)) continue;
+
+                        if (self.hasQuantifiers(c.right)) {
+                            if (self.matchNodeConstrained(c.right, split, target_end)) return true;
+                        } else if (self.matchNode(c.right, split)) |right_end| {
+                            if (right_end == target_end) return true;
                         }
                     }
+                    @memcpy(self.captures, base_captures);
                     return false;
                 }
             },

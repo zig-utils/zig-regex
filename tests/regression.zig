@@ -169,6 +169,20 @@ test "regression: backtrack step counter resets between positions" {
     }
 }
 
+test "regression: backreference backtracks captured quantifier" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "^(a+)\\1*,\\1+$");
+    defer regex.deinit();
+
+    const match = try regex.find("aaaaaaaaaa,aaaaaaaaaaaaaaa") orelse return error.TestExpectedMatch;
+    var mut_match = match;
+    defer mut_match.deinit(allocator);
+
+    try std.testing.expectEqualStrings("aaaaaaaaaa,aaaaaaaaaaaaaaa", match.slice);
+    try std.testing.expectEqual(@as(usize, 1), match.captures.len);
+    try std.testing.expectEqualStrings("aaaaa", match.captures[0]);
+}
+
 // --- deinit safety ---
 
 test "regression: deinit on regex that was never used" {
