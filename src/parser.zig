@@ -366,6 +366,9 @@ pub const Parser = struct {
     nesting_depth: usize,
     /// The `v` flag: parse character classes with set notation.
     unicode_sets: bool = false,
+    /// The `u` flag: ordinary character classes match code points instead of
+    /// bytes, while keeping non-`v` class syntax.
+    unicode: bool = false,
     /// Current `x` (extended/verbose) state. Kept in sync with `lexer.extended`;
     /// pushed/popped around `(?x:...)` / `(?-x:...)` scopes.
     extended: bool = false,
@@ -1170,6 +1173,16 @@ pub const Parser = struct {
         return .{ .nested = set };
     }
 
+    fn byteClassItem(self: *Parser, cc: common.CharClass) RegexError!ast.Node.ClassItem {
+        var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        for (cc.ranges) |r| {
+            try items.append(self.allocator, .{ .range = .{ .lo = r.start, .hi = r.end } });
+        }
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{ .op = .union_, .negated = cc.negated, .items = try items.toOwnedSlice(self.allocator) };
+        return .{ .nested = set };
+    }
+
     /// The set of strings for a `/v` property-of-strings, or null for an ordinary
     /// (code-point) property. Only the fixed Emoji_Keycap_Sequence is supported;
     /// the data-driven RGI_Emoji / Basic_Emoji families are not.
@@ -1326,10 +1339,86 @@ pub const Parser = struct {
         return ast.Node.createClassSet(self.allocator, set, common.Span.init(open, i));
     }
 
+    fn parseUnicodeClassAtom(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
+        if (i.* < input.len and input[i.*] == '[' and i.* + 1 < input.len and input[i.* + 1] == ':') {
+            var end = i.* + 2;
+            while (end + 1 < input.len and !(input[end] == ':' and input[end + 1] == ']')) : (end += 1) {}
+            if (end + 1 >= input.len) return RegexError.InvalidCharacterClass;
+            const item = try self.byteClassItem(try self.getPosixClass(input[i.* + 2 .. end]));
+            i.* = end + 2;
+            return item;
+        }
+
+        if (i.* < input.len and input[i.*] == '\\' and i.* + 1 < input.len) {
+            const e = input[i.* + 1];
+            switch (e) {
+                'd', 'D', 'w', 'W', 's', 'S' => {
+                    i.* += 2;
+                    return self.builtinClassItem(e);
+                },
+                'p', 'P' => return self.propertyClassItem(input, i),
+                else => {},
+            }
+        }
+
+        const cp = (try readClassCp(input, i)) orelse return RegexError.InvalidCharacterClass;
+        return .{ .range = .{ .lo = cp, .hi = cp } };
+    }
+
+    fn parseUnicodeCharClass(self: *Parser) RegexError!*ast.Node {
+        const input = self.lexer.input;
+        const open = self.current_token.span.start;
+        var i: usize = open + 1;
+
+        var negated = false;
+        if (i < input.len and input[i] == '^') {
+            negated = true;
+            i += 1;
+        }
+
+        var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        errdefer items.deinit(self.allocator);
+
+        while (i < input.len and input[i] != ']') {
+            const item = try self.parseUnicodeClassAtom(input, &i);
+            if (i < input.len and input[i] == '-' and i + 1 < input.len and input[i + 1] != ']') {
+                switch (item) {
+                    .range => |lo| if (lo.lo == lo.hi) {
+                        i += 1;
+                        const hi_item = try self.parseUnicodeClassAtom(input, &i);
+                        switch (hi_item) {
+                            .range => |hi| if (hi.lo == hi.hi) {
+                                if (hi.lo < lo.lo) return RegexError.InvalidCharacterClass;
+                                try items.append(self.allocator, .{ .range = .{ .lo = lo.lo, .hi = hi.lo } });
+                                continue;
+                            } else return RegexError.InvalidCharacterClass,
+                            else => return RegexError.InvalidCharacterClass,
+                        }
+                    } else {},
+                    else => {},
+                }
+            }
+            try items.append(self.allocator, item);
+        }
+
+        if (i >= input.len or input[i] != ']') return RegexError.InvalidCharacterClass;
+        i += 1;
+
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{ .op = .union_, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
+
+        self.lexer.pos = i;
+        self.lexer.pending_len = 0;
+        self.lexer.pending_pos = 0;
+        self.current_token = try self.lexer.next();
+        return ast.Node.createClassSet(self.allocator, set, common.Span.init(open, i));
+    }
+
     fn parseCharClass(self: *Parser) !*ast.Node {
         // With the `v` flag, classes use set notation; parse from the raw input
         // (the byte-token stream can't represent code-point operands/operators).
         if (self.unicode_sets) return self.parseClassSetV();
+        if (self.unicode) return self.parseUnicodeCharClass();
         const start = self.current_token.span.start;
         try self.advance(); // consume [
 

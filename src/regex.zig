@@ -87,6 +87,7 @@ pub const Regex = struct {
         // Parse the pattern into an AST
         var p = try parser.Parser.init(allocator, pattern);
         p.unicode_sets = flags.unicode_sets;
+        p.unicode = flags.unicode;
         // The global `x` (extended) flag affects lexing from the first token, so
         // enable it on the lexer and re-lex the already-fetched first token.
         if (flags.extended) {
@@ -125,12 +126,7 @@ pub const Regex = struct {
 
         if (needs_backtracking) {
             // Use backtracking engine
-            var backtrack_engine = try backtrack.BacktrackEngine.init(
-                allocator,
-                tree.root,
-                tree.capture_count,
-                flags
-            );
+            var backtrack_engine = try backtrack.BacktrackEngine.init(allocator, tree.root, tree.capture_count, flags);
             errdefer backtrack_engine.deinit();
 
             // Create a dummy NFA (not used)
@@ -1612,11 +1608,11 @@ fn requiresBacktracking(node: *ast.Node) bool {
         // Recursively check compound nodes
         .concat => {
             return requiresBacktracking(node.data.concat.left) or
-                   requiresBacktracking(node.data.concat.right);
+                requiresBacktracking(node.data.concat.right);
         },
         .alternation => {
             return requiresBacktracking(node.data.alternation.left) or
-                   requiresBacktracking(node.data.alternation.right);
+                requiresBacktracking(node.data.alternation.right);
         },
         // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
         // which only the backtracking engine honors.

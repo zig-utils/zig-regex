@@ -77,6 +77,23 @@ test "UTF-8: character class range with multi-byte" {
     }
 }
 
+test "UTF-8: unicode character class consumes code points" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compileWithFlags(allocator, "[👨‍👩‍👧‍👦]", .{ .unicode = true });
+    defer regex.deinit();
+
+    const result = try regex.find("𠮷a𠮷b𠮷c👨‍👩‍👧‍👦d");
+    try std.testing.expect(result != null);
+    if (result) |match| {
+        defer {
+            var mut_match = match;
+            mut_match.deinit(allocator);
+        }
+        try std.testing.expectEqual(@as(usize, "𠮷a𠮷b𠮷c".len), match.start);
+        try std.testing.expectEqualStrings("👨", match.slice);
+    }
+}
+
 test "UTF-8: quantifiers with Unicode literals" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "あ+");
