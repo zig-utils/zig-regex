@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
+const utf8_class = @import("utf8_class.zig");
 const RegexError = @import("errors.zig").RegexError;
 
 /// State ID in the NFA
@@ -201,8 +202,13 @@ pub const Compiler = struct {
             .group => try self.compileGroup(node.data.group),
             .anchor => try self.compileAnchor(node.data.anchor),
             .empty => try self.compileEmpty(),
+            // A `class_set` of code-point ranges (e.g. `\s`, `\S`, `/v` Unicode
+            // brackets) lowers to a UTF-8 byte automaton so it runs on the fast
+            // byte engine; unrepresentable shapes are kept on the backtracker by
+            // `requiresBacktracking`, so this only fires when lowerable.
+            .class_set => try self.compileClassSet(node.data.class_set),
             // These features require backtracking engine
-            .lookahead, .lookbehind, .backref, .unicode_property, .class_set => @import("errors.zig").RegexError.NotImplemented,
+            .lookahead, .lookbehind, .backref, .unicode_property => @import("errors.zig").RegexError.NotImplemented,
         };
     }
 
@@ -443,6 +449,41 @@ pub const Compiler = struct {
 
         const start_state = self.nfa.getState(start);
         try start_state.addTransition(try Transition.charClass(self.nfa.allocator, char_class, accept));
+
+        return Fragment{ .start = start, .accept = accept };
+    }
+
+    /// Compile a code-point `class_set` into a UTF-8 byte automaton: an
+    /// alternation of byte-range sequences, one per range produced by the
+    /// utf8-ranges decomposition. Each sequence is a chain of single-range
+    /// `char_class` byte transitions, all sharing one start/accept pair. A set
+    /// that matches nothing yields an (unreachable-accept) dead fragment.
+    fn compileClassSet(self: *Compiler, set: *ast.Node.ClassSet) !Fragment {
+        const allocator = self.allocator;
+        const ranges = (try utf8_class.toCodepointRanges(allocator, set)) orelse
+            return RegexError.NotImplemented;
+        defer allocator.free(ranges);
+        const seqs = try utf8_class.toUtf8Sequences(allocator, ranges);
+        defer allocator.free(seqs);
+
+        const start = try self.nfa.addState();
+        const accept = try self.nfa.addState();
+
+        for (seqs) |seq| {
+            var cur = start;
+            var k: usize = 0;
+            while (k < seq.len) : (k += 1) {
+                const dst = if (k + 1 == seq.len) accept else try self.nfa.addState();
+                const br = seq.ranges[k];
+                const cc = common.CharClass{
+                    .ranges = &[_]common.CharRange{.{ .start = br.lo, .end = br.hi }},
+                    .negated = false,
+                };
+                // `charClass` dupes the ranges, so the stack slice is fine here.
+                try self.nfa.getState(cur).addTransition(try Transition.charClass(self.nfa.allocator, cc, dst));
+                cur = dst;
+            }
+        }
 
         return Fragment{ .start = start, .accept = accept };
     }

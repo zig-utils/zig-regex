@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ITERS="${1:-50}"
-PATTERNS=("hello" "hello|world|test" "\d+" "\w+")
+PATTERNS=("hello" "hello|world|test" "\d+" "\w+" "\w+\s+\w+" "\w+\s+\w+\s+\w+" "[A-Za-z]+\s+[A-Za-z]+")
 
 # Locate Zig 0.16 (project-local pantry install preferred, else PATH).
 if [[ -x "./pantry/ziglang.org/v0.16.0/zig" ]]; then

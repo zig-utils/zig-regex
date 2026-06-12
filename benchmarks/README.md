@@ -112,13 +112,21 @@ plus allocation cuts in the VM:
   walk, differential-tested against the NFA.
 - **Case-insensitive fast paths** — exact-literal (SIMD dual-case scan) and folded
   repeated-atom tables, so the `i` flag keeps the fast loop.
+- **UTF-8 byte automaton for `\s`/Unicode class-sets** (`src/utf8_class.zig`).
+  `\s`/`\S` (and `/v` Unicode bracket sets) match code points, not bytes, so they
+  used to force the whole pattern onto the backtracker — a pattern like
+  `\w+\s+\w+` fell off the DFA the instant a `\s` appeared (~45 ms vs ~2 ms for
+  `\w+`). They now lower to an alternation of UTF-8 byte-range sequences
+  (the classic utf8-ranges decomposition), so `\w+\s+\w+` stays on the lazy DFA
+  end-to-end: ~45 ms → ~3 ms (faster than the Rust `regex` crate on the same
+  haystack), with multi-byte whitespace still matched correctly.
 - **The benchmark uses the release-grade SMP allocator** (not a debug allocator),
   for a fair comparison with Rust's global allocator.
 
 All fast paths and the DFA preserve the engine's exact match semantics (verified
 by the full test suite, including count-vs-findAll cross-checks) and fall back to
 the NFA whenever they don't apply (captures, case-insensitive, lazy/nullable
-quantifiers, anchors, lookaround, Unicode classes, …).
+quantifiers, anchors, lookaround, Unicode property classes, …).
 
 `find`/`findAll` also use the lazy DFA now for capture-free general patterns —
 the DFA gives the match bounds directly, no NFA pass. e.g. `findAll` of

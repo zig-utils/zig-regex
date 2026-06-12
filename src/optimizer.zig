@@ -1,5 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const unicode = @import("unicode.zig");
+const utf8_class = @import("utf8_class.zig");
 
 /// Optimization information extracted from a pattern
 pub const OptimizationInfo = struct {
@@ -509,8 +511,11 @@ pub const Optimizer = struct {
                 return collectFirstBytes(node.data.plus.child, set);
             },
             .star, .optional => {
-                // May match empty; still record the child's first bytes.
-                _ = collectFirstBytes(child_of(node), set);
+                // May match empty; still record the child's first bytes. If the
+                // child's first bytes are indeterminate, the consuming case
+                // could begin with any byte, so the whole prefilter is unsound —
+                // abandon it rather than under-report.
+                if (collectFirstBytes(child_of(node), set) == .fail) return .fail;
                 return .ok_nullable;
             },
             .repeat => {
@@ -523,8 +528,71 @@ pub const Optimizer = struct {
             .group => return collectFirstBytes(node.data.group.child, set),
             // Anchors / empty don't consume — transparent, continue past them.
             .anchor, .empty => return .ok_nullable,
+            // A lowerable `class_set` (`\s`, `\S`, `/v` brackets) consumes one
+            // code point; mark the UTF-8 lead bytes it can start with.
+            .class_set => {
+                if (!utf8_class.compilable(node.data.class_set)) return .fail;
+                markClassSetLeadBytes(node.data.class_set, set);
+                return .ok_consumed;
+            },
             // Everything else is indeterminate at the byte level.
-            .any, .backref, .lookahead, .lookbehind, .unicode_property, .class_set => return .fail,
+            .any, .backref, .lookahead, .lookbehind, .unicode_property => return .fail,
+        }
+    }
+
+    /// First byte of `cp`'s UTF-8 encoding (always valid for scalar values).
+    fn leadByte(cp: u21) u8 {
+        var buf: [4]u8 = undefined;
+        _ = unicode.encodeUtf8(cp, &buf) catch return 0;
+        return buf[0];
+    }
+
+    /// Mark, into `set`, every UTF-8 lead byte the code-point range [lo, hi] can
+    /// begin with. Within one UTF-8 length the lead byte is monotonic, so each
+    /// length-band contributes a contiguous lead-byte run.
+    fn markRangeLeadBytes(lo: u21, hi: u21, set: *[256]bool) void {
+        const bounds = [_]u21{ 0x7F, 0x7FF, 0xFFFF, 0x10FFFF };
+        var prev: u21 = 0;
+        for (bounds) |bnd| {
+            const blo = @max(lo, prev);
+            const bhi = @min(hi, bnd);
+            if (blo <= bhi) {
+                var x: usize = leadByte(blo);
+                const top: usize = leadByte(bhi);
+                while (x <= top) : (x += 1) set[x] = true;
+            }
+            if (bnd == 0x10FFFF) break;
+            prev = bnd + 1;
+        }
+    }
+
+    /// Recurse a lowerable union, marking the lead bytes of each contributed
+    /// range. Caller guarantees `compilable(set)`.
+    fn markUnionLeadBytes(set: *const ast.Node.ClassSet, out: *[256]bool) void {
+        for (set.items) |it| {
+            switch (it) {
+                .range => |r| markRangeLeadBytes(r.lo, r.hi, out),
+                .string => |s| if (s.len == 1) markRangeLeadBytes(@intCast(s[0]), @intCast(s[0]), out),
+                .nested => |n| markUnionLeadBytes(n, out),
+                .property => {},
+            }
+        }
+    }
+
+    /// Mark the possible first bytes of a lowerable `class_set`. For a plain
+    /// union this is exact; for a complement (`[^…]`/`\S`) the ASCII bytes are
+    /// computed exactly and the multi-byte lead bytes are over-approximated
+    /// (a superset only loosens the prefilter, never drops a match).
+    fn markClassSetLeadBytes(set: *const ast.Node.ClassSet, out: *[256]bool) void {
+        if (set.negated) {
+            var cp: u21 = 0;
+            while (cp < 0x80) : (cp += 1) {
+                if (set.matches(cp, false)) out[cp] = true;
+            }
+            var b: usize = 0xC2;
+            while (b <= 0xF4) : (b += 1) out[b] = true;
+        } else {
+            markUnionLeadBytes(set, out);
         }
     }
 

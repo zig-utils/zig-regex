@@ -371,3 +371,141 @@ test "regression: Script_Extensions complement scans generated Cypriot gaps quic
     try appendScalarUtf8(&buf, allocator, 0x010100);
     try std.testing.expect(!try regex.isMatch(buf.items));
 }
+
+// --- `\s` shorthand lowered to the byte engine (issue #10) ---
+//
+// `\s`/`\S` are code-point class sets (ECMAScript whitespace spans Unicode, not
+// just ASCII), so they used to force the whole pattern onto the backtracking
+// engine. A pattern such as `\w+\s+\w+` therefore fell off the lazy-DFA fast
+// path and ran ~10-30x slower the instant a `\s` appeared. They now lower to a
+// UTF-8 byte automaton; these guard correctness (incl. multi-byte whitespace)
+// and that the pattern stays on the fast engine.
+
+test "regression: `\\w+\\s+\\w+` matches like the reference engine" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\w+\\s+\\w+");
+    defer regex.deinit();
+
+    const matches = try regex.findAll(allocator, "foo bar  baz\tqux");
+    defer {
+        for (matches) |*m| {
+            var mm = m.*;
+            mm.deinit(allocator);
+        }
+        allocator.free(matches);
+    }
+    // Greedy `\s+` joins each adjacent word pair: "foo bar", "baz\tqux".
+    try std.testing.expectEqual(@as(usize, 2), matches.len);
+    try std.testing.expectEqualStrings("foo bar", matches[0].slice);
+    try std.testing.expectEqualStrings("baz\tqux", matches[1].slice);
+}
+
+test "regression: `\\s` matches multi-byte Unicode whitespace" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "a\\sb");
+    defer regex.deinit();
+
+    // U+00A0 NBSP (C2 A0), U+2003 EM SPACE (E2 80 83), U+3000 (E3 80 80).
+    try std.testing.expect(try regex.isMatch("a\u{00A0}b"));
+    try std.testing.expect(try regex.isMatch("a\u{2003}b"));
+    try std.testing.expect(try regex.isMatch("a\u{3000}b"));
+    try std.testing.expect(try regex.isMatch("a b"));
+    try std.testing.expect(!try regex.isMatch("axb"));
+    // A bare continuation byte must not be mistaken for whitespace.
+    try std.testing.expect(!try regex.isMatch("a\xa0b"));
+}
+
+test "regression: `\\S` excludes whitespace, includes non-ASCII" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\S+");
+    defer regex.deinit();
+
+    const m = (try regex.find("  café  ")).?;
+    try std.testing.expectEqualStrings("café", m.slice);
+}
+
+test "regression: leading optional `\\s*` keeps the prefilter sound" {
+    const allocator = std.testing.allocator;
+    // `\s*,\s*` can begin with whitespace OR the comma; the first-byte prefilter
+    // must include both, or the leftmost match (the space) is skipped.
+    var regex = try Regex.compile(allocator, "\\s*,\\s*");
+    defer regex.deinit();
+
+    const parts = try regex.split(allocator, "a , b , c");
+    defer allocator.free(parts);
+    try std.testing.expectEqual(@as(usize, 3), parts.len);
+    try std.testing.expectEqualStrings("a", parts[0]);
+    try std.testing.expectEqualStrings("b", parts[1]);
+    try std.testing.expectEqualStrings("c", parts[2]);
+}
+
+test "regression: `\\w+\\s+\\w+` stays off the quadratic backtracker" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\w+\\s+\\w+");
+    defer regex.deinit();
+
+    // Build "wd wd wd ..." — dense matches; the old backtracking path was
+    // ~O(n*m). Doubling the input must not more-than-triple the time.
+    const make = struct {
+        fn buf(a: std.mem.Allocator, words: usize) ![]u8 {
+            var list = try std.ArrayList(u8).initCapacity(a, words * 3);
+            errdefer list.deinit(a);
+            var i: usize = 0;
+            while (i < words) : (i += 1) {
+                if (i != 0) try list.append(a, ' ');
+                try list.appendSlice(a, "wd");
+            }
+            return list.toOwnedSlice(a);
+        }
+    };
+
+    const time = struct {
+        fn run(re: *const Regex, b: []const u8) !u64 {
+            _ = try re.count(b); // warm up
+            var best: u64 = std.math.maxInt(u64);
+            var rep: usize = 0;
+            while (rep < 3) : (rep += 1) {
+                const t0 = monotonicNs();
+                const c = try re.count(b);
+                const dt = monotonicNs() - t0;
+                std.mem.doNotOptimizeAway(c);
+                if (dt < best) best = dt;
+            }
+            return best;
+        }
+    };
+
+    const b1 = try make.buf(allocator, 20_000);
+    defer allocator.free(b1);
+    const b2 = try make.buf(allocator, 40_000); // exactly 2x
+    defer allocator.free(b2);
+
+    try std.testing.expectEqual(@as(usize, 10_000), try regex.count(b1));
+    try std.testing.expectEqual(@as(usize, 20_000), try regex.count(b2));
+
+    const t1 = try time.run(&regex, b1);
+    const t2 = try time.run(&regex, b2);
+    try std.testing.expect(t1 > 0);
+    try std.testing.expect(t2 * 10 < t1 * 30); // t2/t1 < 3.0 (linear, not quadratic)
+}
+
+test "regression: prefilter hints are exposed to callers (issue #10)" {
+    const allocator = std.testing.allocator;
+
+    {
+        var re = try Regex.compile(allocator, "Sherlock Holmes");
+        defer re.deinit();
+        try std.testing.expectEqualStrings("Sherlock Holmes", re.literalPrefix().?);
+        try std.testing.expectEqualStrings("Sherlock Holmes", re.requiredLiteral().?);
+        try std.testing.expectEqual(@as(?u8, 'S'), re.firstByte());
+    }
+    {
+        // `foo\d+` has a required literal but no single first byte set beyond 'f'.
+        var re = try Regex.compile(allocator, "foo\\d+");
+        defer re.deinit();
+        try std.testing.expectEqualStrings("foo", re.requiredLiteral().?);
+        const fb = re.firstBytes().?;
+        try std.testing.expect(fb['f']);
+        try std.testing.expect(!fb['g']);
+    }
+}

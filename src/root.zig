@@ -82,6 +82,7 @@ pub const c_api = @import("c_api.zig");
 pub const common = @import("common.zig");
 pub const parser = @import("parser.zig");
 pub const compiler = @import("compiler.zig");
+pub const utf8_class = @import("utf8_class.zig");
 pub const optimizer = @import("optimizer.zig");
 pub const debug = @import("debug.zig");
 pub const profiling = @import("profiling.zig");

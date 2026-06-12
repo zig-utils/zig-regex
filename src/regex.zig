@@ -122,7 +122,7 @@ pub const Regex = struct {
         try collectNamedCaptures(allocator, tree.root, &named_captures, &named_capture_list);
 
         // Detect if backtracking is required
-        const needs_backtracking = requiresBacktracking(tree.root);
+        const needs_backtracking = requiresBacktracking(tree.root, flags);
 
         if (needs_backtracking) {
             // Use backtracking engine
@@ -539,6 +539,38 @@ pub const Regex = struct {
         if (pos >= input.len) return input.len + 1;
         const dec = unicode_mod.decodeUtf8Lenient(input[pos..]) orelse return pos + 1;
         return pos + dec.len;
+    }
+
+    // --- Prefilter hints (issue #10) -------------------------------------
+    //
+    // The engine derives these from the pattern to skip non-candidate input.
+    // Exposing them lets callers (e.g. a grep front-end) build their own
+    // SIMD/multi-literal prefilter and avoid feeding the engine inputs that
+    // cannot match. All are borrowed from the regex and live as long as it.
+
+    /// A literal substring (>= 2 bytes) the pattern must start with, if any —
+    /// suitable for an `indexOf`/`memchr` skip to candidate start positions.
+    pub fn literalPrefix(self: *const Regex) ?[]const u8 {
+        return self.opt_info.literal_prefix;
+    }
+
+    /// A literal substring that must appear *somewhere* in every match, if any.
+    /// If it's absent from the input, the pattern cannot match at all.
+    pub fn requiredLiteral(self: *const Regex) ?[]const u8 {
+        return self.opt_info.required_literal;
+    }
+
+    /// The set of bytes a match can begin with, if a useful one exists: a
+    /// 256-entry table where `set[b]` means byte `b` can start a match. Null
+    /// when every byte is a candidate (no prefilter benefit).
+    pub fn firstBytes(self: *const Regex) ?[256]bool {
+        return self.opt_info.first_bytes;
+    }
+
+    /// When `firstBytes` is a single byte, that byte — the most selective case,
+    /// ideal for a `memchr`/`indexOfScalar` scan.
+    pub fn firstByte(self: *const Regex) ?u8 {
+        return self.opt_info.first_byte_single;
     }
 
     /// Check if the pattern matches the entire input string
@@ -1576,10 +1608,18 @@ pub const Regex = struct {
 };
 
 /// Helper function to detect if AST requires backtracking engine
-fn requiresBacktracking(node: *ast.Node) bool {
+fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
     switch (node.node_type) {
         // These features require backtracking
-        .lookahead, .lookbehind, .backref, .unicode_property, .class_set => return true,
+        .lookahead, .lookbehind, .backref, .unicode_property => return true,
+
+        // A `class_set` (`\s`, `\S`, `/v` Unicode brackets) lowers to a UTF-8
+        // byte automaton when it's a union of code-point ranges, so it can run
+        // on the fast byte engine. Under `i` (case folding happens at the byte
+        // level in the NFA/DFA) and for unrepresentable shapes (properties,
+        // multi-code-point strings, intersection/difference) it stays on the
+        // backtracker.
+        .class_set => return flags.case_insensitive or !@import("utf8_class.zig").compilable(node.data.class_set),
 
         // Check for lazy quantifiers
         .star, .plus, .optional => {
@@ -1598,25 +1638,25 @@ fn requiresBacktracking(node: *ast.Node) bool {
                 .optional => node.data.optional.child,
                 else => unreachable,
             };
-            return requiresBacktracking(child);
+            return requiresBacktracking(child, flags);
         },
         .repeat => {
             if (!node.data.repeat.greedy) return true;
-            return requiresBacktracking(node.data.repeat.child);
+            return requiresBacktracking(node.data.repeat.child, flags);
         },
 
         // Recursively check compound nodes
         .concat => {
-            return requiresBacktracking(node.data.concat.left) or
-                requiresBacktracking(node.data.concat.right);
+            return requiresBacktracking(node.data.concat.left, flags) or
+                requiresBacktracking(node.data.concat.right, flags);
         },
         .alternation => {
-            return requiresBacktracking(node.data.alternation.left) or
-                requiresBacktracking(node.data.alternation.right);
+            return requiresBacktracking(node.data.alternation.left, flags) or
+                requiresBacktracking(node.data.alternation.right, flags);
         },
         // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
         // which only the backtracking engine honors.
-        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child),
+        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags),
 
         // `.` consumes a decoded JS character (and respects Unicode vs
         // non-Unicode astral semantics), which the byte-oriented NFA/DFA paths
