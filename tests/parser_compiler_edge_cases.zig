@@ -1,6 +1,7 @@
 const std = @import("std");
 const Regex = @import("regex").Regex;
 const RegexError = @import("regex").RegexError;
+const common = @import("regex").common;
 
 // =============================================================================
 // Parser and compiler edge cases - invalid patterns, boundary syntax, etc.
@@ -150,6 +151,43 @@ test "parser: escaped caret and dollar" {
 
     try std.testing.expect(try regex.isMatch("^$"));
     try std.testing.expect(!try regex.isMatch("ab"));
+}
+
+test "parser: unicode mode rejects Annex B escape fallbacks" {
+    const allocator = std.testing.allocator;
+    const flags = common.CompileFlags{ .unicode = true };
+
+    try std.testing.expectError(RegexError.InvalidBackreference, Regex.compileWithFlags(allocator, "\\1", flags));
+    try std.testing.expectError(RegexError.InvalidBackreference, Regex.compileWithFlags(allocator, "\\9", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "\\00", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "\\c", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "\\c_", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "\\q", flags));
+
+    var nul = try Regex.compileWithFlags(allocator, "\\0", flags);
+    defer nul.deinit();
+    try std.testing.expect(try nul.isMatch("\x00"));
+
+    var backref = try Regex.compileWithFlags(allocator, "(a)\\1", flags);
+    defer backref.deinit();
+    try std.testing.expect(try backref.isMatch("aa"));
+}
+
+test "parser: unicode character class rejects invalid escapes and class ranges" {
+    const allocator = std.testing.allocator;
+    const flags = common.CompileFlags{ .unicode = true };
+
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\1]", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\00]", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\c]", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\c_]", flags));
+    try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compileWithFlags(allocator, "[\\d-a]", flags));
+    try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compileWithFlags(allocator, "[a-\\d]", flags));
+    try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compileWithFlags(allocator, "[\\d-\\d]", flags));
+
+    var control = try Regex.compileWithFlags(allocator, "[\\cA]", flags);
+    defer control.deinit();
+    try std.testing.expect(try control.isMatch("\x01"));
 }
 
 // --- Complex pattern compilation ---

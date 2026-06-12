@@ -88,11 +88,12 @@ pub const Regex = struct {
         var p = try parser.Parser.init(allocator, pattern);
         p.unicode_sets = flags.unicode_sets;
         p.unicode = flags.unicode;
-        // The global `x` (extended) flag affects lexing from the first token, so
-        // enable it on the lexer and re-lex the already-fetched first token.
-        if (flags.extended) {
-            p.extended = true;
-            p.lexer.extended = true;
+        // The `x`, `u`, and `v` flags affect lexing from the first token, so
+        // enable them on the lexer and re-lex the already-fetched first token.
+        if (flags.extended or flags.unicode or flags.unicode_sets) {
+            p.extended = flags.extended;
+            p.lexer.extended = flags.extended;
+            p.lexer.unicode_strict = flags.unicode or flags.unicode_sets;
             p.lexer.reset();
             p.current_token = try p.lexer.next();
         }

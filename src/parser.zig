@@ -68,6 +68,8 @@ pub const Lexer = struct {
     /// Whether the lexer is currently between `[` and `]`. In `x` mode
     /// whitespace inside a class is literal, so skipping is suppressed here.
     in_class: bool = false,
+    /// ECMAScript `u`/`v` mode forbids Annex B identity/octal escape fallbacks.
+    unicode_strict: bool = false,
 
     pub fn init(input: []const u8) Lexer {
         return .{
@@ -160,8 +162,15 @@ pub const Lexer = struct {
             },
             'f' => self.makeToken(.escape_char, 0x0C), // form feed
             'v' => self.makeToken(.escape_char, 0x0B), // vertical tab
-            '0' => self.makeToken(.escape_char, 0x00), // NUL (Annex B: \0 not followed by a digit)
-            'x' => self.parseHexEscape(), // \xHH → one byte
+            '0' => {
+                // `\0` is valid in Unicode mode only when it is not followed by
+                // another decimal digit. `\00` etc. are legacy octal escapes.
+                if (self.unicode_strict) if (self.peek()) |following| {
+                    if (std.ascii.isDigit(following)) return RegexError.InvalidEscapeSequence;
+                };
+                return self.makeToken(.escape_char, 0x00);
+            },
+            'x' => try self.parseHexEscape(), // \xHH → one byte
             'c' => blk: {
                 // \cX control escape: the control letter's code mod 32.
                 const x = self.peek() orelse break :blk RegexError.InvalidEscapeSequence;
@@ -169,9 +178,10 @@ pub const Lexer = struct {
                     _ = self.advance();
                     break :blk self.makeToken(.escape_char, x % 32);
                 }
+                if (self.unicode_strict) break :blk RegexError.InvalidEscapeSequence;
                 break :blk self.makeToken(.literal, 'c'); // not a control letter: literal 'c'
             },
-            'u' => self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
+            'u' => try self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
             'p' => self.parsePropertyEscape(false),
             'P' => self.parsePropertyEscape(true),
             '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$', '/' => {
@@ -181,7 +191,10 @@ pub const Lexer = struct {
             // IdentityEscape (Annex B / non-Unicode): an unrecognized `\X` matches
             // the literal `X` rather than being a syntax error, matching how web
             // JavaScript engines treat e.g. `\-`, `\ `, `\<`.
-            else => self.makeToken(.literal, c),
+            else => {
+                if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+                return self.makeToken(.literal, c);
+            },
         };
     }
 
@@ -193,7 +206,10 @@ pub const Lexer = struct {
     /// `{...}` body, `\p` is an IdentityEscape of `p` (non-Unicode mode). An
     /// unknown / unsupported property name is a syntax error.
     fn parsePropertyEscape(self: *Lexer, negated: bool) !Token {
-        if (self.peek() != '{') return self.makeToken(.literal, if (negated) 'P' else 'p');
+        if (self.peek() != '{') {
+            if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+            return self.makeToken(.literal, if (negated) 'P' else 'p');
+        }
         _ = self.advance(); // consume '{'
         const start = self.pos;
         while (self.peek()) |c| {
@@ -218,7 +234,7 @@ pub const Lexer = struct {
         return tok;
     }
 
-    fn parseHexEscape(self: *Lexer) Token {
+    fn parseHexEscape(self: *Lexer) !Token {
         const save = self.pos;
         const h1 = self.peekHex(0);
         const h2 = self.peekHex(1);
@@ -227,13 +243,14 @@ pub const Lexer = struct {
             return self.makeToken(.escape_char, h1.? * 16 + h2.?);
         }
         self.pos = save;
+        if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
         return self.makeToken(.literal, 'x');
     }
 
     /// `\uHHHH` or `\u{H...}`: a code point, emitted as its UTF-8 bytes (the
     /// first byte is returned; continuation bytes are queued in `pending`). A
     /// malformed escape is an IdentityEscape of `u`.
-    fn parseUnicodeEscape(self: *Lexer) Token {
+    fn parseUnicodeEscape(self: *Lexer) !Token {
         const save = self.pos;
         var cp: u32 = 0;
         if (self.peek() == '{') {
@@ -247,6 +264,7 @@ pub const Lexer = struct {
             }
             if (n == 0 or self.peek() != '}' or cp > 0x10FFFF) {
                 self.pos = save;
+                if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
                 return self.makeToken(.literal, 'u');
             }
             self.pos += 1; // consume '}'
@@ -255,6 +273,7 @@ pub const Lexer = struct {
             while (i < 4) : (i += 1) {
                 const d = self.peekHex(i) orelse {
                     self.pos = save;
+                    if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
                     return self.makeToken(.literal, 'u');
                 };
                 cp = cp * 16 + d;
@@ -419,8 +438,31 @@ pub const Parser = struct {
                 else => RegexError.UnexpectedCharacter,
             };
         }
+        if (self.unicode or self.unicode_sets) try self.validateUnicodeBackrefs(root);
 
         return ast.AST.init(self.allocator, root, self.capture_count);
+    }
+
+    fn validateUnicodeBackrefs(self: *Parser, node: *ast.Node) RegexError!void {
+        switch (node.data) {
+            .concat => |concat| {
+                try self.validateUnicodeBackrefs(concat.left);
+                try self.validateUnicodeBackrefs(concat.right);
+            },
+            .alternation => |alt| {
+                try self.validateUnicodeBackrefs(alt.left);
+                try self.validateUnicodeBackrefs(alt.right);
+            },
+            .star, .plus, .optional => |quant| try self.validateUnicodeBackrefs(quant.child),
+            .repeat => |repeat| try self.validateUnicodeBackrefs(repeat.child),
+            .group => |group| try self.validateUnicodeBackrefs(group.child),
+            .lookahead, .lookbehind => |assertion| try self.validateUnicodeBackrefs(assertion.child),
+            .backref => |backref| {
+                if (backref.name == null and (backref.index == 0 or backref.index > self.capture_count))
+                    return RegexError.InvalidBackreference;
+            },
+            else => {},
+        }
     }
 
     /// Parse alternation (lowest precedence)
@@ -1056,7 +1098,14 @@ pub const Parser = struct {
     /// Read one code point at `i`, resolving escapes. Returns null if the next
     /// token isn't a plain character (i.e. it's `]`, `[`, or a class escape that
     /// the operand parser handles).
-    fn readClassCp(input: []const u8, i: *usize) RegexError!?u21 {
+    fn isClassIdentityEscape(c: u8) bool {
+        return switch (c) {
+            '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '/', '-' => true,
+            else => false,
+        };
+    }
+
+    fn readClassCp(input: []const u8, i: *usize, unicode_strict: bool) RegexError!?u21 {
         if (i.* >= input.len) return null;
         const c = input[i.*];
         if (c == ']' or c == '[') return null;
@@ -1086,12 +1135,29 @@ pub const Parser = struct {
                     return 0x0B;
                 },
                 '0' => {
+                    if (unicode_strict and i.* + 2 < input.len and std.ascii.isDigit(input[i.* + 2]))
+                        return RegexError.InvalidEscapeSequence;
                     i.* += 2;
                     return 0;
+                },
+                '1'...'9' => {
+                    if (unicode_strict) return RegexError.InvalidEscapeSequence;
+                    i.* += 2;
+                    return e;
                 },
                 'b' => {
                     i.* += 2;
                     return 0x08;
+                },
+                'c' => {
+                    if (i.* + 2 < input.len and std.ascii.isAlphabetic(input[i.* + 2])) {
+                        const x = input[i.* + 2];
+                        i.* += 3;
+                        return x % 32;
+                    }
+                    if (unicode_strict) return RegexError.InvalidEscapeSequence;
+                    i.* += 2;
+                    return 'c';
                 },
                 'x' => {
                     i.* += 2;
@@ -1116,6 +1182,8 @@ pub const Parser = struct {
                 },
                 else => {
                     // Identity escape of a syntax character.
+                    if (unicode_strict and !isClassIdentityEscape(e))
+                        return RegexError.InvalidEscapeSequence;
                     i.* += 2;
                     return e;
                 },
@@ -1188,6 +1256,20 @@ pub const Parser = struct {
         return .{ .nested = set };
     }
 
+    fn destroyClassSet(self: *Parser, set: *ast.Node.ClassSet) void {
+        for (set.items) |item| self.destroyClassItem(item);
+        self.allocator.free(set.items);
+        self.allocator.destroy(set);
+    }
+
+    fn destroyClassItem(self: *Parser, item: ast.Node.ClassItem) void {
+        switch (item) {
+            .nested => |set| self.destroyClassSet(set),
+            .string => |s| self.allocator.free(s),
+            .range, .property => {},
+        }
+    }
+
     /// The set of strings for a `/v` property-of-strings, or null for an ordinary
     /// (code-point) property. Only the fixed Emoji_Keycap_Sequence is supported;
     /// the data-driven RGI_Emoji / Basic_Emoji families are not.
@@ -1241,7 +1323,7 @@ pub const Parser = struct {
         while (true) {
             var cps: std.ArrayList(u21) = .empty;
             while (i.* < input.len and input[i.*] != '|' and input[i.*] != '}') {
-                const cp = (try readClassCp(input, i)) orelse return RegexError.UnexpectedCharacter;
+                const cp = (try readClassCp(input, i, true)) orelse return RegexError.UnexpectedCharacter;
                 try cps.append(self.allocator, cp);
             }
             try alts.append(self.allocator, .{ .string = try cps.toOwnedSlice(self.allocator) });
@@ -1280,14 +1362,14 @@ pub const Parser = struct {
                 else => {},
             }
         }
-        const lo = (try readClassCp(input, i)) orelse return RegexError.InvalidCharacterClass;
+        const lo = (try readClassCp(input, i, true)) orelse return RegexError.InvalidCharacterClass;
         // A range `lo-hi`, but only when `-` is followed by a real character (a
         // double `-` is the difference operator, a trailing `-` is a literal).
         if (i.* < input.len and input[i.*] == '-' and i.* + 1 < input.len and
             input[i.* + 1] != '-' and input[i.* + 1] != ']')
         {
             i.* += 1; // consume -
-            const hi = (try readClassCp(input, i)) orelse return RegexError.InvalidCharacterClass;
+            const hi = (try readClassCp(input, i, true)) orelse return RegexError.InvalidCharacterClass;
             if (hi < lo) return RegexError.InvalidCharacterClass;
             return .{ .range = .{ .lo = lo, .hi = hi } };
         }
@@ -1366,7 +1448,7 @@ pub const Parser = struct {
             }
         }
 
-        const cp = (try readClassCp(input, i)) orelse return RegexError.InvalidCharacterClass;
+        const cp = (try readClassCp(input, i, true)) orelse return RegexError.InvalidCharacterClass;
         return .{ .range = .{ .lo = cp, .hi = cp } };
     }
 
@@ -1382,7 +1464,10 @@ pub const Parser = struct {
         }
 
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
-        errdefer items.deinit(self.allocator);
+        errdefer {
+            for (items.items) |item| self.destroyClassItem(item);
+            items.deinit(self.allocator);
+        }
 
         while (i < input.len and input[i] != ']') {
             const item = try self.parseUnicodeClassAtom(input, &i);
@@ -1397,10 +1482,16 @@ pub const Parser = struct {
                                 try items.append(self.allocator, .{ .range = .{ .lo = lo.lo, .hi = hi.lo } });
                                 continue;
                             } else return RegexError.InvalidCharacterClass,
-                            else => return RegexError.InvalidCharacterClass,
+                            else => {
+                                self.destroyClassItem(hi_item);
+                                return RegexError.InvalidCharacterClass;
+                            },
                         }
                     } else {},
-                    else => {},
+                    else => {
+                        self.destroyClassItem(item);
+                        return RegexError.InvalidCharacterClass;
+                    },
                 }
             }
             try items.append(self.allocator, item);
