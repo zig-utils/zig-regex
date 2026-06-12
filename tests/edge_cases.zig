@@ -93,6 +93,19 @@ test "edge: character class with single range" {
     try std.testing.expect(!try regex.isMatch("b"));
 }
 
+test "edge: backspace escape in character class" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "[\\b]");
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("\x08"));
+    try std.testing.expect(!try regex.isMatch("b"));
+
+    var unicode_regex = try Regex.compileWithFlags(allocator, "[\\b]", .{ .unicode = true });
+    defer unicode_regex.deinit();
+    try std.testing.expect(try unicode_regex.isMatch("\x08"));
+}
+
 test "edge: negated character class matching nothing in range" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "[^a-z]");

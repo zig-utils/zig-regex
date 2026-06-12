@@ -1002,8 +1002,9 @@ pub const Parser = struct {
             .rbrace => '}',
             .dollar => '$',
             .lbracket => '[', // Allow [ as literal (for non-POSIX cases)
+            .escape_b => 0x08, // Inside a class, \b is backspace, not a word boundary.
             // These should not appear here
-            .rbracket, .caret, .backslash, .escape_d, .escape_D, .escape_w, .escape_W, .escape_s, .escape_S, .escape_b, .escape_B, .escape_A, .escape_z, .escape_Z, .backref, .escape_p, .escape_P, .eof => null,
+            .rbracket, .caret, .backslash, .escape_d, .escape_D, .escape_w, .escape_W, .escape_s, .escape_S, .escape_B, .escape_A, .escape_z, .escape_Z, .backref, .escape_p, .escape_P, .eof => null,
         };
     }
 
@@ -1087,6 +1088,10 @@ pub const Parser = struct {
                 '0' => {
                     i.* += 2;
                     return 0;
+                },
+                'b' => {
+                    i.* += 2;
+                    return 0x08;
                 },
                 'x' => {
                     i.* += 2;
