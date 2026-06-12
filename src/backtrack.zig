@@ -78,10 +78,16 @@ pub const BacktrackEngine = struct {
 
     /// Find first match in input
     pub fn find(self: *BacktrackEngine, input: []const u8) ?BacktrackMatch {
+        return self.findFrom(input, 0);
+    }
+
+    /// Find first match in input at or after `start`, preserving assertions that
+    /// refer to the original input rather than a sliced search window.
+    pub fn findFrom(self: *BacktrackEngine, input: []const u8, start: usize) ?BacktrackMatch {
         self.input = input;
 
         const codepoint_search = containsCodepointAtom(self.ast_root);
-        var pos: usize = 0;
+        var pos: usize = @min(start, input.len);
         while (pos <= input.len) {
             self.resetCaptures();
             self.step_count = 0; // Reset step counter per starting position

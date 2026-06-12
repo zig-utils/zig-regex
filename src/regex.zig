@@ -896,6 +896,96 @@ pub const Regex = struct {
         }
     }
 
+    /// Find the first match at or after `start` while evaluating assertions
+    /// against the original `input`. This is distinct from `find(input[start..])`:
+    /// anchors such as `^` and word-boundary context must still see the whole
+    /// string.
+    pub fn findFrom(self: *const Regex, input: []const u8, start: usize) !?Match {
+        if (start == 0) return self.find(input);
+        if (self.requiredAbsent(input)) return null;
+
+        if (self.opt_info.exact_literal) |lit| {
+            const found = if (self.flags.case_insensitive) blk: {
+                var sc = CiLiteralScanner.init(input, lit, @min(start, input.len));
+                break :blk sc.next();
+            } else literalSearch(input, lit, @min(start, input.len));
+            if (found) |i| return Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len };
+            return null;
+        }
+
+        switch (self.engine_type) {
+            .thompson_nfa => {
+                const nfa_mut = @constCast(&self.nfa);
+                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
+                defer virtual_machine.deinit();
+
+                if (self.onepass) |plan| {
+                    const fb = self.opt_info.first_bytes;
+                    var scan: usize = @min(start, input.len);
+                    while (scan <= input.len) {
+                        if (fb) |t| {
+                            while (scan < input.len and !t[input[scan]]) scan += 1;
+                            if (scan >= input.len) break;
+                        }
+                        if (try plan.matchAt(self.allocator, input, scan)) |result| {
+                            return try self.buildMatch(input, result);
+                        }
+                        scan = plan.nextScan(input, scan);
+                    }
+                    return null;
+                }
+
+                if (self.opt_info.literal_prefix) |prefix| {
+                    if (!self.flags.case_insensitive) {
+                        var search_from: usize = @min(start, input.len);
+                        while (std.mem.indexOf(u8, input[search_from..], prefix)) |rel_pos| {
+                            const prefix_pos = search_from + rel_pos;
+                            if (try virtual_machine.matchAt(input, prefix_pos)) |result| {
+                                return try self.buildMatch(input, result);
+                            }
+                            search_from = prefix_pos + 1;
+                        }
+                        return null;
+                    }
+                }
+
+                if (self.opt_info.first_bytes) |fb| {
+                    if (!self.flags.case_insensitive) {
+                        var scan: usize = @min(start, input.len);
+                        while (scan < input.len) {
+                            while (scan < input.len and !fb[input[scan]]) scan += 1;
+                            if (scan >= input.len) break;
+                            if (try virtual_machine.matchAt(input, scan)) |result| {
+                                return try self.buildMatch(input, result);
+                            }
+                            scan += 1;
+                        }
+                        return null;
+                    }
+                }
+
+                var scan: usize = @min(start, input.len);
+                while (scan <= input.len) {
+                    if (try virtual_machine.matchAt(input, scan)) |result| {
+                        return try self.buildMatch(input, result);
+                    }
+                    if (scan == input.len) break;
+                    scan += 1;
+                }
+                return null;
+            },
+            .backtracking => {
+                const engine_mut = @constCast(&self.backtrack_engine.?);
+                if (engine_mut.findFrom(input, start)) |result| {
+                    var mut_result = result;
+                    defer mut_result.deinit(self.allocator);
+                    return try self.buildBacktrackMatch(input, result);
+                }
+                return null;
+            },
+        }
+    }
+
     /// Find all matches in the input string
     pub fn findAll(self: *const Regex, allocator: std.mem.Allocator, input: []const u8) ![]Match {
         var matches: std.ArrayList(Match) = .empty;
