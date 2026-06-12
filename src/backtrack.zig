@@ -207,12 +207,8 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchAny(self: *BacktrackEngine, pos: usize) ?usize {
-        if (pos >= self.input.len) return null;
-
-        const c = self.input[pos];
-        if (!self.flags.dot_all and c == '\n') return null;
-
-        return pos + 1;
+        const len = common.dotMatchLen(self.input, pos, self.flags) orelse return null;
+        return pos + len;
     }
 
     fn matchConcat(self: *BacktrackEngine, concat: ast.Node.Concat, pos: usize) ?usize {

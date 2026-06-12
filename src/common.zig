@@ -1,4 +1,5 @@
 const std = @import("std");
+const unicode = @import("unicode.zig");
 
 /// Character type used throughout the library
 pub const Char = u8;
@@ -64,6 +65,24 @@ pub const CompileFlags = packed struct {
     /// The `v` (unicodeSets) flag: character classes use set notation.
     unicode_sets: bool = false,
 };
+
+pub fn isEcmaLineTerminator(cp: unicode.Codepoint) bool {
+    return cp == '\n' or cp == '\r' or cp == 0x2028 or cp == 0x2029;
+}
+
+pub fn dotMatchLen(input: []const u8, pos: usize, flags: CompileFlags) ?usize {
+    if (pos >= input.len) return null;
+
+    const dec = unicode.decodeUtf8Lenient(input[pos..]) orelse {
+        const b = input[pos];
+        if (!flags.dot_all and (b == '\n' or b == '\r')) return null;
+        return 1;
+    };
+
+    if (!flags.dot_all and isEcmaLineTerminator(dec.codepoint)) return null;
+    if (!flags.unicode and dec.codepoint > 0xFFFF) return null;
+    return dec.len;
+}
 
 /// Span in the source pattern (for error reporting)
 pub const Span = struct {

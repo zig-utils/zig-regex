@@ -1532,8 +1532,13 @@ fn requiresBacktracking(node: *ast.Node) bool {
         // which only the backtracking engine honors.
         .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child),
 
+        // `.` consumes a decoded JS character (and respects Unicode vs
+        // non-Unicode astral semantics), which the byte-oriented NFA/DFA paths
+        // cannot model.
+        .any => return true,
+
         // These don't require backtracking
-        .literal, .any, .char_class, .anchor, .empty => return false,
+        .literal, .char_class, .anchor, .empty => return false,
     }
 }
 

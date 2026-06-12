@@ -153,19 +153,37 @@ test "UTF-8: non-capturing groups with Unicode" {
     }
 }
 
-// Document current limitations
-test "UTF-8: known limitation - dot is byte-based" {
+test "UTF-8: dot consumes JavaScript characters" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "^.$");
     defer regex.deinit();
 
-    // Single ASCII character
     try std.testing.expect(try regex.isMatch("a"));
+    try std.testing.expect(try regex.isMatch("é"));
+    try std.testing.expect(try regex.isMatch("你"));
+    try std.testing.expect(!try regex.isMatch("𐌀"));
 
-    // Multi-byte character - currently fails because . matches one byte
-    // In Unicode mode, . should match the entire character
-    try std.testing.expect(!try regex.isMatch("é")); // é is 2 bytes
-    try std.testing.expect(!try regex.isMatch("你")); // 你 is 3 bytes
+    var unicode_regex = try Regex.compileWithFlags(allocator, "^.$", .{ .unicode = true });
+    defer unicode_regex.deinit();
+    try std.testing.expect(try unicode_regex.isMatch("𐌀"));
+}
+
+test "UTF-8: dot rejects ECMAScript line terminators without dotAll" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "^.$");
+    defer regex.deinit();
+
+    try std.testing.expect(!try regex.isMatch("\n"));
+    try std.testing.expect(!try regex.isMatch("\r"));
+    try std.testing.expect(!try regex.isMatch("\u{2028}"));
+    try std.testing.expect(!try regex.isMatch("\u{2029}"));
+
+    var dot_all = try Regex.compileWithFlags(allocator, "^.$", .{ .dot_all = true });
+    defer dot_all.deinit();
+    try std.testing.expect(try dot_all.isMatch("\n"));
+    try std.testing.expect(try dot_all.isMatch("\r"));
+    try std.testing.expect(try dot_all.isMatch("\u{2028}"));
+    try std.testing.expect(try dot_all.isMatch("\u{2029}"));
 }
 
 test "UTF-8: known limitation - \\w is ASCII-only" {
