@@ -1871,6 +1871,13 @@ test "out-of-order ASCII character-class range is rejected" {
     try std.testing.expect(try mb.isMatch("\u{2005}"));
 }
 
+test "unicode surrogate escapes compile to WTF-8 code units" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "\\uDF06");
+    defer regex.deinit();
+    try std.testing.expect(try regex.isMatch(&.{ 0xED, 0xBC, 0x86 }));
+}
+
 test "capture spans give per-group byte offsets" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "(\\d+)-(\\d+)");

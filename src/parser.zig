@@ -275,11 +275,19 @@ pub const Lexer = struct {
         };
     }
 
-    /// Encode `cp` to UTF-8, return its first byte as a literal token, and queue
-    /// any continuation bytes (drained by subsequent `next()` calls).
+    /// Encode `cp` to UTF-8/WTF-8, return its first byte as a literal token, and
+    /// queue any continuation bytes (drained by subsequent `next()` calls).
     fn emitCodepoint(self: *Lexer, cp: u21) Token {
         var buf: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(cp, &buf) catch return self.makeToken(.literal, 'u');
+        const n = std.unicode.utf8Encode(cp, &buf) catch n: {
+            if (cp >= 0xD800 and cp <= 0xDFFF) {
+                buf[0] = @intCast(0xE0 | (cp >> 12));
+                buf[1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+                buf[2] = @intCast(0x80 | (cp & 0x3F));
+                break :n 3;
+            }
+            return self.makeToken(.literal, 'u');
+        };
         self.pending_len = 0;
         self.pending_pos = 0;
         var i: usize = 1;
