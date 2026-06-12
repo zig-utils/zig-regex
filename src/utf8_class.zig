@@ -76,8 +76,7 @@ fn lessThanRange(_: void, a: CpRange, b: CpRange) bool {
     return a.lo < b.lo;
 }
 
-/// Sort + merge overlapping/adjacent ranges and drop the surrogate gap
-/// (UTF-8 never encodes lone surrogates). Returns a clean, ascending list.
+/// Sort + merge overlapping/adjacent ranges. Returns a clean, ascending list.
 fn normalize(allocator: std.mem.Allocator, ranges: []CpRange) ![]CpRange {
     var out: std.ArrayList(CpRange) = .empty;
     errdefer out.deinit(allocator);
@@ -90,40 +89,33 @@ fn normalize(allocator: std.mem.Allocator, ranges: []CpRange) ![]CpRange {
         if (r.lo <= cur.hi + 1) {
             if (r.hi > cur.hi) cur.hi = r.hi;
         } else {
-            try appendNonSurrogate(allocator, &out, cur);
+            try appendClamped(allocator, &out, cur);
             cur = r;
         }
     }
-    try appendNonSurrogate(allocator, &out, cur);
+    try appendClamped(allocator, &out, cur);
     return out.toOwnedSlice(allocator);
 }
 
-/// Append `r` clamped to valid scalar space, splitting out the surrogate hole.
-fn appendNonSurrogate(allocator: std.mem.Allocator, out: *std.ArrayList(CpRange), r: CpRange) !void {
-    var lo = r.lo;
+/// Append `r` clamped to the JS code-point space this engine can represent.
+fn appendClamped(allocator: std.mem.Allocator, out: *std.ArrayList(CpRange), r: CpRange) !void {
+    const lo = r.lo;
     var hi = r.hi;
     if (hi > MAX_CP) hi = MAX_CP;
     if (lo > hi) return;
-    if (lo <= SURROGATE_HI and hi >= SURROGATE_LO) {
-        if (lo < SURROGATE_LO) try out.append(allocator, .{ .lo = lo, .hi = SURROGATE_LO - 1 });
-        if (hi > SURROGATE_HI) {
-            lo = SURROGATE_HI + 1;
-        } else return;
-    }
-    if (lo <= hi) try out.append(allocator, .{ .lo = lo, .hi = hi });
+    try out.append(allocator, .{ .lo = lo, .hi = hi });
 }
 
-/// Complement an ascending, normalized range list over the scalar space
-/// (surrogates already excluded from the result).
+/// Complement an ascending, normalized range list over the JS code-point space.
 fn complement(allocator: std.mem.Allocator, ranges: []const CpRange) ![]CpRange {
     var out: std.ArrayList(CpRange) = .empty;
     errdefer out.deinit(allocator);
     var next: u21 = 0;
     for (ranges) |r| {
-        if (r.lo > next) try appendNonSurrogate(allocator, &out, .{ .lo = next, .hi = r.lo - 1 });
+        if (r.lo > next) try appendClamped(allocator, &out, .{ .lo = next, .hi = r.lo - 1 });
         if (r.hi >= next) next = r.hi + 1;
     }
-    if (next <= MAX_CP) try appendNonSurrogate(allocator, &out, .{ .lo = next, .hi = MAX_CP });
+    if (next <= MAX_CP) try appendClamped(allocator, &out, .{ .lo = next, .hi = MAX_CP });
     return out.toOwnedSlice(allocator);
 }
 
@@ -151,6 +143,13 @@ inline fn utf8Len(cp: u21) u3 {
 /// rectangle of byte ranges.
 fn encodeRange(allocator: std.mem.Allocator, out: *std.ArrayList(Utf8Seq), lo: u21, hi: u21) !void {
     if (lo > hi) return;
+
+    if (lo <= SURROGATE_HI and hi >= SURROGATE_LO) {
+        if (lo < SURROGATE_LO) try encodeRange(allocator, out, lo, SURROGATE_LO - 1);
+        try encodeSurrogateRange(allocator, out, @max(lo, SURROGATE_LO), @min(hi, SURROGATE_HI));
+        if (hi > SURROGATE_HI) try encodeRange(allocator, out, SURROGATE_HI + 1, hi);
+        return;
+    }
 
     // Split across UTF-8 length boundaries first.
     for (MAX_FOR_LEN) |max| {
@@ -190,6 +189,39 @@ fn encodeRange(allocator: std.mem.Allocator, out: *std.ArrayList(Utf8Seq), lo: u
     try out.append(allocator, seq);
 }
 
+/// Encode JS lone surrogates as the WTF-8 byte range accepted by the decoder.
+fn encodeSurrogateRange(allocator: std.mem.Allocator, out: *std.ArrayList(Utf8Seq), lo: u21, hi: u21) !void {
+    if (lo > hi) return;
+
+    var lb: [3]u8 = undefined;
+    var hb: [3]u8 = undefined;
+    encodeWtf8Surrogate(lo, &lb);
+    encodeWtf8Surrogate(hi, &hb);
+
+    if (lb[1] != hb[1]) {
+        const lo_group_end = (lo & ~@as(u21, 0x3F)) | 0x3F;
+        try encodeSurrogateRange(allocator, out, lo, lo_group_end);
+        try encodeSurrogateRange(allocator, out, lo_group_end + 1, hi);
+        return;
+    }
+
+    try out.append(allocator, .{
+        .len = 3,
+        .ranges = .{
+            .{ .lo = 0xED, .hi = 0xED },
+            .{ .lo = lb[1], .hi = hb[1] },
+            .{ .lo = lb[2], .hi = hb[2] },
+            undefined,
+        },
+    });
+}
+
+fn encodeWtf8Surrogate(cp: u21, out: *[3]u8) void {
+    out[0] = 0xED;
+    out[1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = @intCast(0x80 | (cp & 0x3F));
+}
+
 /// Decompose an ascending code-point range list into UTF-8 byte-range
 /// sequences. Caller owns the returned slice.
 pub fn toUtf8Sequences(allocator: std.mem.Allocator, ranges: []const CpRange) ![]Utf8Seq {
@@ -208,7 +240,10 @@ const testing = std.testing;
 /// Reference: does any emitted sequence accept the UTF-8 encoding of `cp`?
 fn seqsMatch(seqs: []const Utf8Seq, cp: u21) bool {
     var buf: [4]u8 = undefined;
-    const n = unicode.encodeUtf8(cp, &buf) catch return false;
+    const n = if (cp >= SURROGATE_LO and cp <= SURROGATE_HI) n: {
+        encodeWtf8Surrogate(cp, buf[0..3]);
+        break :n 3;
+    } else unicode.encodeUtf8(cp, &buf) catch return false;
     for (seqs) |s| {
         if (s.len != n) continue;
         var ok = true;
@@ -248,7 +283,7 @@ test "utf8 sequences cover ascii and multibyte ranges exactly" {
     }
 }
 
-test "complement excludes surrogates and the positive set" {
+test "complement preserves surrogates and excludes the positive set" {
     const a = testing.allocator;
     var raw = [_]CpRange{.{ .lo = 0x20, .hi = 0x20 }};
     const pos = try normalize(a, &raw);
@@ -263,7 +298,21 @@ test "complement excludes surrogates and the positive set" {
     try testing.expect(seqsMatch(seqs, 'a')); // letters included
     try testing.expect(seqsMatch(seqs, 0x00E9)); // é included
     var sc: u21 = SURROGATE_LO;
-    while (sc <= SURROGATE_HI) : (sc += 1) try testing.expect(!seqsMatch(seqs, sc));
+    while (sc <= SURROGATE_HI) : (sc += 1) try testing.expect(seqsMatch(seqs, sc));
+}
+
+test "surrogate ranges lower to wtf8 byte sequences" {
+    const a = testing.allocator;
+    const ranges = [_]CpRange{.{ .lo = SURROGATE_LO, .hi = SURROGATE_HI }};
+    const seqs = try toUtf8Sequences(a, &ranges);
+    defer a.free(seqs);
+
+    try testing.expect(!seqsMatch(seqs, SURROGATE_LO - 1));
+    try testing.expect(seqsMatch(seqs, SURROGATE_LO));
+    try testing.expect(seqsMatch(seqs, 0xDBFF));
+    try testing.expect(seqsMatch(seqs, 0xDC00));
+    try testing.expect(seqsMatch(seqs, SURROGATE_HI));
+    try testing.expect(!seqsMatch(seqs, SURROGATE_HI + 1));
 }
 
 test "ranges merge and normalize" {
