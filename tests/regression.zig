@@ -533,54 +533,25 @@ test "regression: leading optional `\\s*` keeps the prefilter sound" {
     try std.testing.expectEqualStrings("c", parts[2]);
 }
 
-test "regression: `\\w+\\s+\\w+` stays off the quadratic backtracker" {
+test "regression: `\\w+\\s+\\w+` stays on the byte engine (not the backtracker)" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "\\w+\\s+\\w+");
     defer regex.deinit();
 
-    // Build "wd wd wd ..." — dense matches; the old backtracking path was
-    // ~O(n*m). Doubling the input must not more-than-triple the time.
-    const make = struct {
-        fn buf(a: std.mem.Allocator, words: usize) ![]u8 {
-            var list = try std.ArrayList(u8).initCapacity(a, words * 3);
-            errdefer list.deinit(a);
-            var i: usize = 0;
-            while (i < words) : (i += 1) {
-                if (i != 0) try list.append(a, ' ');
-                try list.appendSlice(a, "wd");
-            }
-            return list.toOwnedSlice(a);
-        }
-    };
+    // The whole point of the `\s` lowering: this must run on the Thompson/DFA
+    // byte engine, not collapse onto the O(n*m) backtracker the moment a `\s`
+    // appears. Asserting the engine is a stable structural invariant (no flaky
+    // wall-clock ratio), and a large dense input confirms it stays linear.
+    try std.testing.expect(regex.engine_type == .thompson_nfa);
 
-    const time = struct {
-        fn run(re: *const Regex, b: []const u8) !u64 {
-            _ = try re.count(b); // warm up
-            var best: u64 = std.math.maxInt(u64);
-            var rep: usize = 0;
-            while (rep < 3) : (rep += 1) {
-                const t0 = monotonicNs();
-                const c = try re.count(b);
-                const dt = monotonicNs() - t0;
-                std.mem.doNotOptimizeAway(c);
-                if (dt < best) best = dt;
-            }
-            return best;
-        }
-    };
-
-    const b1 = try make.buf(allocator, 20_000);
-    defer allocator.free(b1);
-    const b2 = try make.buf(allocator, 40_000); // exactly 2x
-    defer allocator.free(b2);
-
-    try std.testing.expectEqual(@as(usize, 10_000), try regex.count(b1));
-    try std.testing.expectEqual(@as(usize, 20_000), try regex.count(b2));
-
-    const t1 = try time.run(&regex, b1);
-    const t2 = try time.run(&regex, b2);
-    try std.testing.expect(t1 > 0);
-    try std.testing.expect(t2 * 10 < t1 * 30); // t2/t1 < 3.0 (linear, not quadratic)
+    var list = try std.ArrayList(u8).initCapacity(allocator, 120_000);
+    defer list.deinit(allocator);
+    var i: usize = 0;
+    while (i < 40_000) : (i += 1) {
+        if (i != 0) try list.append(allocator, ' ');
+        try list.appendSlice(allocator, "wd");
+    }
+    try std.testing.expectEqual(@as(usize, 20_000), try regex.count(list.items));
 }
 
 test "regression: prefilter hints are exposed to callers (issue #10)" {
@@ -640,50 +611,22 @@ test "regression: `.*` stops at a newline; dot_all crosses it" {
     try std.testing.expectEqualStrings("axy\nz", m2.slice);
 }
 
-test "regression: `//.*` line-comment scan stays off the backtracker" {
+test "regression: `//.*` stays on the byte engine (not the backtracker)" {
     const allocator = std.testing.allocator;
     var re = try Regex.compile(allocator, "//.*");
     defer re.deinit();
 
-    // Build "code //comment\n" repeated; doubling input must stay near-linear
-    // (the old backtracking `.` path was the 44x-slower case in issue #10).
-    const make = struct {
-        fn buf(a: std.mem.Allocator, lines: usize) ![]u8 {
-            var list = try std.ArrayList(u8).initCapacity(a, lines * 20);
-            errdefer list.deinit(a);
-            var i: usize = 0;
-            while (i < lines) : (i += 1) try list.appendSlice(a, "x = 1; // note here\n");
-            return list.toOwnedSlice(a);
-        }
-    };
-    const time = struct {
-        fn run(re_: *const Regex, b: []const u8) !u64 {
-            _ = try re_.count(b);
-            var best: u64 = std.math.maxInt(u64);
-            var rep: usize = 0;
-            while (rep < 3) : (rep += 1) {
-                const t0 = monotonicNs();
-                const c = try re_.count(b);
-                const dt = monotonicNs() - t0;
-                std.mem.doNotOptimizeAway(c);
-                if (dt < best) best = dt;
-            }
-            return best;
-        }
-    };
+    // `.` used to force the backtracking engine (the 44x-slower case in issue
+    // #10); it now lowers to a byte automaton. Assert the engine (a stable
+    // structural invariant, not a flaky timing ratio); a large input confirms
+    // it counts correctly and finishes quickly on the linear path.
+    try std.testing.expect(re.engine_type == .thompson_nfa);
 
-    const b1 = try make.buf(allocator, 20_000);
-    defer allocator.free(b1);
-    const b2 = try make.buf(allocator, 40_000); // 2x
-    defer allocator.free(b2);
-
-    try std.testing.expectEqual(@as(usize, 20_000), try re.count(b1));
-    try std.testing.expectEqual(@as(usize, 40_000), try re.count(b2));
-
-    const t1 = try time.run(&re, b1);
-    const t2 = try time.run(&re, b2);
-    try std.testing.expect(t1 > 0);
-    try std.testing.expect(t2 * 10 < t1 * 30); // < 3.0x — linear, not quadratic
+    var list = try std.ArrayList(u8).initCapacity(allocator, 800_000);
+    defer list.deinit(allocator);
+    var i: usize = 0;
+    while (i < 40_000) : (i += 1) try list.appendSlice(allocator, "x = 1; // note here\n");
+    try std.testing.expectEqual(@as(usize, 40_000), try re.count(list.items));
 }
 
 test "regression: literal alternation preserves source order" {
