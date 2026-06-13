@@ -240,10 +240,10 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchConcat(self: *BacktrackEngine, concat: ast.Node.Concat, pos: usize) ?usize {
-        const left_has_quant = self.hasQuantifiers(concat.left);
-        const right_has_quant = self.hasQuantifiers(concat.right);
+        const left_has_choices = self.hasQuantifiers(concat.left) or self.hasAlternation(concat.left);
+        const right_has_choices = self.hasQuantifiers(concat.right) or self.hasAlternation(concat.right);
 
-        if (left_has_quant or right_has_quant) {
+        if (left_has_choices or right_has_choices) {
             // Save captures before collecting positions (collection may corrupt them)
             const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
             defer self.allocator.free(clean_captures);
@@ -253,7 +253,7 @@ pub const BacktrackEngine = struct {
             var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
             defer left_positions.deinit(self.allocator);
 
-            if (left_has_quant) {
+            if (left_has_choices) {
                 self.collectAllMatches(concat.left, pos, &left_positions) catch return null;
             } else {
                 if (self.matchNode(concat.left, pos)) |end| {
@@ -270,7 +270,7 @@ pub const BacktrackEngine = struct {
 
                 // Re-match left to this specific end position to set captures correctly
                 if (left_has_groups) {
-                    if (left_has_quant) {
+                    if (left_has_choices) {
                         _ = self.matchNodeConstrained(concat.left, pos, left_end);
                     } else {
                         _ = self.matchNode(concat.left, pos);
@@ -282,8 +282,8 @@ pub const BacktrackEngine = struct {
                 defer self.allocator.free(saved_captures);
                 @memcpy(saved_captures, self.captures);
 
-                if (right_has_quant) {
-                    // Right side also has quantifiers - collect all right positions
+                if (right_has_choices) {
+                    // Right side also has choices - collect all right positions
                     var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch continue;
                     defer right_positions.deinit(self.allocator);
 
@@ -344,17 +344,17 @@ pub const BacktrackEngine = struct {
             },
             .concat => {
                 const c = node.data.concat;
-                if (!self.hasQuantifiers(c.left)) {
+                if (!self.hasQuantifiers(c.left) and !self.hasAlternation(c.left)) {
                     // Left is deterministic, match it and constrain right
                     if (self.matchNode(c.left, pos)) |split| {
                         return self.matchNodeConstrained(c.right, split, target_end);
                     }
                     return false;
                 } else {
-                    // Left has quantifiers: enumerate its endpoints in the
-                    // quantifier's own greedy/lazy order. Raw ascending splits
+                    // Left has quantifiers or ordered alternatives: enumerate
+                    // endpoints in the subtree's own order. Raw ascending splits
                     // choose the shortest valid capture and break ECMAScript
-                    // backreference backtracking semantics.
+                    // backreference and alternation backtracking semantics.
                     const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
                     defer self.allocator.free(base_captures);
                     @memcpy(base_captures, self.captures);
@@ -368,7 +368,7 @@ pub const BacktrackEngine = struct {
                         @memcpy(self.captures, base_captures);
                         if (!self.matchNodeConstrained(c.left, pos, split)) continue;
 
-                        if (self.hasQuantifiers(c.right)) {
+                        if (self.hasQuantifiers(c.right) or self.hasAlternation(c.right)) {
                             if (self.matchNodeConstrained(c.right, split, target_end)) return true;
                         } else if (self.matchNode(c.right, split)) |right_end| {
                             if (right_end == target_end) return true;
@@ -460,6 +460,21 @@ pub const BacktrackEngine = struct {
             .concat => self.hasQuantifiers(node.data.concat.left) or self.hasQuantifiers(node.data.concat.right),
             .alternation => self.hasQuantifiers(node.data.alternation.left) or self.hasQuantifiers(node.data.alternation.right),
             .group => self.hasQuantifiers(node.data.group.child),
+            else => false,
+        };
+    }
+
+    fn hasAlternation(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .alternation => true,
+            .concat => self.hasAlternation(node.data.concat.left) or self.hasAlternation(node.data.concat.right),
+            .group => self.hasAlternation(node.data.group.child),
+            .star => self.hasAlternation(node.data.star.child),
+            .plus => self.hasAlternation(node.data.plus.child),
+            .optional => self.hasAlternation(node.data.optional.child),
+            .repeat => self.hasAlternation(node.data.repeat.child),
+            .lookahead => self.hasAlternation(node.data.lookahead.child),
+            .lookbehind => self.hasAlternation(node.data.lookbehind.child),
             else => false,
         };
     }
@@ -566,15 +581,15 @@ pub const BacktrackEngine = struct {
             .concat => {
                 // Recursively collect all possible endings for concat nodes
                 const c = node.data.concat;
-                const left_has_quant = self.hasQuantifiers(c.left);
-                const right_has_quant = self.hasQuantifiers(c.right);
+                const left_has_choices = self.hasQuantifiers(c.left) or self.hasAlternation(c.left);
+                const right_has_choices = self.hasQuantifiers(c.right) or self.hasAlternation(c.right);
 
-                if (left_has_quant or right_has_quant) {
+                if (left_has_choices or right_has_choices) {
                     // Collect all possible left-side endings
                     var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
                     defer left_positions.deinit(self.allocator);
 
-                    if (left_has_quant) {
+                    if (left_has_choices) {
                         try self.collectAllMatches(c.left, pos, &left_positions);
                     } else {
                         if (self.matchNode(c.left, pos)) |end| {
@@ -593,14 +608,14 @@ pub const BacktrackEngine = struct {
                         // Set captures correctly for this left end position (only
                         // needed when the left side has groups — else pure waste).
                         if (left_has_groups) {
-                            if (left_has_quant) {
+                            if (left_has_choices) {
                                 _ = self.matchNodeConstrained(c.left, pos, left_end);
                             } else {
                                 _ = self.matchNode(c.left, pos);
                             }
                         }
 
-                        if (right_has_quant) {
+                        if (right_has_choices) {
                             try self.collectAllMatches(c.right, left_end, positions);
                         } else {
                             if (self.matchNode(c.right, left_end)) |end| {
@@ -622,7 +637,7 @@ pub const BacktrackEngine = struct {
                 // NOTE: Don't set captures here - they'll be set by matchNodeConstrained
                 // when matchConcat picks a specific position
                 const group = node.data.group;
-                if (self.hasQuantifiers(group.child)) {
+                if (self.hasQuantifiers(group.child) or self.hasAlternation(group.child)) {
                     try self.collectAllMatches(group.child, pos, positions);
                 } else {
                     if (self.matchNode(node, pos)) |end| {
@@ -1059,11 +1074,12 @@ pub const BacktrackEngine = struct {
 
     fn matchNamedBackreference(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize) ?usize {
         var found_name = false;
-        if (self.matchNamedBackreferenceParticipating(node, name, pos, &found_name)) |end| return end;
-        return if (found_name) pos else null;
+        var found_participating = false;
+        if (self.matchNamedBackreferenceParticipating(node, name, pos, &found_name, &found_participating)) |end| return end;
+        return if (found_name and !found_participating) pos else null;
     }
 
-    fn matchNamedBackreferenceParticipating(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize, found_name: *bool) ?usize {
+    fn matchNamedBackreferenceParticipating(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize, found_name: *bool, found_participating: *bool) ?usize {
         switch (node.node_type) {
             .group => {
                 const group = node.data.group;
@@ -1071,26 +1087,28 @@ pub const BacktrackEngine = struct {
                     if (std.mem.eql(u8, group_name, name)) {
                         found_name.* = true;
                         if (group.capture_index) |index| {
+                            if (index > 0 and index <= self.captures.len and self.captures[index - 1].matched)
+                                found_participating.* = true;
                             if (self.matchPresentCaptureBackreference(index, pos)) |end| return end;
                         }
                     }
                 }
-                return self.matchNamedBackreferenceParticipating(group.child, name, pos, found_name);
+                return self.matchNamedBackreferenceParticipating(group.child, name, pos, found_name, found_participating);
             },
             .concat => {
-                if (self.matchNamedBackreferenceParticipating(node.data.concat.left, name, pos, found_name)) |end| return end;
-                return self.matchNamedBackreferenceParticipating(node.data.concat.right, name, pos, found_name);
+                if (self.matchNamedBackreferenceParticipating(node.data.concat.left, name, pos, found_name, found_participating)) |end| return end;
+                return self.matchNamedBackreferenceParticipating(node.data.concat.right, name, pos, found_name, found_participating);
             },
             .alternation => {
-                if (self.matchNamedBackreferenceParticipating(node.data.alternation.left, name, pos, found_name)) |end| return end;
-                return self.matchNamedBackreferenceParticipating(node.data.alternation.right, name, pos, found_name);
+                if (self.matchNamedBackreferenceParticipating(node.data.alternation.left, name, pos, found_name, found_participating)) |end| return end;
+                return self.matchNamedBackreferenceParticipating(node.data.alternation.right, name, pos, found_name, found_participating);
             },
-            .star => return self.matchNamedBackreferenceParticipating(node.data.star.child, name, pos, found_name),
-            .plus => return self.matchNamedBackreferenceParticipating(node.data.plus.child, name, pos, found_name),
-            .optional => return self.matchNamedBackreferenceParticipating(node.data.optional.child, name, pos, found_name),
-            .repeat => return self.matchNamedBackreferenceParticipating(node.data.repeat.child, name, pos, found_name),
-            .lookahead => return self.matchNamedBackreferenceParticipating(node.data.lookahead.child, name, pos, found_name),
-            .lookbehind => return self.matchNamedBackreferenceParticipating(node.data.lookbehind.child, name, pos, found_name),
+            .star => return self.matchNamedBackreferenceParticipating(node.data.star.child, name, pos, found_name, found_participating),
+            .plus => return self.matchNamedBackreferenceParticipating(node.data.plus.child, name, pos, found_name, found_participating),
+            .optional => return self.matchNamedBackreferenceParticipating(node.data.optional.child, name, pos, found_name, found_participating),
+            .repeat => return self.matchNamedBackreferenceParticipating(node.data.repeat.child, name, pos, found_name, found_participating),
+            .lookahead => return self.matchNamedBackreferenceParticipating(node.data.lookahead.child, name, pos, found_name, found_participating),
+            .lookbehind => return self.matchNamedBackreferenceParticipating(node.data.lookbehind.child, name, pos, found_name, found_participating),
             else => return null,
         }
     }

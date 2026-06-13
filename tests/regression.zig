@@ -757,3 +757,34 @@ test "regression: unicode dot captures full code points in one-pass-shaped patte
         return error.TestExpectedMatch;
     }
 }
+
+test "regression: duplicate named captures backtrack alternatives before named backref" {
+    const allocator = std.testing.allocator;
+
+    var pair = try Regex.compile(allocator, "(?:(?<x>a)|(?<x>b))\\k<x>");
+    defer pair.deinit();
+    if (try pair.find("aa")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+    } else return error.TestExpectedMatch;
+    if (try pair.find("bb")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+    } else return error.TestExpectedMatch;
+    try std.testing.expect((try pair.find("abab")) == null);
+    try std.testing.expect((try pair.find("cdef")) == null);
+
+    var repeated = try Regex.compile(allocator, "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}");
+    defer repeated.deinit();
+    if (try repeated.find("aabb")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("aabb", match.slice);
+        try std.testing.expect(!match.captures_present[0]);
+        try std.testing.expect(match.captures_present[1]);
+        try std.testing.expectEqualStrings("b", match.captures[1]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+    try std.testing.expect((try repeated.find("abab")) == null);
+}
