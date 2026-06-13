@@ -893,3 +893,38 @@ test "regression: unicode surrogate escape pairs match astral input" {
     defer codepoint.deinit();
     try std.testing.expect(try codepoint.isMatch("\u{1D306}"));
 }
+
+test "regression: unicode ignore-case word characters include canonicalized ascii" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true };
+
+    var word = try Regex.compileWithFlags(allocator, "(?i:\\w)", flags);
+    defer word.deinit();
+    try std.testing.expect(try word.isMatch("\u{017F}"));
+    try std.testing.expect(try word.isMatch("\u{212A}"));
+
+    var non_word = try Regex.compileWithFlags(allocator, "(?i:\\W)", flags);
+    defer non_word.deinit();
+    try std.testing.expect(!try non_word.isMatch("\u{017F}"));
+    try std.testing.expect(!try non_word.isMatch("\u{212A}"));
+
+    var boundary = try Regex.compileWithFlags(allocator, "(?i:\\b)", flags);
+    defer boundary.deinit();
+    try std.testing.expect(try boundary.isMatch("\u{017F}"));
+    try std.testing.expect(try boundary.isMatch("\u{212A}"));
+
+    var non_boundary = try Regex.compileWithFlags(allocator, "(?i:Z\\B)", flags);
+    defer non_boundary.deinit();
+    try std.testing.expect(try non_boundary.isMatch("Z\u{017F}"));
+    try std.testing.expect(try non_boundary.isMatch("Z\u{212A}"));
+
+    var upper_prop = try Regex.compileWithFlags(allocator, "(?i:\\p{Lu})", flags);
+    defer upper_prop.deinit();
+    try std.testing.expect(try upper_prop.isMatch("A"));
+    try std.testing.expect(try upper_prop.isMatch("a"));
+
+    var not_upper_prop = try Regex.compileWithFlags(allocator, "(?i:\\P{Lu})", flags);
+    defer not_upper_prop.deinit();
+    try std.testing.expect(try not_upper_prop.isMatch("A"));
+    try std.testing.expect(try not_upper_prop.isMatch("a"));
+}

@@ -217,8 +217,7 @@ pub const BacktrackEngine = struct {
     fn matchUnicodeProperty(self: *BacktrackEngine, up: ast.Node.UnicodeProp, pos: usize) ?usize {
         if (pos >= self.input.len) return null;
         const dec = unicode_mod.decodeUtf8Lenient(self.input[pos..]) orelse return null;
-        const matched = unicode_mod.matchesSpec(dec.codepoint, up.spec);
-        if (matched == up.negated) return null;
+        if (!self.matchesUnicodeProperty(up, dec.codepoint)) return null;
         return pos + dec.len;
     }
 
@@ -896,6 +895,13 @@ pub const BacktrackEngine = struct {
 
     fn matchCharClass(self: *BacktrackEngine, char_class: common.CharClass, pos: usize) ?usize {
         if (pos >= self.input.len) return null;
+        if (self.flags.unicode and isUtf8Continuation(self.input[pos])) return null;
+
+        if (self.flags.unicode and self.flags.case_insensitive and isAsciiWordClass(char_class)) {
+            const dec = unicode_mod.decodeUtf8Lenient(self.input[pos..]) orelse return null;
+            const word = self.isEcmaWordCodepoint(dec.codepoint);
+            return if (word != char_class.negated) pos + dec.len else null;
+        }
 
         const c = self.input[pos];
         const matches = if (self.flags.case_insensitive)
@@ -965,9 +971,35 @@ pub const BacktrackEngine = struct {
     }
 
     fn isWordBoundary(self: *BacktrackEngine, pos: usize) bool {
-        const before_is_word = if (pos > 0) isWordChar(self.input[pos - 1]) else false;
-        const after_is_word = if (pos < self.input.len) isWordChar(self.input[pos]) else false;
+        const before_is_word = if (self.flags.unicode and self.flags.case_insensitive)
+            self.isEcmaWordBefore(pos)
+        else if (pos > 0) isWordChar(self.input[pos - 1]) else false;
+        const after_is_word = if (self.flags.unicode and self.flags.case_insensitive)
+            self.isEcmaWordAfter(pos)
+        else if (pos < self.input.len) isWordChar(self.input[pos]) else false;
         return before_is_word != after_is_word;
+    }
+
+    fn isEcmaWordBefore(self: *BacktrackEngine, pos: usize) bool {
+        const start = self.previousCodepointStart(pos) orelse return false;
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[start..]) orelse return false;
+        if (start + dec.len != pos) return false;
+        return self.isEcmaWordCodepoint(dec.codepoint);
+    }
+
+    fn isEcmaWordAfter(self: *BacktrackEngine, pos: usize) bool {
+        if (pos >= self.input.len) return false;
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[pos..]) orelse return false;
+        return self.isEcmaWordCodepoint(dec.codepoint);
+    }
+
+    fn isEcmaWordCodepoint(_: *BacktrackEngine, cp: u21) bool {
+        return (cp >= 'a' and cp <= 'z') or
+            (cp >= 'A' and cp <= 'Z') or
+            (cp >= '0' and cp <= '9') or
+            cp == '_' or
+            cp == 0x017F or
+            cp == 0x212A;
     }
 
     fn isWordChar(c: u8) bool {
@@ -975,6 +1007,10 @@ pub const BacktrackEngine = struct {
             (c >= 'A' and c <= 'Z') or
             (c >= '0' and c <= '9') or
             c == '_';
+    }
+
+    fn isUtf8Continuation(c: u8) bool {
+        return (c & 0xC0) == 0x80;
     }
 
     fn matchLookahead(self: *BacktrackEngine, assertion: ast.Node.Assertion, pos: usize) ?usize {
@@ -1397,6 +1433,15 @@ pub const BacktrackEngine = struct {
 
     fn matchReverseCharClass(self: *BacktrackEngine, char_class: common.CharClass, pos: usize) ?usize {
         if (pos == 0) return null;
+
+        if (self.flags.unicode and self.flags.case_insensitive and isAsciiWordClass(char_class)) {
+            const start = self.previousCodepointStart(pos) orelse return null;
+            const dec = unicode_mod.decodeUtf8Lenient(self.input[start..]) orelse return null;
+            if (start + dec.len != pos) return null;
+            const word = self.isEcmaWordCodepoint(dec.codepoint);
+            return if (word != char_class.negated) start else null;
+        }
+
         const start = pos - 1;
         const c = self.input[start];
         const matches = if (self.flags.case_insensitive)
@@ -1410,9 +1455,35 @@ pub const BacktrackEngine = struct {
         const start = self.previousCodepointStart(pos) orelse return null;
         const dec = unicode_mod.decodeUtf8Lenient(self.input[start..]) orelse return null;
         if (start + dec.len != pos) return null;
-        const matched = unicode_mod.matchesSpec(dec.codepoint, up.spec);
-        if (matched == up.negated) return null;
+        if (!self.matchesUnicodeProperty(up, dec.codepoint)) return null;
         return start;
+    }
+
+    fn matchesUnicodeProperty(self: *BacktrackEngine, up: ast.Node.UnicodeProp, cp: u21) bool {
+        if (!self.flags.case_insensitive) {
+            const matched = unicode_mod.matchesSpec(cp, up.spec);
+            return matched != up.negated;
+        }
+
+        if (up.negated) {
+            return !unicode_mod.matchesSpec(canonicalizeForPropertyComplement(cp), up.spec);
+        }
+
+        if (unicode_mod.matchesSpec(cp, up.spec)) return true;
+        return unicode_mod.matchesSpec(asciiSwapCase(cp), up.spec);
+    }
+
+    fn asciiSwapCase(cp: u21) u21 {
+        if (cp >= 'a' and cp <= 'z') return cp - ('a' - 'A');
+        if (cp >= 'A' and cp <= 'Z') return cp + ('a' - 'A');
+        return cp;
+    }
+
+    fn canonicalizeForPropertyComplement(cp: u21) u21 {
+        if (cp >= 'A' and cp <= 'Z') return cp + ('a' - 'A');
+        if (cp == 0x212A) return 'k';
+        if (cp == 0x017F) return 's';
+        return cp;
     }
 
     fn matchReverseClassSet(self: *BacktrackEngine, set: *ast.Node.ClassSet, pos: usize) ?usize {
@@ -1499,6 +1570,15 @@ pub const BacktrackEngine = struct {
             .lookbehind => return self.matchNamedBackreferenceParticipatingReverse(node.data.lookbehind.child, name, pos, found_name, found_participating),
             else => return null,
         }
+    }
+
+    fn isAsciiWordClass(char_class: common.CharClass) bool {
+        const word = common.CharClasses.word;
+        if (char_class.ranges.len != word.ranges.len) return false;
+        for (char_class.ranges, word.ranges) |a, b| {
+            if (a.start != b.start or a.end != b.end) return false;
+        }
+        return true;
     }
 
     fn matchBackreference(self: *BacktrackEngine, backref: ast.Node.Backreference, pos: usize) ?usize {
