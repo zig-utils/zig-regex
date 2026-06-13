@@ -58,6 +58,7 @@ fn isStringPropertyName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Emoji_Keycap_Sequence") or
         std.mem.eql(u8, name, "RGI_Emoji_Tag_Sequence") or
         std.mem.eql(u8, name, "RGI_Emoji_Modifier_Sequence") or
+        std.mem.eql(u8, name, "RGI_Emoji_Flag_Sequence") or
         std.mem.eql(u8, name, "Basic_Emoji");
 }
 
@@ -1474,6 +1475,8 @@ pub const Parser = struct {
             try self.appendStringItem(&items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0077, 0xE006C, 0xE0073, 0xE007F });
         } else if (std.mem.eql(u8, name, "RGI_Emoji_Modifier_Sequence")) {
             try self.appendModifierSequenceStrings(&items);
+        } else if (std.mem.eql(u8, name, "RGI_Emoji_Flag_Sequence")) {
+            try self.appendFlagSequenceStrings(&items);
         } else if (std.mem.eql(u8, name, "Basic_Emoji")) {
             try self.appendBasicEmojiStrings(&items);
         } else {
@@ -1504,6 +1507,39 @@ pub const Parser = struct {
                     try self.appendStringItem(items, &.{ cp, modifier });
                 }
             }
+        }
+    }
+
+    fn appendFlagSequenceStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {
+        const regions = [_][2]u8{
+            .{ 'A', 'C' }, .{ 'A', 'D' }, .{ 'A', 'E' }, .{ 'A', 'F' }, .{ 'A', 'G' }, .{ 'A', 'I' }, .{ 'A', 'L' }, .{ 'A', 'M' }, .{ 'A', 'O' }, .{ 'A', 'Q' }, .{ 'A', 'R' }, .{ 'A', 'S' },
+            .{ 'A', 'T' }, .{ 'A', 'U' }, .{ 'A', 'W' }, .{ 'A', 'X' }, .{ 'A', 'Z' }, .{ 'B', 'A' }, .{ 'B', 'B' }, .{ 'B', 'D' }, .{ 'B', 'E' }, .{ 'B', 'F' }, .{ 'B', 'G' }, .{ 'B', 'H' },
+            .{ 'B', 'I' }, .{ 'B', 'J' }, .{ 'B', 'L' }, .{ 'B', 'M' }, .{ 'B', 'N' }, .{ 'B', 'O' }, .{ 'B', 'Q' }, .{ 'B', 'R' }, .{ 'B', 'S' }, .{ 'B', 'T' }, .{ 'B', 'V' }, .{ 'B', 'W' },
+            .{ 'B', 'Y' }, .{ 'B', 'Z' }, .{ 'C', 'A' }, .{ 'C', 'C' }, .{ 'C', 'D' }, .{ 'C', 'F' }, .{ 'C', 'G' }, .{ 'C', 'H' }, .{ 'C', 'I' }, .{ 'C', 'K' }, .{ 'C', 'L' }, .{ 'C', 'M' },
+            .{ 'C', 'N' }, .{ 'C', 'O' }, .{ 'C', 'P' }, .{ 'C', 'Q' }, .{ 'C', 'R' }, .{ 'C', 'U' }, .{ 'C', 'V' }, .{ 'C', 'W' }, .{ 'C', 'X' }, .{ 'C', 'Y' }, .{ 'C', 'Z' }, .{ 'D', 'E' },
+            .{ 'D', 'G' }, .{ 'D', 'J' }, .{ 'D', 'K' }, .{ 'D', 'M' }, .{ 'D', 'O' }, .{ 'D', 'Z' }, .{ 'E', 'A' }, .{ 'E', 'C' }, .{ 'E', 'E' }, .{ 'E', 'G' }, .{ 'E', 'H' }, .{ 'E', 'R' },
+            .{ 'E', 'S' }, .{ 'E', 'T' }, .{ 'E', 'U' }, .{ 'F', 'I' }, .{ 'F', 'J' }, .{ 'F', 'K' }, .{ 'F', 'M' }, .{ 'F', 'O' }, .{ 'F', 'R' }, .{ 'G', 'A' }, .{ 'G', 'B' }, .{ 'G', 'D' },
+            .{ 'G', 'E' }, .{ 'G', 'F' }, .{ 'G', 'G' }, .{ 'G', 'H' }, .{ 'G', 'I' }, .{ 'G', 'L' }, .{ 'G', 'M' }, .{ 'G', 'N' }, .{ 'G', 'P' }, .{ 'G', 'Q' }, .{ 'G', 'R' }, .{ 'G', 'S' },
+            .{ 'G', 'T' }, .{ 'G', 'U' }, .{ 'G', 'W' }, .{ 'G', 'Y' }, .{ 'H', 'K' }, .{ 'H', 'M' }, .{ 'H', 'N' }, .{ 'H', 'R' }, .{ 'H', 'T' }, .{ 'H', 'U' }, .{ 'I', 'C' }, .{ 'I', 'D' },
+            .{ 'I', 'E' }, .{ 'I', 'L' }, .{ 'I', 'M' }, .{ 'I', 'N' }, .{ 'I', 'O' }, .{ 'I', 'Q' }, .{ 'I', 'R' }, .{ 'I', 'S' }, .{ 'I', 'T' }, .{ 'J', 'E' }, .{ 'J', 'M' }, .{ 'J', 'O' },
+            .{ 'J', 'P' }, .{ 'K', 'E' }, .{ 'K', 'G' }, .{ 'K', 'H' }, .{ 'K', 'I' }, .{ 'K', 'M' }, .{ 'K', 'N' }, .{ 'K', 'P' }, .{ 'K', 'R' }, .{ 'K', 'W' }, .{ 'K', 'Y' }, .{ 'K', 'Z' },
+            .{ 'L', 'A' }, .{ 'L', 'B' }, .{ 'L', 'C' }, .{ 'L', 'I' }, .{ 'L', 'K' }, .{ 'L', 'R' }, .{ 'L', 'S' }, .{ 'L', 'T' }, .{ 'L', 'U' }, .{ 'L', 'V' }, .{ 'L', 'Y' }, .{ 'M', 'A' },
+            .{ 'M', 'C' }, .{ 'M', 'D' }, .{ 'M', 'E' }, .{ 'M', 'F' }, .{ 'M', 'G' }, .{ 'M', 'H' }, .{ 'M', 'K' }, .{ 'M', 'L' }, .{ 'M', 'M' }, .{ 'M', 'N' }, .{ 'M', 'O' }, .{ 'M', 'P' },
+            .{ 'M', 'Q' }, .{ 'M', 'R' }, .{ 'M', 'S' }, .{ 'M', 'T' }, .{ 'M', 'U' }, .{ 'M', 'V' }, .{ 'M', 'W' }, .{ 'M', 'X' }, .{ 'M', 'Y' }, .{ 'M', 'Z' }, .{ 'N', 'A' }, .{ 'N', 'C' },
+            .{ 'N', 'E' }, .{ 'N', 'F' }, .{ 'N', 'G' }, .{ 'N', 'I' }, .{ 'N', 'L' }, .{ 'N', 'O' }, .{ 'N', 'P' }, .{ 'N', 'R' }, .{ 'N', 'U' }, .{ 'N', 'Z' }, .{ 'O', 'M' }, .{ 'P', 'A' },
+            .{ 'P', 'E' }, .{ 'P', 'F' }, .{ 'P', 'G' }, .{ 'P', 'H' }, .{ 'P', 'K' }, .{ 'P', 'L' }, .{ 'P', 'M' }, .{ 'P', 'N' }, .{ 'P', 'R' }, .{ 'P', 'S' }, .{ 'P', 'T' }, .{ 'P', 'W' },
+            .{ 'P', 'Y' }, .{ 'Q', 'A' }, .{ 'R', 'E' }, .{ 'R', 'O' }, .{ 'R', 'S' }, .{ 'R', 'U' }, .{ 'R', 'W' }, .{ 'S', 'A' }, .{ 'S', 'B' }, .{ 'S', 'C' }, .{ 'S', 'D' }, .{ 'S', 'E' },
+            .{ 'S', 'G' }, .{ 'S', 'H' }, .{ 'S', 'I' }, .{ 'S', 'J' }, .{ 'S', 'K' }, .{ 'S', 'L' }, .{ 'S', 'M' }, .{ 'S', 'N' }, .{ 'S', 'O' }, .{ 'S', 'R' }, .{ 'S', 'S' }, .{ 'S', 'T' },
+            .{ 'S', 'V' }, .{ 'S', 'X' }, .{ 'S', 'Y' }, .{ 'S', 'Z' }, .{ 'T', 'A' }, .{ 'T', 'C' }, .{ 'T', 'D' }, .{ 'T', 'F' }, .{ 'T', 'G' }, .{ 'T', 'H' }, .{ 'T', 'J' }, .{ 'T', 'K' },
+            .{ 'T', 'L' }, .{ 'T', 'M' }, .{ 'T', 'N' }, .{ 'T', 'O' }, .{ 'T', 'R' }, .{ 'T', 'T' }, .{ 'T', 'V' }, .{ 'T', 'W' }, .{ 'T', 'Z' }, .{ 'U', 'A' }, .{ 'U', 'G' }, .{ 'U', 'M' },
+            .{ 'U', 'N' }, .{ 'U', 'S' }, .{ 'U', 'Y' }, .{ 'U', 'Z' }, .{ 'V', 'A' }, .{ 'V', 'C' }, .{ 'V', 'E' }, .{ 'V', 'G' }, .{ 'V', 'I' }, .{ 'V', 'N' }, .{ 'V', 'U' }, .{ 'W', 'F' },
+            .{ 'W', 'S' }, .{ 'X', 'K' }, .{ 'Y', 'E' }, .{ 'Y', 'T' }, .{ 'Z', 'A' }, .{ 'Z', 'M' }, .{ 'Z', 'W' },
+        };
+        for (regions) |region| {
+            try self.appendStringItem(items, &.{
+                0x1F1E6 + @as(u21, region[0] - 'A'),
+                0x1F1E6 + @as(u21, region[1] - 'A'),
+            });
         }
     }
 

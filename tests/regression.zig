@@ -980,6 +980,12 @@ test "regression: unicode string properties work as atom escapes" {
         RegexError.InvalidEscapeSequence,
         Regex.compileWithFlags(allocator, "\\p{Emoji_Keycap_Sequence}", .{ .unicode = true }),
     );
+
+    var flag = try Regex.compileWithFlags(allocator, "^\\p{RGI_Emoji_Flag_Sequence}+$", flags);
+    defer flag.deinit();
+    try std.testing.expect(try flag.isMatch("\u{1F1FA}\u{1F1F8}"));
+    try std.testing.expect(try flag.isMatch("\u{1F1FA}\u{1F1F8}\u{1F1EC}\u{1F1E7}"));
+    try std.testing.expect(!try flag.isMatch("\u{1F1FA}"));
 }
 
 test "regression: unicode property aliases include generated Test262 gc aliases" {
