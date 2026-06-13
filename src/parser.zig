@@ -5,6 +5,8 @@ const unicode = @import("unicode.zig");
 const RegexError = @import("errors.zig").RegexError;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
+const MAX_SAFE_QUANTIFIER: usize = 9_007_199_254_740_991;
+
 /// Token types for lexical analysis
 pub const TokenType = enum {
     literal,
@@ -644,7 +646,6 @@ pub const Parser = struct {
                     try self.advance(); // consume {
 
                     // Parse minimum with overflow protection
-                    const MAX_QUANTIFIER: usize = 100_000; // Reasonable upper limit to prevent DoS
                     var min: usize = 0;
                     while (self.peek() == .literal and self.current_token.value >= '0' and self.current_token.value <= '9') {
                         const digit = self.current_token.value - '0';
@@ -656,8 +657,7 @@ pub const Parser = struct {
 
                         const new_min = min * 10 + digit;
 
-                        // Enforce reasonable maximum to prevent resource exhaustion
-                        if (new_min > MAX_QUANTIFIER) {
+                        if (new_min > MAX_SAFE_QUANTIFIER) {
                             return RegexError.InvalidQuantifier;
                         }
 
@@ -684,8 +684,7 @@ pub const Parser = struct {
 
                                 const new_max = max.? * 10 + digit;
 
-                                // Enforce reasonable maximum
-                                if (new_max > MAX_QUANTIFIER) {
+                                if (new_max > MAX_SAFE_QUANTIFIER) {
                                     return RegexError.InvalidQuantifier;
                                 }
 

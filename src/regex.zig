@@ -11,6 +11,8 @@ const dfa = @import("dfa.zig");
 const onepass = @import("onepass.zig");
 const unicode_mod = @import("unicode.zig");
 
+const MAX_NFA_REPEAT_EXPANSION: usize = 10_000;
+
 /// Represents a match result from a regex operation
 pub const Match = struct {
     /// The matched substring
@@ -320,11 +322,25 @@ pub const Regex = struct {
             !self.opt_info.has_lazy;
     }
 
-    /// Skip to the next position >= `scan` whose byte can start a match, or
-    /// `input.len` if none. Uses a SIMD `indexOfScalar` when the first-byte set
-    /// is a single byte; otherwise a scalar table walk. Callers only invoke this
-    /// when `first_bytes` is set.
+    /// Whether the DFA loops have any candidate prefilter to apply. The DFA path
+    /// is ASCII-exact (never case-insensitive), so a literal prefix is usable
+    /// directly.
+    fn dfaPrefilterActive(self: *const Regex) bool {
+        return self.opt_info.literal_prefix != null or self.opt_info.first_bytes != null;
+    }
+
+    /// Skip to the next position >= `scan` that could start a match, or
+    /// `input.len` if none. Prefers a multi-byte literal prefix (a `memmem`-style
+    /// `indexOf`, far more selective than a single byte for patterns like
+    /// `try\s+\w+` or `pub\s+fn`), then a single first byte (SIMD
+    /// `indexOfScalar`), then a first-byte table walk. Callers invoke this only
+    /// when `dfaPrefilterActive`.
     fn skipToCandidate(self: *const Regex, input: []const u8, scan: usize) usize {
+        if (self.opt_info.literal_prefix) |p| {
+            // SIMD first-byte scan + tail compare — keeps the scan vectorized
+            // while being far more selective than a single byte.
+            return literalSearch(input, p, scan) orelse input.len;
+        }
         if (self.opt_info.first_byte_single) |b| {
             return std.mem.indexOfScalarPos(u8, input, scan, b) orelse input.len;
         }
@@ -349,14 +365,14 @@ pub const Regex = struct {
     fn countWithDfa(self: *const Regex, input: []const u8) dfa.Error!usize {
         var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
         defer d.deinit();
-        const fb = self.opt_info.first_bytes;
+        const pf = self.dfaPrefilterActive();
         var n: usize = 0;
         var pos: usize = 0;
         while (pos <= input.len) {
             var scan = pos;
             var found_end: ?usize = null;
             while (scan <= input.len) {
-                if (fb != null) {
+                if (pf) {
                     scan = self.skipToCandidate(input, scan);
                     if (scan >= input.len) break;
                 }
@@ -387,10 +403,10 @@ pub const Regex = struct {
             null;
         defer if (v) |*vv| vv.deinit();
 
-        const fb = self.opt_info.first_bytes;
+        const pf = self.dfaPrefilterActive();
         var scan: usize = 0;
         while (scan <= input.len) {
-            if (fb != null) {
+            if (pf) {
                 scan = self.skipToCandidate(input, scan);
                 if (scan >= input.len) break;
             }
@@ -423,13 +439,13 @@ pub const Regex = struct {
             null;
         defer if (v) |*vv| vv.deinit();
 
-        const fb = self.opt_info.first_bytes;
+        const pf = self.dfaPrefilterActive();
         var pos: usize = 0;
         while (pos <= input.len) {
             var scan = pos;
             var matched_end: ?usize = null;
             while (scan <= input.len) {
-                if (fb != null) {
+                if (pf) {
                     scan = self.skipToCandidate(input, scan);
                     if (scan >= input.len) break;
                 }
@@ -460,10 +476,10 @@ pub const Regex = struct {
     fn isMatchWithDfa(self: *const Regex, input: []const u8) dfa.Error!bool {
         var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
         defer d.deinit();
-        const fb = self.opt_info.first_bytes;
+        const pf = self.dfaPrefilterActive();
         var pos: usize = 0;
         while (pos <= input.len) {
-            if (fb != null) {
+            if (pf) {
                 pos = self.skipToCandidate(input, pos);
                 if (pos >= input.len) break;
             }
@@ -1649,6 +1665,10 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         },
         .repeat => {
             if (!node.data.repeat.greedy) return true;
+            if (node.data.repeat.bounds.min > MAX_NFA_REPEAT_EXPANSION) return true;
+            if (node.data.repeat.bounds.max) |max| {
+                if (max > MAX_NFA_REPEAT_EXPANSION) return true;
+            }
             return requiresBacktracking(node.data.repeat.child, flags);
         },
 

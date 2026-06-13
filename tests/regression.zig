@@ -172,6 +172,22 @@ test "regression: {3,3} is accepted (min == max)" {
     try std.testing.expect(!try regex.isMatch("aa"));
 }
 
+test "regression: max-safe quantifier counts compile and fail short inputs" {
+    const allocator = std.testing.allocator;
+
+    var exact = try Regex.compile(allocator, "b{9007199254740991}");
+    defer exact.deinit();
+    try std.testing.expect(!try exact.isMatch(""));
+
+    var unbounded = try Regex.compile(allocator, "b{9007199254740991,}?");
+    defer unbounded.deinit();
+    try std.testing.expect(!try unbounded.isMatch("a"));
+
+    var bounded = try Regex.compile(allocator, "b{9007199254740991,9007199254740991}");
+    defer bounded.deinit();
+    try std.testing.expect(!try bounded.isMatch("b"));
+}
+
 // --- {0,n} quantifier correctness ---
 
 test "regression: {0,3} matches 0 to 3 occurrences" {
