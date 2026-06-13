@@ -1444,6 +1444,21 @@ pub const Parser = struct {
         };
     }
 
+    fn classItemMayContainString(item: ast.Node.ClassItem) bool {
+        return switch (item) {
+            .string => true,
+            .nested => |set| classSetMayContainString(set),
+            .range, .property => false,
+        };
+    }
+
+    fn classSetMayContainString(set: *const ast.Node.ClassSet) bool {
+        for (set.items) |item| {
+            if (classItemMayContainString(item)) return true;
+        }
+        return false;
+    }
+
     fn parseSetOperand(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
         const c = input[i.*];
         if (c == '[') {
@@ -1513,6 +1528,12 @@ pub const Parser = struct {
             while (i.* + 1 < input.len and input[i.*] == sep and input[i.* + 1] == sep) {
                 i.* += 2; // consume operator
                 try items.append(self.allocator, try self.parseSetOperand(input, i));
+            }
+        }
+
+        if (negated) {
+            for (items.items) |item| {
+                if (classItemMayContainString(item)) return RegexError.UnexpectedCharacter;
             }
         }
 

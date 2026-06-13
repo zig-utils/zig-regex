@@ -1002,6 +1002,20 @@ test "regression: unicode sets reject unescaped reserved punctuators" {
     }
 }
 
+test "regression: unicode sets reject complements containing strings" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode_sets = true };
+
+    try std.testing.expectError(
+        RegexError.UnexpectedCharacter,
+        Regex.compileWithFlags(allocator, "[^\\p{Emoji_Keycap_Sequence}]", flags),
+    );
+    try std.testing.expectError(
+        RegexError.UnexpectedCharacter,
+        Regex.compileWithFlags(allocator, "[^\\q{ab}]", flags),
+    );
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is
