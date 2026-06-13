@@ -685,3 +685,17 @@ test "regression: `//.*` line-comment scan stays off the backtracker" {
     try std.testing.expect(t1 > 0);
     try std.testing.expect(t2 * 10 < t1 * 30); // < 3.0x — linear, not quadratic
 }
+
+test "regression: literal alternation preserves source order" {
+    const allocator = std.testing.allocator;
+
+    var short_first = try Regex.compile(allocator, "a|ab");
+    defer short_first.deinit();
+    const short_match = (try short_first.find("abc")).?;
+    try std.testing.expectEqualStrings("a", short_match.slice);
+
+    var long_first = try Regex.compile(allocator, "ab|a");
+    defer long_first.deinit();
+    const long_match = (try long_first.find("abc")).?;
+    try std.testing.expectEqualStrings("ab", long_match.slice);
+}

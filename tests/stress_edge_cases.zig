@@ -273,15 +273,25 @@ test "stress: nested alternation" {
     try std.testing.expect(!try regex.isMatch("abg"));
 }
 
-test "stress: NFA finds longest match for alternation" {
+test "stress: alternation preserves source order" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "cat|catfish");
-    defer regex.deinit();
+    var short_first = try Regex.compile(allocator, "cat|catfish");
+    defer short_first.deinit();
 
-    if (try regex.find("catfish")) |match| {
+    if (try short_first.find("catfish")) |match| {
         var mut_match = match;
         defer mut_match.deinit(allocator);
-        // NFA greedy matching: finds longest match "catfish"
+        try std.testing.expectEqualStrings("cat", match.slice);
+    } else {
+        return error.TestExpectedMatch;
+    }
+
+    var long_first = try Regex.compile(allocator, "catfish|cat");
+    defer long_first.deinit();
+
+    if (try long_first.find("catfish")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
         try std.testing.expectEqualStrings("catfish", match.slice);
     } else {
         return error.TestExpectedMatch;

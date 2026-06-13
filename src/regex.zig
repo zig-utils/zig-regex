@@ -517,15 +517,14 @@ pub const Regex = struct {
         return r;
     }
 
-    /// Longest literal in `set` that matches at `input[pos..]`, or 0 if none.
-    /// Longest wins, matching the engine's alternation semantics (`a|ab` → "ab").
-    fn longestLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
-        var best: usize = 0;
+    /// First source-order literal in `set` that matches at `input[pos..]`, or 0
+    /// if none. ECMAScript alternation is ordered (`a|ab` matches `a`).
+    fn firstLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
         for (set) |s| {
-            if (s.len > best and pos + s.len <= input.len and
-                std.mem.eql(u8, input[pos .. pos + s.len], s)) best = s.len;
+            if (pos + s.len <= input.len and
+                std.mem.eql(u8, input[pos .. pos + s.len], s)) return s.len;
         }
-        return best;
+        return 0;
     }
 
     fn repeatRunAt(input: []const u8, table: [256]bool, start: usize, max: usize) usize {
@@ -662,7 +661,7 @@ pub const Regex = struct {
                         while (p < input.len and !t[input[p]]) p += 1;
                         if (p >= input.len) break;
                     }
-                    if (longestLiteralAt(set, input, p) > 0) return true;
+                    if (firstLiteralAt(set, input, p) > 0) return true;
                     p += 1;
                 }
                 return false;
@@ -845,7 +844,7 @@ pub const Regex = struct {
             }
             return null;
         };
-        // Literal-alternation fast path: leftmost position, longest literal.
+        // Literal-alternation fast path: leftmost position, first source-order literal.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
                 const fb = self.opt_info.first_bytes;
@@ -855,7 +854,7 @@ pub const Regex = struct {
                         while (p < input.len and !t[input[p]]) p += 1;
                         if (p >= input.len) break;
                     }
-                    const best = longestLiteralAt(set, input, p);
+                    const best = firstLiteralAt(set, input, p);
                     if (best > 0) return Match{ .slice = input[p .. p + best], .start = p, .end = p + best };
                     p += 1;
                 }
@@ -1079,7 +1078,7 @@ pub const Regex = struct {
             }
             return matches.toOwnedSlice(allocator);
         }
-        // Literal-alternation fast path: each leftmost-longest literal match.
+        // Literal-alternation fast path: each leftmost source-order literal match.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
                 const fb = self.opt_info.first_bytes;
@@ -1088,7 +1087,7 @@ pub const Regex = struct {
                         while (pos < input.len and !t[input[pos]]) pos += 1;
                         if (pos >= input.len) break;
                     }
-                    const best = longestLiteralAt(set, input, pos);
+                    const best = firstLiteralAt(set, input, pos);
                     if (best > 0) {
                         try matches.append(allocator, Match{ .slice = input[pos .. pos + best], .start = pos, .end = pos + best });
                         pos += best;
@@ -1275,7 +1274,7 @@ pub const Regex = struct {
             }
             return n;
         }
-        // Literal-alternation: leftmost-longest literal at each candidate.
+        // Literal-alternation: leftmost source-order literal at each candidate.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
                 const fb = self.opt_info.first_bytes;
@@ -1284,7 +1283,7 @@ pub const Regex = struct {
                         while (pos < input.len and !t[input[pos]]) pos += 1;
                         if (pos >= input.len) break;
                     }
-                    const best = longestLiteralAt(set, input, pos);
+                    const best = firstLiteralAt(set, input, pos);
                     if (best > 0) {
                         n += 1;
                         pos += best;

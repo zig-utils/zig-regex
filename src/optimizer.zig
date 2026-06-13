@@ -21,8 +21,8 @@ pub const OptimizationInfo = struct {
     required_literal: ?[]const u8 = null,
 
     /// Set when the whole pattern is an alternation of two or more exact
-    /// literals (`foo|bar|baz`). Matched by trying each literal directly
-    /// (longest wins, matching the engine's alternation semantics) instead of
+    /// literals (`foo|bar|baz`). Matched by trying each literal directly in
+    /// source order, matching ECMAScript ordered alternation, instead of
     /// running the NFA. Owned; freed in deinit.
     literal_set: ?[]const []const u8 = null,
 
