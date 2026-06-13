@@ -162,11 +162,17 @@ pub const NFA = struct {
 pub const Compiler = struct {
     nfa: NFA,
     allocator: std.mem.Allocator,
+    flags: common.CompileFlags,
 
     pub fn init(allocator: std.mem.Allocator) Compiler {
+        return initWithFlags(allocator, .{});
+    }
+
+    pub fn initWithFlags(allocator: std.mem.Allocator, flags: common.CompileFlags) Compiler {
         return .{
             .nfa = NFA.init(allocator),
             .allocator = allocator,
+            .flags = flags,
         };
     }
 
@@ -223,15 +229,35 @@ pub const Compiler = struct {
         return Fragment{ .start = start, .accept = accept };
     }
 
-    /// Compile any character (.)
+    /// Compile any character (`.`) as a UTF-8 code-point automaton, matching
+    /// `common.dotMatchLen` for valid UTF-8: one code point in `[0, max]` (max =
+    /// `0x10FFFF` with the `u` flag, else `0xFFFF`), excluding the ECMAScript
+    /// line terminators `\n \r    ` unless `dot_all`. This keeps `.` on
+    /// the fast byte engine instead of forcing the whole pattern to backtrack.
     fn compileAny(self: *Compiler) !Fragment {
-        const start = try self.nfa.addState();
-        const accept = try self.nfa.addState();
-
-        const start_state = self.nfa.getState(start);
-        try start_state.addTransition(Transition.any(accept));
-
-        return Fragment{ .start = start, .accept = accept };
+        const max: u21 = if (self.flags.unicode) 0x10FFFF else 0xFFFF;
+        if (self.flags.dot_all) {
+            const ranges = [_]ast.Node.CpRange{.{ .lo = 0, .hi = max }};
+            return self.compileCodepointRanges(&ranges);
+        }
+        // [0, max] minus { 0x0A, 0x0D, 0x2028, 0x2029 }.
+        var buf: [5]ast.Node.CpRange = undefined;
+        var n: usize = 0;
+        const cuts = [_]u21{ 0x0A, 0x0D, 0x2028, 0x2029 };
+        var lo: u21 = 0;
+        for (cuts) |cut| {
+            if (cut > max) break;
+            if (cut > lo) {
+                buf[n] = .{ .lo = lo, .hi = cut - 1 };
+                n += 1;
+            }
+            lo = cut + 1;
+        }
+        if (lo <= max) {
+            buf[n] = .{ .lo = lo, .hi = max };
+            n += 1;
+        }
+        return self.compileCodepointRanges(buf[0..n]);
     }
 
     /// Compile concatenation
@@ -459,12 +485,20 @@ pub const Compiler = struct {
     /// `char_class` byte transitions, all sharing one start/accept pair. A set
     /// that matches nothing yields an (unreachable-accept) dead fragment.
     fn compileClassSet(self: *Compiler, set: *ast.Node.ClassSet) !Fragment {
-        const allocator = self.allocator;
-        const ranges = (try utf8_class.toCodepointRanges(allocator, set)) orelse
+        const ranges = (try utf8_class.toCodepointRanges(self.allocator, set)) orelse
             return RegexError.NotImplemented;
-        defer allocator.free(ranges);
-        const seqs = try utf8_class.toUtf8Sequences(allocator, ranges);
-        defer allocator.free(seqs);
+        defer self.allocator.free(ranges);
+        return self.compileCodepointRanges(ranges);
+    }
+
+    /// Build a UTF-8 byte automaton accepting exactly the code points in
+    /// `ranges`: an alternation of byte-range sequences (utf8-ranges
+    /// decomposition), each a chain of single-range `char_class` byte
+    /// transitions sharing one start/accept pair. An empty set yields an
+    /// (unreachable-accept) dead fragment.
+    fn compileCodepointRanges(self: *Compiler, ranges: []const ast.Node.CpRange) !Fragment {
+        const seqs = try utf8_class.toUtf8Sequences(self.allocator, ranges);
+        defer self.allocator.free(seqs);
 
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();

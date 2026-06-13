@@ -164,7 +164,7 @@ pub const Regex = struct {
             // Use Thompson NFA engine
             defer tree.deinit();
 
-            var comp = compiler.Compiler.init(allocator);
+            var comp = compiler.Compiler.initWithFlags(allocator, flags);
             errdefer comp.deinit();
             _ = try comp.compile(&tree);
 
@@ -1685,10 +1685,10 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         // which only the backtracking engine honors.
         .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags),
 
-        // `.` consumes a decoded JS character (and respects Unicode vs
-        // non-Unicode astral semantics), which the byte-oriented NFA/DFA paths
-        // cannot model.
-        .any => return true,
+        // `.` lowers to a UTF-8 code-point automaton (compiler.compileAny):
+        // one code point excluding line terminators (and astral unless the `u`
+        // flag) — representable on the byte engine, so no backtracking needed.
+        .any => return false,
 
         // These don't require backtracking
         .literal, .char_class, .anchor, .empty => return false,

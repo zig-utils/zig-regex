@@ -603,3 +603,85 @@ test "regression: prefilter hints are exposed to callers (issue #10)" {
         try std.testing.expect(!fb['g']);
     }
 }
+
+// --- `.` lowered to a UTF-8 code-point automaton (off the backtracker) ---
+//
+// `.` matches one code point excluding line terminators (`\n \r    `),
+// and excludes astral code points unless the `u` flag is set. It used to force
+// the whole pattern onto the backtracking engine; it now lowers to a UTF-8 byte
+// automaton (compiler.compileAny), so `//.*`, `a.c`, `.*` run on the fast DFA.
+// These guard the boundary semantics so the speedup can't silently change them.
+
+test "regression: `.` excludes line terminators, matches everything else" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "a.b");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("axb"));
+    try std.testing.expect(try re.isMatch("a b"));
+    try std.testing.expect(try re.isMatch("a\tb"));
+    try std.testing.expect(try re.isMatch("a\u{00E9}b")); // é (one code point)
+    try std.testing.expect(!try re.isMatch("a\nb"));
+    try std.testing.expect(!try re.isMatch("a\rb"));
+    try std.testing.expect(!try re.isMatch("a\u{2028}b")); // LINE SEPARATOR
+}
+
+test "regression: `.*` stops at a newline; dot_all crosses it" {
+    const allocator = std.testing.allocator;
+
+    var normal = try Regex.compile(allocator, "a.*");
+    defer normal.deinit();
+    const m1 = (try normal.find("axy\nz")).?;
+    try std.testing.expectEqualStrings("axy", m1.slice);
+
+    var dotall = try Regex.compileWithFlags(allocator, "a.*", .{ .dot_all = true });
+    defer dotall.deinit();
+    const m2 = (try dotall.find("axy\nz")).?;
+    try std.testing.expectEqualStrings("axy\nz", m2.slice);
+}
+
+test "regression: `//.*` line-comment scan stays off the backtracker" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "//.*");
+    defer re.deinit();
+
+    // Build "code //comment\n" repeated; doubling input must stay near-linear
+    // (the old backtracking `.` path was the 44x-slower case in issue #10).
+    const make = struct {
+        fn buf(a: std.mem.Allocator, lines: usize) ![]u8 {
+            var list = try std.ArrayList(u8).initCapacity(a, lines * 20);
+            errdefer list.deinit(a);
+            var i: usize = 0;
+            while (i < lines) : (i += 1) try list.appendSlice(a, "x = 1; // note here\n");
+            return list.toOwnedSlice(a);
+        }
+    };
+    const time = struct {
+        fn run(re_: *const Regex, b: []const u8) !u64 {
+            _ = try re_.count(b);
+            var best: u64 = std.math.maxInt(u64);
+            var rep: usize = 0;
+            while (rep < 3) : (rep += 1) {
+                const t0 = monotonicNs();
+                const c = try re_.count(b);
+                const dt = monotonicNs() - t0;
+                std.mem.doNotOptimizeAway(c);
+                if (dt < best) best = dt;
+            }
+            return best;
+        }
+    };
+
+    const b1 = try make.buf(allocator, 20_000);
+    defer allocator.free(b1);
+    const b2 = try make.buf(allocator, 40_000); // 2x
+    defer allocator.free(b2);
+
+    try std.testing.expectEqual(@as(usize, 20_000), try re.count(b1));
+    try std.testing.expectEqual(@as(usize, 40_000), try re.count(b2));
+
+    const t1 = try time.run(&re, b1);
+    const t2 = try time.run(&re, b2);
+    try std.testing.expect(t1 > 0);
+    try std.testing.expect(t2 * 10 < t1 * 30); // < 3.0x — linear, not quadratic
+}
