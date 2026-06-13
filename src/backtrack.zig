@@ -190,6 +190,28 @@ pub const BacktrackEngine = struct {
         };
     }
 
+    fn matchNodeProgress(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+        defer self.allocator.free(saved);
+        @memcpy(saved, self.captures);
+
+        if (self.matchNode(node, pos)) |end| {
+            if (end > pos) return end;
+        }
+
+        @memcpy(self.captures, saved);
+        var positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+        defer positions.deinit(self.allocator);
+        self.collectAllMatches(node, pos, &positions) catch return null;
+        for (positions.items) |end| {
+            if (end <= pos) continue;
+            @memcpy(self.captures, saved);
+            if (self.matchNodeConstrained(node, pos, end)) return end;
+        }
+        @memcpy(self.captures, saved);
+        return null;
+    }
+
     /// `\p{...}` / `\P{...}` — decode the UTF-8 code point at `pos`, test the
     /// General_Category property, and consume the whole code point on a match.
     fn matchUnicodeProperty(self: *BacktrackEngine, up: ast.Node.UnicodeProp, pos: usize) ?usize {
@@ -620,8 +642,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         while (true) {
             self.clearCapturesIn(child);
-            const next_pos = self.matchNode(child, current_pos) orelse break;
-            if (next_pos == current_pos) break; // Prevent infinite loop
+            const next_pos = self.matchNodeProgress(child, current_pos) orelse break;
             current_pos = next_pos;
             try all_positions.append(self.allocator, current_pos);
         }
@@ -641,8 +662,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         while (true) {
             self.clearCapturesIn(child);
-            const next_pos = self.matchNode(child, current_pos) orelse break;
-            if (next_pos == current_pos) break; // Prevent infinite loop
+            const next_pos = self.matchNodeProgress(child, current_pos) orelse break;
             current_pos = next_pos;
             try positions.append(self.allocator, current_pos);
         }
@@ -669,8 +689,7 @@ pub const BacktrackEngine = struct {
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
                 self.clearCapturesIn(repeat.child);
-                if (self.matchNode(repeat.child, current_pos)) |next_pos| {
-                    if (next_pos == current_pos) break;
+                if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                     try all_positions.append(self.allocator, current_pos);
                 } else break;
@@ -679,8 +698,7 @@ pub const BacktrackEngine = struct {
             // Unbounded: keep matching until we can't
             while (true) {
                 self.clearCapturesIn(repeat.child);
-                const next_pos = self.matchNode(repeat.child, current_pos) orelse break;
-                if (next_pos == current_pos) break;
+                const next_pos = self.matchNodeProgress(repeat.child, current_pos) orelse break;
                 current_pos = next_pos;
                 try all_positions.append(self.allocator, current_pos);
             }
@@ -712,8 +730,7 @@ pub const BacktrackEngine = struct {
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
                 self.clearCapturesIn(repeat.child);
-                if (self.matchNode(repeat.child, current_pos)) |next_pos| {
-                    if (next_pos == current_pos) break;
+                if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                     try positions.append(self.allocator, current_pos);
                 } else break;
@@ -722,8 +739,7 @@ pub const BacktrackEngine = struct {
             // Unbounded: keep matching until we can't
             while (true) {
                 self.clearCapturesIn(repeat.child);
-                const next_pos = self.matchNode(repeat.child, current_pos) orelse break;
-                if (next_pos == current_pos) break;
+                const next_pos = self.matchNodeProgress(repeat.child, current_pos) orelse break;
                 current_pos = next_pos;
                 try positions.append(self.allocator, current_pos);
             }
@@ -760,8 +776,7 @@ pub const BacktrackEngine = struct {
         // Collect all possible match positions
         while (true) {
             self.clearCapturesIn(child);
-            const next_pos = self.matchNode(child, current_pos) orelse break;
-            if (next_pos == current_pos) break; // Prevent infinite loop on empty matches
+            const next_pos = self.matchNodeProgress(child, current_pos) orelse break;
             current_pos = next_pos;
             match_positions.append(self.allocator, current_pos) catch break;
         }
@@ -830,8 +845,7 @@ pub const BacktrackEngine = struct {
             // Greedy: try to match as many as possible
             while (i < max_count) : (i += 1) {
                 self.clearCapturesIn(repeat.child);
-                if (self.matchNode(repeat.child, current_pos)) |next_pos| {
-                    if (next_pos == current_pos) break;
+                if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                 } else {
                     break;

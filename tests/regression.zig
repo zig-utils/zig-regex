@@ -106,6 +106,22 @@ test "regression: ambiguous adjacent quantified captures use ECMAScript partitio
     }
 }
 
+test "regression: nullable quantified iteration can continue with progress" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "(a?b??)*");
+    defer regex.deinit();
+
+    if (try regex.find("ab")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+
+        try std.testing.expectEqualStrings("ab", match.slice);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
 // --- min > max quantifier rejection ---
 
 test "regression: {10,5} is rejected as invalid" {
