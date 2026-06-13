@@ -31,18 +31,22 @@ test "parser: deeply nested groups" {
     try std.testing.expect(try regex.isMatch("a"));
 }
 
-test "parser: consecutive quantifiers rejected by analyzer" {
+test "parser: consecutive quantifiers rejected" {
     const allocator = std.testing.allocator;
-    // a** parses as (a*)* which is rejected as nested quantifiers
     const result = Regex.compile(allocator, "a**");
-    try std.testing.expectError(RegexError.PatternTooComplex, result);
+    try std.testing.expectError(RegexError.InvalidQuantifier, result);
 }
 
-test "parser: quantifier on quantifier rejected by analyzer" {
+test "parser: quantifier on quantifier rejected" {
     const allocator = std.testing.allocator;
-    // a+* parses as (a+)* which is rejected as nested quantifiers
     const result = Regex.compile(allocator, "a+*");
-    try std.testing.expectError(RegexError.PatternTooComplex, result);
+    try std.testing.expectError(RegexError.InvalidQuantifier, result);
+}
+
+test "parser: bounded quantifier on quantifier rejected" {
+    const allocator = std.testing.allocator;
+    const result = Regex.compile(allocator, "x{1,2}{1}");
+    try std.testing.expectError(RegexError.InvalidQuantifier, result);
 }
 
 test "parser: empty alternation branch is valid" {
