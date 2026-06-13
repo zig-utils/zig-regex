@@ -964,6 +964,44 @@ test "regression: unicode set difference keeps string literals distinct from cha
     try std.testing.expect(!try regex.isMatch("4"));
 }
 
+test "regression: unicode sets reject unescaped reserved punctuators" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode_sets = true };
+
+    const invalid = [_][]const u8{
+        "[(]",
+        "[)]",
+        "[{]",
+        "[}]",
+        "[/]",
+        "[-]",
+        "[|]",
+        "[&&]",
+        "[!!]",
+        "[##]",
+        "[$$]",
+        "[%%]",
+        "[**]",
+        "[++]",
+        "[,,]",
+        "[..]",
+        "[::]",
+        "[;;]",
+        "[<<]",
+        "[==]",
+        "[>>]",
+        "[??]",
+        "[@@]",
+        "[``]",
+        "[~~]",
+        "[^^^]",
+        "[_^^]",
+    };
+    for (invalid) |pattern| {
+        try std.testing.expectError(RegexError.UnexpectedCharacter, Regex.compileWithFlags(allocator, pattern, flags));
+    }
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is

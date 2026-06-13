@@ -1430,6 +1430,20 @@ pub const Parser = struct {
 
     /// Parse one operand of a set expression (a range/char, escape, property, or
     /// nested class).
+    fn isClassSetSyntaxChar(c: u8) bool {
+        return switch (c) {
+            '(', ')', '{', '}', '/', '-', '|' => true,
+            else => false,
+        };
+    }
+
+    fn isClassSetReservedDoublePunctuator(c: u8) bool {
+        return switch (c) {
+            '!', '#', '$', '%', '&', '*', '+', ',', '.', ':', ';', '<', '=', '>', '?', '@', '`', '~', '^' => true,
+            else => false,
+        };
+    }
+
     fn parseSetOperand(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
         const c = input[i.*];
         if (c == '[') {
@@ -1451,6 +1465,9 @@ pub const Parser = struct {
                 else => {},
             }
         }
+        if (isClassSetSyntaxChar(c)) return RegexError.UnexpectedCharacter;
+        if (i.* + 1 < input.len and input[i.* + 1] == c and isClassSetReservedDoublePunctuator(c))
+            return RegexError.UnexpectedCharacter;
         const lo = (try readClassCp(input, i, true)) orelse return RegexError.InvalidCharacterClass;
         // A range `lo-hi`, but only when `-` is followed by a real character (a
         // double `-` is the difference operator, a trailing `-` is a literal).
@@ -1472,6 +1489,10 @@ pub const Parser = struct {
             i.* += 1;
         }
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        errdefer {
+            for (items.items) |item| self.destroyClassItem(item);
+            items.deinit(self.allocator);
+        }
         var op: ast.Node.ClassOp = .union_;
         const first = try self.parseSetOperand(input, i);
         try items.append(self.allocator, first);
