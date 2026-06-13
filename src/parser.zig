@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
 const unicode = @import("unicode.zig");
+const prop_data = @import("unicode_prop_data.zig");
 const RegexError = @import("errors.zig").RegexError;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
@@ -54,7 +55,10 @@ pub const Token = struct {
 };
 
 fn isStringPropertyName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Emoji_Keycap_Sequence");
+    return std.mem.eql(u8, name, "Emoji_Keycap_Sequence") or
+        std.mem.eql(u8, name, "RGI_Emoji_Tag_Sequence") or
+        std.mem.eql(u8, name, "RGI_Emoji_Modifier_Sequence") or
+        std.mem.eql(u8, name, "Basic_Emoji");
 }
 
 /// Lexer for tokenizing regex patterns
@@ -1458,21 +1462,65 @@ pub const Parser = struct {
     }
 
     /// The set of strings for a `/v` property-of-strings, or null for an ordinary
-    /// (code-point) property. Only the fixed Emoji_Keycap_Sequence is supported;
-    /// the data-driven RGI_Emoji / Basic_Emoji families are not.
+    /// (code-point) property. Compact rule-derived string properties live here;
+    /// full RGI_Emoji/ZWJ needs a dedicated generated sequence table.
     fn stringPropertyItem(self: *Parser, name: []const u8) RegexError!?ast.Node.ClassItem {
-        if (!std.mem.eql(u8, name, "Emoji_Keycap_Sequence")) return null;
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
-        for ([_]u21{ '#', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' }) |b| {
-            const s = try self.allocator.alloc(u21, 3);
-            s[0] = b;
-            s[1] = 0xFE0F;
-            s[2] = 0x20E3;
-            try items.append(self.allocator, .{ .string = s });
+        if (std.mem.eql(u8, name, "Emoji_Keycap_Sequence")) {
+            try self.appendKeycapStrings(&items);
+        } else if (std.mem.eql(u8, name, "RGI_Emoji_Tag_Sequence")) {
+            try self.appendStringItem(&items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067, 0xE007F });
+            try self.appendStringItem(&items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0073, 0xE0063, 0xE0074, 0xE007F });
+            try self.appendStringItem(&items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0077, 0xE006C, 0xE0073, 0xE007F });
+        } else if (std.mem.eql(u8, name, "RGI_Emoji_Modifier_Sequence")) {
+            try self.appendModifierSequenceStrings(&items);
+        } else if (std.mem.eql(u8, name, "Basic_Emoji")) {
+            try self.appendBasicEmojiStrings(&items);
+        } else {
+            return null;
         }
         const set = try self.allocator.create(ast.Node.ClassSet);
         set.* = .{ .op = .union_, .items = try items.toOwnedSlice(self.allocator) };
         return .{ .nested = set };
+    }
+
+    fn appendStringItem(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem), cps: []const u21) RegexError!void {
+        const s = try self.allocator.dupe(u21, cps);
+        try items.append(self.allocator, .{ .string = s });
+    }
+
+    fn appendKeycapStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {
+        for ([_]u21{ '#', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' }) |b| {
+            try self.appendStringItem(items, &.{ b, 0xFE0F, 0x20E3 });
+        }
+    }
+
+    fn appendModifierSequenceStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {
+        for (prop_data.binaryRanges(.Emoji_Modifier_Base)) |r| {
+            var cp: u21 = r.lo;
+            while (cp <= r.hi) : (cp += 1) {
+                var modifier: u21 = 0x1F3FB;
+                while (modifier <= 0x1F3FF) : (modifier += 1) {
+                    try self.appendStringItem(items, &.{ cp, modifier });
+                }
+            }
+        }
+    }
+
+    fn appendBasicEmojiStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {
+        for (prop_data.binaryRanges(.Emoji_Presentation)) |r| {
+            var cp: u21 = r.lo;
+            while (cp <= r.hi) : (cp += 1) {
+                try self.appendStringItem(items, &.{cp});
+            }
+        }
+        for (prop_data.binaryRanges(.Emoji)) |r| {
+            var cp: u21 = r.lo;
+            while (cp <= r.hi) : (cp += 1) {
+                if (unicode.matchesSpec(cp, .{ .binary = .Emoji_Presentation })) continue;
+                try self.appendStringItem(items, &.{ cp, 0xFE0F });
+            }
+        }
     }
 
     fn stringPropertyNode(self: *Parser, name: []const u8, span: common.Span) RegexError!*ast.Node {
