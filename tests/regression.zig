@@ -1267,3 +1267,38 @@ test "regression: case-insensitive prefilter (folded first bytes) finds both cas
     try std.testing.expectEqualStrings("PUB  FN", m.slice);
     try std.testing.expect(!try re.isMatch("public function"));
 }
+
+// --- literal-alternation two-byte (Teddy-lite) prefilter ---
+//
+// Literal alternations use a vectorized two-byte-prefix filter to find
+// candidate positions, then `firstLiteralAt` confirms in source order. Guard
+// correctness: matches found at any position, near-miss prefixes rejected
+// (`er` without `ror`), source order preserved, and the len-1 fallback.
+
+test "regression: literal-alternation two-byte prefilter finds and rejects correctly" {
+    const allocator = std.testing.allocator;
+
+    var re = try Regex.compile(allocator, "error|warning|debug");
+    defer re.deinit();
+    // "er"/"wa"/"de" 2-byte prefixes occur in other words but must be rejected.
+    try std.testing.expectEqual(@as(usize, 3), try re.count("an error, a warning, and debug output (other, await, define)"));
+    const m = (try re.find("xx where warning")).?;
+    try std.testing.expectEqualStrings("warning", m.slice);
+    try std.testing.expect(!try re.isMatch("erroneous wandering deduced"));
+
+    // Overlapping match at a non-start offset.
+    var f2 = try Regex.compile(allocator, "fn|var|pub");
+    defer f2.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try f2.count("zzz pub yyy var"));
+
+    // Source order preserved (ECMAScript ordered alternation).
+    var ord = try Regex.compile(allocator, "ab|abc");
+    defer ord.deinit();
+    const om = (try ord.find("xabc")).?;
+    try std.testing.expectEqualStrings("ab", om.slice);
+
+    // len-1 literal disables the two-byte path → first-byte fallback still works.
+    var mixed = try Regex.compile(allocator, "x|foo");
+    defer mixed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try mixed.count("a foo b x c"));
+}

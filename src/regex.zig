@@ -756,6 +756,99 @@ pub const Regex = struct {
         return 0;
     }
 
+    /// Candidate-position scanner for a literal alternation (`foo|bar|baz`). A
+    /// DFA can't run these (ECMAScript alternation is leftmost-*first*, not
+    /// longest), so the set path confirms each candidate with `firstLiteralAt`.
+    /// When every literal is >= 2 bytes (and the first/second byte sets are
+    /// small), this uses a vectorized **two-byte** filter — the simplified-Teddy
+    /// idea: a position is a candidate only if `input[p]` is some literal's first
+    /// byte AND `input[p+1]` is some literal's second byte. Testing two byte sets
+    /// per 16-byte block (cheap `@reduce(.Or)`, no shuffle) cuts false candidates
+    /// from ~|B1|/256 to ~|B1|·|B2|/65536 — e.g. `error|warning|debug` from ~1.2%
+    /// to ~0.01%. Otherwise it falls back to the first-byte table walk.
+    const set_pfx_cap = 32;
+    const LiteralSetScanner = struct {
+        /// Distinct little-endian 2-byte prefixes (`lit[0] | lit[1]<<8`) of the
+        /// literals — the exact fingerprints, so the filter only fires on real
+        /// literal prefixes (not the cross-product of first/second byte sets).
+        pfx: [set_pfx_cap]u16 = undefined,
+        np: usize = 0,
+        two_byte: bool = false,
+        fb: ?[256]bool,
+
+        fn pairAt(input: []const u8, q: usize) u16 {
+            return @as(u16, input[q]) | (@as(u16, input[q + 1]) << 8);
+        }
+
+        fn member(self: *const LiteralSetScanner, v: u16) bool {
+            for (self.pfx[0..self.np]) |x| if (x == v) return true;
+            return false;
+        }
+
+        fn init(set: []const []const u8, first_bytes: ?[256]bool) LiteralSetScanner {
+            var sc: LiteralSetScanner = .{ .fb = first_bytes };
+            var ok = set.len > 0;
+            for (set) |lit| {
+                if (lit.len < 2) {
+                    ok = false;
+                    break;
+                }
+                const v = @as(u16, lit[0]) | (@as(u16, lit[1]) << 8);
+                var seen = false;
+                for (sc.pfx[0..sc.np]) |x| {
+                    if (x == v) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    if (sc.np >= sc.pfx.len) {
+                        ok = false;
+                        break;
+                    }
+                    sc.pfx[sc.np] = v;
+                    sc.np += 1;
+                }
+            }
+            sc.two_byte = ok and sc.np > 0;
+            return sc;
+        }
+
+        /// Next position >= `from` that could begin a literal, or null.
+        fn next(self: *const LiteralSetScanner, input: []const u8, from: usize) ?usize {
+            if (!self.two_byte) {
+                if (self.fb) |t| {
+                    var p = from;
+                    while (p < input.len and !t[input[p]]) p += 1;
+                    return if (p < input.len) p else null;
+                }
+                return if (from < input.len) from else null;
+            }
+            const W = 16;
+            const eight: @Vector(W, u16) = @splat(8);
+            var p = from;
+            while (p + 1 + W <= input.len) {
+                // Overlapping 2-byte values at each lane: low byte at p+i, high at p+i+1.
+                const c0: @Vector(W, u8) = input[p..][0..W].*;
+                const c1: @Vector(W, u8) = input[p + 1 ..][0..W].*;
+                const v16: @Vector(W, u16) = @as(@Vector(W, u16), c0) | (@as(@Vector(W, u16), c1) << eight);
+                var hit: @Vector(W, bool) = v16 == @as(@Vector(W, u16), @splat(self.pfx[0]));
+                for (self.pfx[1..self.np]) |pv| hit = hit | (v16 == @as(@Vector(W, u16), @splat(pv)));
+                if (@reduce(.Or, hit)) {
+                    var q = p;
+                    while (q < p + W) : (q += 1) {
+                        if (self.member(pairAt(input, q))) return q;
+                    }
+                }
+                p += W;
+            }
+            while (p + 1 < input.len) : (p += 1) {
+                if (self.member(pairAt(input, p))) return p;
+            }
+            return null;
+        }
+    };
+
     fn repeatRunAt(input: []const u8, table: [256]bool, start: usize, max: usize) usize {
         var p = start;
         var run: usize = 0;
@@ -956,15 +1049,11 @@ pub const Regex = struct {
         // Literal-alternation fast path.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
-                const fb = self.opt_info.first_bytes;
+                const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
                 var p: usize = 0;
-                while (p < input.len) {
-                    if (fb) |t| {
-                        while (p < input.len and !t[input[p]]) p += 1;
-                        if (p >= input.len) break;
-                    }
-                    if (firstLiteralAt(set, input, p) > 0) return true;
-                    p += 1;
+                while (scanner.next(input, p)) |cand| {
+                    if (firstLiteralAt(set, input, cand) > 0) return true;
+                    p = cand + 1;
                 }
                 return false;
             }
@@ -1163,16 +1252,12 @@ pub const Regex = struct {
         // Literal-alternation fast path: leftmost position, first source-order literal.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
-                const fb = self.opt_info.first_bytes;
+                const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
                 var p: usize = 0;
-                while (p < input.len) {
-                    if (fb) |t| {
-                        while (p < input.len and !t[input[p]]) p += 1;
-                        if (p >= input.len) break;
-                    }
-                    const best = firstLiteralAt(set, input, p);
-                    if (best > 0) return Match{ .slice = input[p .. p + best], .start = p, .end = p + best };
-                    p += 1;
+                while (scanner.next(input, p)) |cand| {
+                    const best = firstLiteralAt(set, input, cand);
+                    if (best > 0) return Match{ .slice = input[cand .. cand + best], .start = cand, .end = cand + best };
+                    p = cand + 1;
                 }
                 return null;
             }
@@ -1416,18 +1501,14 @@ pub const Regex = struct {
         // Literal-alternation fast path: each leftmost source-order literal match.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
-                const fb = self.opt_info.first_bytes;
-                while (pos < input.len) {
-                    if (fb) |t| {
-                        while (pos < input.len and !t[input[pos]]) pos += 1;
-                        if (pos >= input.len) break;
-                    }
-                    const best = firstLiteralAt(set, input, pos);
+                const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
+                while (scanner.next(input, pos)) |cand| {
+                    const best = firstLiteralAt(set, input, cand);
                     if (best > 0) {
-                        try matches.append(allocator, Match{ .slice = input[pos .. pos + best], .start = pos, .end = pos + best });
-                        pos += best;
+                        try matches.append(allocator, Match{ .slice = input[cand .. cand + best], .start = cand, .end = cand + best });
+                        pos = cand + best;
                     } else {
-                        pos += 1;
+                        pos = cand + 1;
                     }
                 }
                 return matches.toOwnedSlice(allocator);
@@ -1631,17 +1712,13 @@ pub const Regex = struct {
         // Literal-alternation: leftmost source-order literal at each candidate.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
-                const fb = self.opt_info.first_bytes;
-                while (pos < input.len) {
-                    if (fb) |t| {
-                        while (pos < input.len and !t[input[pos]]) pos += 1;
-                        if (pos >= input.len) break;
-                    }
-                    const best = firstLiteralAt(set, input, pos);
+                const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
+                while (scanner.next(input, pos)) |cand| {
+                    const best = firstLiteralAt(set, input, cand);
                     if (best > 0) {
                         n += 1;
-                        pos += best;
-                    } else pos += 1;
+                        pos = cand + best;
+                    } else pos = cand + 1;
                 }
                 return n;
             }
