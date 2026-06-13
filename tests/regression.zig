@@ -1126,3 +1126,63 @@ test "regression: capture-bearing alternatives preserve participating captures" 
         try std.testing.expectEqualStrings("a", match.captures[0]);
     } else return error.TestExpectedMatch;
 }
+
+// --- reusable Matcher (amortized DFA, grep hot path) ---
+//
+// `Regex.matcher()` caches the lazy DFA across calls so per-line matching
+// doesn't rebuild it every call (10-50x for DFA patterns). It must produce
+// results identical to the plain (DFA-rebuilt-per-call) API, and reuse must be
+// safe across many calls.
+
+test "regression: Matcher matches the plain API and reuses safely" {
+    const allocator = std.testing.allocator;
+    const lines = [_][]const u8{
+        "fn helper() void {}", "  return x + y;", "}", "", "const a = 1;",
+        "a1 b2 c3", "no digits here", "x9", "    \t  ", "word another word",
+    };
+    const pats = [_][]const u8{ "\\w+\\s+\\w+", "\\w+[0-9]", "fn", "[a-z]+[0-9]+", "\\bfn\\b", "//.*" };
+    for (pats) |pat| {
+        var re = try Regex.compile(allocator, pat);
+        defer re.deinit();
+        var m = re.matcher();
+        defer m.deinit();
+        // Two passes over the lines confirm the cached DFA is reused safely.
+        var pass: usize = 0;
+        while (pass < 2) : (pass += 1) {
+            for (lines) |line| {
+                try std.testing.expectEqual(try re.isMatch(line), try m.isMatch(line));
+                try std.testing.expectEqual(try re.count(line), try m.count(line));
+                const a_m = try re.find(line);
+                const b_m = try m.find(line);
+                try std.testing.expectEqual(a_m == null, b_m == null);
+                if (a_m) |am| {
+                    var aa = am;
+                    defer aa.deinit(allocator);
+                    var bb = b_m.?;
+                    defer bb.deinit(allocator);
+                    try std.testing.expectEqual(am.start, b_m.?.start);
+                    try std.testing.expectEqual(am.end, b_m.?.end);
+                }
+            }
+        }
+    }
+}
+
+test "regression: Matcher leftmost-longest count over many lines equals plain" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "\\w+\\s+\\w+");
+    defer re.deinit();
+    var m = re.matcher();
+    defer m.deinit();
+
+    var total_plain: usize = 0;
+    var total_matcher: usize = 0;
+    var i: usize = 0;
+    while (i < 5000) : (i += 1) {
+        const line = if (i % 3 == 0) "alpha beta gamma" else if (i % 3 == 1) "}" else "one two";
+        total_plain += try re.count(line);
+        total_matcher += try m.count(line);
+    }
+    try std.testing.expectEqual(total_plain, total_matcher);
+    try std.testing.expect(total_plain > 0);
+}
