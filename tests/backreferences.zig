@@ -189,6 +189,25 @@ test "pattern backreference: multiple captures" {
     }
 }
 
+test "pattern backreference: decimal escape can address capture ten" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compile(allocator, "((((((((((A))))))))))\\10\\9\\8\\7\\6\\5\\4\\3\\2\\1");
+    defer regex.deinit();
+
+    if (try regex.find("AAAAAAAAAAA")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+
+        try std.testing.expectEqualStrings("AAAAAAAAAAA", match.slice);
+        try std.testing.expectEqual(@as(usize, 10), match.captures.len);
+        for (match.captures) |capture| {
+            try std.testing.expectEqualStrings("A", capture);
+        }
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
 test "pattern backreference: with quantifiers" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "(\\d+)\\+\\1");

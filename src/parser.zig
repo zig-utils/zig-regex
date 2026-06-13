@@ -43,6 +43,7 @@ pub const TokenType = enum {
 pub const Token = struct {
     token_type: TokenType,
     value: u8 = 0,
+    index: usize = 0,
     name: ?[]const u8 = null,
     /// For `escape_p`/`escape_P`: the resolved Unicode property operand.
     prop: ?unicode.PropSpec = null,
@@ -136,8 +137,17 @@ pub const Lexer = struct {
             't' => self.makeToken(.escape_char, '\t'),
             'r' => self.makeToken(.escape_char, '\r'),
             '1', '2', '3', '4', '5', '6', '7', '8', '9' => {
-                // Backreference \1, \2, etc.
-                return self.makeToken(.backref, c - '0');
+                // DecimalEscape: collect the whole decimal integer so `\10`
+                // can resolve to capture group 10 when enough groups exist.
+                var index: usize = c - '0';
+                while (self.peek()) |p| {
+                    if (!std.ascii.isDigit(p)) break;
+                    _ = self.advance();
+                    index = index * 10 + (p - '0');
+                }
+                var tok = self.makeToken(.backref, 0);
+                tok.index = index;
+                return tok;
             },
             'k' => {
                 // ECMAScript named backreference: \k<name>
@@ -734,7 +744,7 @@ pub const Parser = struct {
                 try self.advance();
                 const name = if (token.name) |n| try self.allocator.dupe(u8, n) else null;
                 errdefer if (name) |n| self.allocator.free(n);
-                const index = token.value; // 1-based capture group index; 0 for named-only references
+                const index = token.index; // 1-based capture group index; 0 for named-only references
                 return ast.Node.createBackreference(self.allocator, index, name, span);
             },
             .escape_p, .escape_P => {
