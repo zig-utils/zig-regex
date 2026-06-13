@@ -217,6 +217,7 @@ const Builder = struct {
 /// `num_groups` is the capture count.
 pub fn build(allocator: std.mem.Allocator, root: *ast.Node, num_groups: usize, flags: common.CompileFlags) !?*Plan {
     if (flags.case_insensitive) return null;
+    if (flags.unicode or flags.unicode_sets) return null;
     if (num_groups == 0) return null; // capture-free patterns use the DFA path
 
     var b = Builder{
@@ -293,19 +294,20 @@ fn capEq(a: ?vm.MatchResult, b: ?vm.MatchResult) bool {
 test "onepass: differential vs NFA across patterns/inputs/positions" {
     const allocator = std.testing.allocator;
     const patterns = [_][]const u8{
-        "(\\w+)@(\\w+)",   "(\\d+)-(\\d+)",  "([a-z]+)([0-9]+)",
-        "(foo)([0-9]+)",   "(a+)(b+)",        "(\\w+):(\\d+)",
-        "x(\\d+)y",         "([A-Z])([a-z]+)", "(\\d{2,4})-(\\d+)",
-        "(ab+)(c)",         "(\\d+)\\.(\\d+)",
+        "(\\w+)@(\\w+)", "(\\d+)-(\\d+)",   "([a-z]+)([0-9]+)",
+        "(foo)([0-9]+)", "(a+)(b+)",        "(\\w+):(\\d+)",
+        "x(\\d+)y",      "([A-Z])([a-z]+)", "(\\d{2,4})-(\\d+)",
+        "(ab+)(c)",      "(\\d+)\\.(\\d+)",
         // nullable atoms (still disjoint-bounded)
-        "(\\w*)@(\\w*)",    "(\\d*)-(\\d+)",   "(a?)(b+)",
-        "(x*)(y*)",         "(\\w*)",          "(-?)(\\d+)",
+        "(\\w*)@(\\w*)",
+        "(\\d*)-(\\d+)", "(a?)(b+)",        "(x*)(y*)",
+        "(\\w*)",        "(-?)(\\d+)",
     };
     const inputs = [_][]const u8{
-        "",                 "a",               "ab12",
-        "foo@bar baz@qux",  "12-34 5-6 78-",   "aaabbb ab x",
-        "Hello World abC1", "v1.2.33 9.9",     "x123y x4 xy y9y",
-        "a1b2c3 word 99",   "::: 1:2 ab:cd",   "ab12c abbc abc",
+        "",                 "a",             "ab12",
+        "foo@bar baz@qux",  "12-34 5-6 78-", "aaabbb ab x",
+        "Hello World abC1", "v1.2.33 9.9",   "x123y x4 xy y9y",
+        "a1b2c3 word 99",   "::: 1:2 ab:cd", "ab12c abbc abc",
     };
     var tested: usize = 0;
     for (patterns) |pat| {

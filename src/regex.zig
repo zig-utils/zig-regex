@@ -1964,12 +1964,42 @@ fn variableQuantifierTailBytes(node: *ast.Node, flags: common.CompileFlags) ?Byt
     }
 }
 
+fn containsCapture(node: *ast.Node) bool {
+    return switch (node.node_type) {
+        .group => node.data.group.capture_index != null or containsCapture(node.data.group.child),
+        .concat => containsCapture(node.data.concat.left) or containsCapture(node.data.concat.right),
+        .alternation => containsCapture(node.data.alternation.left) or containsCapture(node.data.alternation.right),
+        .star => containsCapture(node.data.star.child),
+        .plus => containsCapture(node.data.plus.child),
+        .optional => containsCapture(node.data.optional.child),
+        .repeat => containsCapture(node.data.repeat.child),
+        .lookahead => containsCapture(node.data.lookahead.child),
+        .lookbehind => containsCapture(node.data.lookbehind.child),
+        else => false,
+    };
+}
+
 fn capturedVariableTailBytes(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
     switch (node.node_type) {
         .group => {
             if (node.data.group.capture_index != null)
                 return variableQuantifierTailBytes(node.data.group.child, flags);
             return capturedVariableTailBytes(node.data.group.child, flags);
+        },
+        .optional => {
+            const child = node.data.optional.child;
+            if (containsCapture(child)) return variableQuantifierTailBytes(node, flags);
+            return capturedVariableTailBytes(child, flags);
+        },
+        .repeat => {
+            const child = node.data.repeat.child;
+            const variable = node.data.repeat.bounds.max == null or
+                node.data.repeat.bounds.max.? != node.data.repeat.bounds.min;
+            const optional_like = node.data.repeat.bounds.min == 0 and
+                node.data.repeat.bounds.max != null and
+                node.data.repeat.bounds.max.? == 1;
+            if (variable and optional_like and containsCapture(child)) return variableQuantifierTailBytes(node, flags);
+            return capturedVariableTailBytes(child, flags);
         },
         .concat => {
             if (capturedVariableTailBytes(node.data.concat.right, flags)) |set| return set;

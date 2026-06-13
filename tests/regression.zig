@@ -694,3 +694,66 @@ test "regression: bounded literal honors anchors and multiline" {
     defer ml.deinit();
     try std.testing.expectEqual(@as(usize, 2), try ml.count("fn\nx\nfn"));
 }
+
+test "regression: optional capture participates before overlapping greedy capture" {
+    const allocator = std.testing.allocator;
+
+    var anchored = try Regex.compile(allocator, "^(A)?(A.*)$");
+    defer anchored.deinit();
+    if (try anchored.find("AAA")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("AAA", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("A", match.captures[0]);
+        try std.testing.expectEqualStrings("AA", match.captures[1]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+
+    var unanchored = try Regex.compile(allocator, "(A)?(A.*)");
+    defer unanchored.deinit();
+    if (try unanchored.find("zxcasd;fl\\  ^AAaaAAaaaf;lrlrzs")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 13), match.start);
+        try std.testing.expectEqualStrings("AAaaAAaaaf;lrlrzs", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("A", match.captures[0]);
+        try std.testing.expectEqualStrings("AaaAAaaaf;lrlrzs", match.captures[1]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
+test "regression: repeated capture can backtrack before trailing class" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "^([a-z]+)*[a-z]$");
+    defer regex.deinit();
+    if (try regex.find("ab")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("ab", match.slice);
+        try std.testing.expectEqualStrings("a", match.captures[0]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
+test "regression: unicode dot captures full code points in one-pass-shaped pattern" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compileWithFlags(allocator, "b(.).(.).", .{ .unicode = true });
+    defer regex.deinit();
+    if (try regex.find("ab\u{1D306}defg")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), match.start);
+        try std.testing.expectEqualStrings("b\u{1D306}def", match.slice);
+        try std.testing.expectEqualStrings("\u{1D306}", match.captures[0]);
+        try std.testing.expectEqualStrings("e", match.captures[1]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
