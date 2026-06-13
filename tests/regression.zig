@@ -699,3 +699,55 @@ test "regression: literal alternation preserves source order" {
     const long_match = (try long_first.find("abc")).?;
     try std.testing.expectEqualStrings("ab", long_match.slice);
 }
+
+// --- `\bfn\b`-style bounded-literal fast path ---
+//
+// A fixed literal wrapped only in zero-width assertions (`\b`, `^`, `$`, `\A`,
+// `\z`, `\B`) is the whole match, so it's found with a SIMD literal scan plus an
+// inline assertion check instead of running the NFA at every candidate byte
+// (`\bfn\b` was ~14x slower than ripgrep's engine). These lock the boundary
+// semantics, which must stay identical to the NFA's anchor evaluation.
+
+test "regression: `\\bfn\\b` matches only whole words" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "\\bfn\\b");
+    defer re.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), try re.count("fn fnx xfn fn end"));
+    try std.testing.expect(try re.isMatch("a fn b"));
+    try std.testing.expect(!try re.isMatch("fnfn"));
+    try std.testing.expect(!try re.isMatch("define"));
+    const m = (try re.find("  fn  ")).?;
+    try std.testing.expectEqual(@as(usize, 2), m.start);
+    try std.testing.expectEqualStrings("fn", m.slice);
+}
+
+test "regression: bounded-literal half boundaries and `\\B`" {
+    const allocator = std.testing.allocator;
+
+    var pre = try Regex.compile(allocator, "\\bcat");
+    defer pre.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try pre.count("cat scatter category")); // cat, cat(egory)
+
+    var post = try Regex.compile(allocator, "cat\\b");
+    defer post.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try post.count("cat bobcat dog")); // cat, (bob)cat
+
+    var nb = try Regex.compile(allocator, "\\Bcat");
+    defer nb.deinit();
+    try std.testing.expectEqual(@as(usize, 1), try nb.count("cat bobcat")); // only (bob)cat
+}
+
+test "regression: bounded literal honors anchors and multiline" {
+    const allocator = std.testing.allocator;
+
+    var anchored = try Regex.compile(allocator, "^fn$");
+    defer anchored.deinit();
+    try std.testing.expect(try anchored.isMatch("fn"));
+    try std.testing.expect(!try anchored.isMatch("fn\n")); // non-multiline `$` = end of text
+    try std.testing.expect(!try anchored.isMatch(" fn"));
+
+    var ml = try Regex.compileWithFlags(allocator, "^fn$", .{ .multiline = true });
+    defer ml.deinit();
+    try std.testing.expectEqual(@as(usize, 2), try ml.count("fn\nx\nfn"));
+}

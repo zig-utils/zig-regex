@@ -75,6 +75,23 @@ pub const Regex = struct {
     /// patterns; null when the pattern doesn't fit the shape.
     onepass: ?*onepass.Plan = null,
 
+    /// A fixed literal wrapped only in zero-width assertions (`\bfn\b`, `^foo$`,
+    /// `word\b`, …). The whole match is the literal, so it's found with a SIMD
+    /// literal scan plus an inline boundary/anchor check — no per-position NFA.
+    /// Null when the pattern isn't that shape.
+    bounded_literal: ?BoundedLiteral = null,
+
+    /// `\bfn\b`-style descriptor: a fixed `literal` that must be preceded by all
+    /// `pre` assertions (checked at the literal's start) and followed by all
+    /// `post` assertions (checked at its end). `literal` is owned by the regex.
+    pub const BoundedLiteral = struct {
+        literal: []const u8,
+        pre: [4]ast.AnchorType = undefined,
+        pre_len: u8 = 0,
+        post: [4]ast.AnchorType = undefined,
+        post_len: u8 = 0,
+    };
+
     /// Compile a regex pattern with default flags
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex {
         return compileWithFlags(allocator, pattern, .{});
@@ -164,6 +181,14 @@ pub const Regex = struct {
             // Use Thompson NFA engine
             defer tree.deinit();
 
+            // `\bfn\b`-style bounded literal (computed from the AST before it is
+            // freed). Captures disable it (the fast path returns no groups).
+            const bounded_literal = if (tree.capture_count == 0)
+                try detectBoundedLiteral(allocator, tree.root, flags)
+            else
+                null;
+            errdefer if (bounded_literal) |bl| allocator.free(bl.literal);
+
             var comp = compiler.Compiler.initWithFlags(allocator, flags);
             errdefer comp.deinit();
             _ = try comp.compile(&tree);
@@ -181,6 +206,7 @@ pub const Regex = struct {
                 .named_captures = named_captures,
                 .named_capture_list = try named_capture_list.toOwnedSlice(allocator),
                 .onepass = onepass_plan,
+                .bounded_literal = bounded_literal,
             };
         }
     }
@@ -202,6 +228,7 @@ pub const Regex = struct {
 
         self.opt_info.deinit(self.allocator);
         if (self.onepass) |p| p.deinit();
+        if (self.bounded_literal) |bl| self.allocator.free(bl.literal);
 
         deinitNamedCaptureMap(self.allocator, &self.named_captures);
         for (self.named_capture_list) |entry| self.allocator.free(entry.name);
@@ -238,6 +265,45 @@ pub const Regex = struct {
         while (std.mem.indexOfScalarPos(u8, input, i, lit[0])) |p| {
             if (p > last) return null;
             if (std.mem.eql(u8, input[p + 1 .. p + lit.len], lit[1..])) return p;
+            i = p + 1;
+        }
+        return null;
+    }
+
+    /// Whether a `\b` word boundary holds at `pos` (same rule as `vm.isWordBoundary`).
+    fn isWordBoundaryAt(input: []const u8, pos: usize) bool {
+        const before = pos > 0 and common.CharClasses.word.matches(input[pos - 1]);
+        const after = pos < input.len and common.CharClasses.word.matches(input[pos]);
+        return before != after;
+    }
+
+    /// Whether a single zero-width assertion holds at `pos` — identical to the
+    /// NFA's anchor evaluation (vm.zig), including multiline `^`/`$`.
+    fn anchorHolds(self: *const Regex, a: ast.AnchorType, input: []const u8, pos: usize) bool {
+        return switch (a) {
+            .start_line => if (self.flags.multiline) (pos == 0 or input[pos - 1] == '\n') else pos == 0,
+            .end_line => if (self.flags.multiline) (pos == input.len or input[pos] == '\n') else pos == input.len,
+            .start_text => pos == 0,
+            .end_text => pos == input.len,
+            .word_boundary => isWordBoundaryAt(input, pos),
+            .non_word_boundary => !isWordBoundaryAt(input, pos),
+        };
+    }
+
+    fn anchorsHold(self: *const Regex, anchors: []const ast.AnchorType, input: []const u8, pos: usize) bool {
+        for (anchors) |a| if (!self.anchorHolds(a, input, pos)) return false;
+        return true;
+    }
+
+    /// Next `\bfn\b`-style match at or after `from`: a literal occurrence whose
+    /// surrounding zero-width assertions all hold. Returns `{start, end}`.
+    fn boundedLiteralNext(self: *const Regex, bl: BoundedLiteral, input: []const u8, from: usize) ?[2]usize {
+        var i = from;
+        while (literalSearch(input, bl.literal, i)) |p| {
+            const e = p + bl.literal.len;
+            if (self.anchorsHold(bl.pre[0..bl.pre_len], input, p) and
+                self.anchorsHold(bl.post[0..bl.post_len], input, e))
+                return .{ p, e };
             i = p + 1;
         }
         return null;
@@ -600,6 +666,8 @@ pub const Regex = struct {
         // Required-literal fast-fail: a mandatory substring that's absent means
         // there can be no match (works for every engine).
         if (self.requiredAbsent(input)) return false;
+        // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
+        if (self.bounded_literal) |bl| return self.boundedLiteralNext(bl, input, 0) != null;
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
             if (self.flags.case_insensitive) {
@@ -777,6 +845,12 @@ pub const Regex = struct {
     /// Find the first match in the input string
     pub fn find(self: *const Regex, input: []const u8) !?Match {
         if (self.requiredAbsent(input)) return null;
+        // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
+        if (self.bounded_literal) |bl| {
+            if (self.boundedLiteralNext(bl, input, 0)) |m|
+                return Match{ .slice = input[m[0]..m[1]], .start = m[0], .end = m[1] };
+            return null;
+        }
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
             const found = if (self.flags.case_insensitive) blk: {
@@ -1045,6 +1119,15 @@ pub const Regex = struct {
 
         if (self.requiredAbsent(input)) return matches.toOwnedSlice(allocator);
 
+        // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
+        if (self.bounded_literal) |bl| {
+            while (self.boundedLiteralNext(bl, input, pos)) |m| {
+                try matches.append(allocator, Match{ .slice = input[m[0]..m[1]], .start = m[0], .end = m[1] });
+                pos = if (m[1] > m[0]) m[1] else m[1] + 1;
+            }
+            return matches.toOwnedSlice(allocator);
+        }
+
         // Exact-literal fast path: repeated substring search, no NFA.
         if (self.opt_info.exact_literal) |lit| {
             if (self.flags.case_insensitive) {
@@ -1247,6 +1330,15 @@ pub const Regex = struct {
         var pos: usize = 0;
 
         if (self.requiredAbsent(input)) return 0;
+
+        // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
+        if (self.bounded_literal) |bl| {
+            while (self.boundedLiteralNext(bl, input, pos)) |m| {
+                n += 1;
+                pos = if (m[1] > m[0]) m[1] else m[1] + 1;
+            }
+            return n;
+        }
 
         // Exact-literal: repeated substring search.
         if (self.opt_info.exact_literal) |lit| {
@@ -1630,6 +1722,69 @@ pub const Regex = struct {
 };
 
 /// Helper function to detect if AST requires backtracking engine
+/// Append the literal/anchor leaves of a concatenation spine to `out`, in
+/// order. Returns false if any node isn't a literal, anchor, concat, or empty —
+/// i.e. the pattern isn't a plain literal wrapped in zero-width assertions.
+fn flattenBoundedLeaves(node: *ast.Node, out: *std.ArrayList(*ast.Node), allocator: std.mem.Allocator) bool {
+    switch (node.node_type) {
+        .concat => return flattenBoundedLeaves(node.data.concat.left, out, allocator) and
+            flattenBoundedLeaves(node.data.concat.right, out, allocator),
+        .literal, .anchor => {
+            out.append(allocator, node) catch return false;
+            return true;
+        },
+        .empty => return true,
+        else => return false,
+    }
+}
+
+/// Detect a `\bfn\b`-style pattern: a fixed literal (>= 2 bytes, for
+/// selectivity) wrapped only in zero-width assertions, with the assertions
+/// partitioned into those before the literal and those after it. Returns an
+/// owned descriptor or null. Disabled under `i` (the SIMD literal scan is
+/// case-sensitive).
+fn detectBoundedLiteral(allocator: std.mem.Allocator, root: *ast.Node, flags: common.CompileFlags) !?Regex.BoundedLiteral {
+    if (flags.case_insensitive) return null;
+
+    var leaves: std.ArrayList(*ast.Node) = .empty;
+    defer leaves.deinit(allocator);
+    if (!flattenBoundedLeaves(root, &leaves, allocator)) return null;
+
+    var bl: Regex.BoundedLiteral = .{ .literal = &.{} };
+    var lit: std.ArrayList(u8) = .empty;
+    errdefer lit.deinit(allocator);
+    var phase: u8 = 0; // 0 = before literal, 1 = in literal, 2 = after literal
+
+    for (leaves.items) |n| {
+        switch (n.node_type) {
+            .anchor => {
+                if (phase == 1) phase = 2;
+                if (phase == 0) {
+                    if (bl.pre_len >= bl.pre.len) return null;
+                    bl.pre[bl.pre_len] = n.data.anchor;
+                    bl.pre_len += 1;
+                } else {
+                    if (bl.post_len >= bl.post.len) return null;
+                    bl.post[bl.post_len] = n.data.anchor;
+                    bl.post_len += 1;
+                }
+            },
+            .literal => {
+                if (phase == 2) return null; // a second literal run after anchors
+                phase = 1;
+                try lit.append(allocator, n.data.literal);
+            },
+            else => return null,
+        }
+    }
+    if (lit.items.len < 2) {
+        lit.deinit(allocator);
+        return null;
+    }
+    bl.literal = try lit.toOwnedSlice(allocator);
+    return bl;
+}
+
 fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
     switch (node.node_type) {
         // These features require backtracking
