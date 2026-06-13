@@ -125,27 +125,25 @@ pub const Node = struct {
 
         /// The longest byte length the class matches at `input[start..]`, or null.
         /// Strings (`\q{...}`) and nested sets can consume multiple code points;
-        /// for intersection/difference (and complement) only single-code-point
-        /// membership is considered.
+        /// set operations compare exact elements so character operands do not
+        /// subtract multi-code-point string literals that merely share a prefix.
         pub fn matchLongest(self: *const ClassSet, input: []const u8, start: usize, ignore_case: bool) ?usize {
             const u = @import("unicode.zig");
-            if (self.op != .union_ or self.negated) {
+            if (self.op == .union_ and self.negated) {
                 if (start >= input.len) return null;
                 const dec = u.decodeUtf8Lenient(input[start..]) orelse return null;
                 if (!self.matches(dec.codepoint, ignore_case)) return null;
                 return start + dec.len;
             }
+            if (self.op != .union_) {
+                if (self.items.len == 0) return null;
+                const end = itemMatchLongest(self.items[0], input, start, ignore_case) orelse return null;
+                if (!self.containsMatch(input, start, end, ignore_case)) return null;
+                return end;
+            }
             var best: ?usize = null;
             for (self.items) |it| {
-                const e: ?usize = switch (it) {
-                    .string => |s| matchStringItem(input, start, s, ignore_case),
-                    .nested => |n| n.matchLongest(input, start, ignore_case),
-                    .range, .property => blk: {
-                        if (start >= input.len) break :blk null;
-                        const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk null;
-                        break :blk if (itemMatches(it, dec.codepoint, ignore_case)) start + dec.len else null;
-                    },
-                };
+                const e = itemMatchLongest(it, input, start, ignore_case);
                 if (e) |end| {
                     if (best == null or end > best.?) best = end;
                 }
@@ -172,7 +170,53 @@ pub const Node = struct {
             };
             return r != self.negated;
         }
+
+        fn containsMatch(self: *const ClassSet, input: []const u8, start: usize, end: usize, ignore_case: bool) bool {
+            const r = switch (self.op) {
+                .union_ => blk: {
+                    for (self.items) |it| if (itemContainsMatch(it, input, start, end, ignore_case)) break :blk true;
+                    break :blk false;
+                },
+                .intersection => blk: {
+                    for (self.items) |it| if (!itemContainsMatch(it, input, start, end, ignore_case)) break :blk false;
+                    break :blk true;
+                },
+                .difference => blk: {
+                    if (self.items.len == 0) break :blk false;
+                    if (!itemContainsMatch(self.items[0], input, start, end, ignore_case)) break :blk false;
+                    for (self.items[1..]) |it| if (itemContainsMatch(it, input, start, end, ignore_case)) break :blk false;
+                    break :blk true;
+                },
+            };
+            return r != self.negated;
+        }
     };
+
+    fn itemMatchLongest(it: ClassItem, input: []const u8, start: usize, ignore_case: bool) ?usize {
+        const u = @import("unicode.zig");
+        return switch (it) {
+            .string => |s| matchStringItem(input, start, s, ignore_case),
+            .nested => |n| n.matchLongest(input, start, ignore_case),
+            .range, .property => blk: {
+                if (start >= input.len) break :blk null;
+                const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk null;
+                break :blk if (itemMatches(it, dec.codepoint, ignore_case)) start + dec.len else null;
+            },
+        };
+    }
+
+    fn itemContainsMatch(it: ClassItem, input: []const u8, start: usize, end: usize, ignore_case: bool) bool {
+        const u = @import("unicode.zig");
+        return switch (it) {
+            .string => |s| if (matchStringItem(input, start, s, ignore_case)) |e| e == end else false,
+            .nested => |n| n.containsMatch(input, start, end, ignore_case),
+            .range, .property => blk: {
+                const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk false;
+                if (start + dec.len != end) break :blk false;
+                break :blk itemMatches(it, dec.codepoint, ignore_case);
+            },
+        };
+    }
 
     fn itemMatches(it: ClassItem, cp: u21, ignore_case: bool) bool {
         const u = @import("unicode.zig");

@@ -951,6 +951,19 @@ test "regression: unicode class ignore-case uses simple common folds" {
     }
 }
 
+test "regression: unicode set difference keeps string literals distinct from characters" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode_sets = true };
+
+    var regex = try Regex.compileWithFlags(allocator, "^[\\q{0|2|4|9\\uFE0F\\u20E3}--\\p{ASCII_Hex_Digit}]+$", flags);
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("9\u{FE0F}\u{20E3}"));
+    try std.testing.expect(!try regex.isMatch("0"));
+    try std.testing.expect(!try regex.isMatch("2"));
+    try std.testing.expect(!try regex.isMatch("4"));
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is
