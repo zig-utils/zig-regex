@@ -171,6 +171,27 @@ pub const VM = struct {
         return p_lower == i_lower;
     }
 
+    fn applyTransitionCaptures(self: *const VM, thread: *Thread, transition: compiler.Transition, pos: usize) void {
+        for (transition.clear_captures) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                thread.capture_starts[cap_idx - 1] = null;
+                thread.capture_ends[cap_idx - 1] = null;
+            }
+        }
+
+        const state = self.nfa.getState(transition.to);
+        if (state.capture_start) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                thread.capture_starts[cap_idx - 1] = pos;
+            }
+        }
+        if (state.capture_end) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) {
+                thread.capture_ends[cap_idx - 1] = pos;
+            }
+        }
+    }
+
     /// Check if the pattern matches at a specific position in the input
     pub fn matchAt(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
         // Borrow the VM's reusable thread lists (empty on entry) and hand them
@@ -282,19 +303,7 @@ pub const VM = struct {
                     if (matches) {
                         var new_thread = try self.cloneThread(thread.*);
                         new_thread.state = transition.to;
-
-                        // Update captures if this state marks a capture boundary
-                        const next_state = self.nfa.getState(transition.to);
-                        if (next_state.capture_start) |cap_idx| {
-                            if (cap_idx > 0 and cap_idx <= self.num_captures) {
-                                new_thread.capture_starts[cap_idx - 1] = pos;
-                            }
-                        }
-                        if (next_state.capture_end) |cap_idx| {
-                            if (cap_idx > 0 and cap_idx <= self.num_captures) {
-                                new_thread.capture_ends[cap_idx - 1] = pos + 1;
-                            }
-                        }
+                        self.applyTransitionCaptures(&new_thread, transition, pos + 1);
 
                         try next_threads.append(self.allocator, new_thread);
                     }
@@ -390,19 +399,7 @@ pub const VM = struct {
 
                     var new_thread = try self.cloneThread(thread);
                     new_thread.state = transition.to;
-
-                    // Update captures if this state marks a capture boundary
-                    const next_state = self.nfa.getState(transition.to);
-                    if (next_state.capture_start) |cap_idx| {
-                        if (cap_idx > 0 and cap_idx <= self.num_captures) {
-                            new_thread.capture_starts[cap_idx - 1] = pos;
-                        }
-                    }
-                    if (next_state.capture_end) |cap_idx| {
-                        if (cap_idx > 0 and cap_idx <= self.num_captures) {
-                            new_thread.capture_ends[cap_idx - 1] = pos;
-                        }
-                    }
+                    self.applyTransitionCaptures(&new_thread, transition, pos);
 
                     try threads.append(self.allocator, new_thread);
                     // Don't recurse immediately - let addEpsilonClosure handle it iteratively
@@ -431,19 +428,7 @@ pub const VM = struct {
 
                         var new_thread = try self.cloneThread(thread);
                         new_thread.state = transition.to;
-
-                        // Update captures if this state marks a capture boundary
-                        const next_state = self.nfa.getState(transition.to);
-                        if (next_state.capture_start) |cap_idx| {
-                            if (cap_idx > 0 and cap_idx <= self.num_captures) {
-                                new_thread.capture_starts[cap_idx - 1] = pos;
-                            }
-                        }
-                        if (next_state.capture_end) |cap_idx| {
-                            if (cap_idx > 0 and cap_idx <= self.num_captures) {
-                                new_thread.capture_ends[cap_idx - 1] = pos;
-                            }
-                        }
+                        self.applyTransitionCaptures(&new_thread, transition, pos);
 
                         try threads.append(self.allocator, new_thread);
                         // Don't recurse immediately - let addEpsilonClosure handle it iteratively

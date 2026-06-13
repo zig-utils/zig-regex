@@ -1064,6 +1064,40 @@ test "regression: xml shallow parser delimiter pattern is not too complex" {
     try std.testing.expect(try markup.isMatch("name \"value\">"));
 }
 
+test "regression: repeated optional captures with trailing delimiter are not too complex" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "(z)((a+)?(b+)?(c))*");
+    defer regex.deinit();
+    if (try regex.find("zaacbbbcac")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("zaacbbbcac", match.slice);
+        try std.testing.expectEqual(@as(usize, 5), match.captures.len);
+        try std.testing.expectEqualStrings("z", match.captures[0]);
+        try std.testing.expectEqualStrings("ac", match.captures[1]);
+        try std.testing.expectEqualStrings("a", match.captures[2]);
+        try std.testing.expect(!match.captures_present[3]);
+        try std.testing.expectEqualStrings("c", match.captures[4]);
+    } else return error.TestExpectedMatch;
+}
+
+test "regression: repeated alternatives clear captures from previous iterations" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "((a)|(b))*");
+    defer regex.deinit();
+    if (try regex.find("ab")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("ab", match.slice);
+        try std.testing.expectEqual(@as(usize, 3), match.captures.len);
+        try std.testing.expectEqualStrings("b", match.captures[0]);
+        try std.testing.expect(!match.captures_present[1]);
+        try std.testing.expectEqualStrings("b", match.captures[2]);
+    } else return error.TestExpectedMatch;
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is
@@ -1153,8 +1187,8 @@ test "regression: capture-bearing alternatives preserve participating captures" 
 test "regression: Matcher matches the plain API and reuses safely" {
     const allocator = std.testing.allocator;
     const lines = [_][]const u8{
-        "fn helper() void {}", "  return x + y;", "}", "", "const a = 1;",
-        "a1 b2 c3", "no digits here", "x9", "    \t  ", "word another word",
+        "fn helper() void {}", "  return x + y;", "}",  "",         "const a = 1;",
+        "a1 b2 c3",            "no digits here",  "x9", "    \t  ", "word another word",
     };
     // Mix of engines: DFA (`\w+\s+\w+`, `//.*`), literal (`fn`), bounded literal
     // (`\bfn\b`), and NFA-fallback (`\w+\b\w`, `a.*?x`) + backtracking (`(\w)\1`)

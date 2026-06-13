@@ -185,6 +185,10 @@ pub const PatternAnalyzer = struct {
                 // the per-group factor must stay near 1 to avoid a false
                 // cumulative CRITICAL.
                 self.explosion_factor *= 1.5;
+            } else if (hasFixedEnd(child)) {
+                // Likewise, a required trailing delimiter (e.g.
+                // `((a+)?(b+)?c)*`) gives each iteration a fixed endpoint.
+                self.explosion_factor *= 1.5;
             } else if (self.isAtomicGroup(child)) {
                 // Atomic patterns like character classes are less dangerous
                 self.explosion_factor *= 1.5;
@@ -399,6 +403,15 @@ pub const PatternAnalyzer = struct {
             .literal, .char_class, .anchor => true,
             .group => hasFixedStart(node.data.group.child),
             .concat => hasFixedStart(node.data.concat.left),
+            else => false,
+        };
+    }
+
+    fn hasFixedEnd(node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .literal, .char_class, .anchor => true,
+            .group => hasFixedEnd(node.data.group.child),
+            .concat => hasFixedEnd(node.data.concat.right),
             else => false,
         };
     }

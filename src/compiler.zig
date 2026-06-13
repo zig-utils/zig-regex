@@ -24,6 +24,7 @@ pub const Transition = struct {
     transition_type: TransitionType,
     to: StateId,
     data: TransitionData,
+    clear_captures: []const usize = &.{},
 
     pub const TransitionData = union(TransitionType) {
         epsilon: void,
@@ -38,6 +39,15 @@ pub const Transition = struct {
             .transition_type = .epsilon,
             .to = to,
             .data = .{ .epsilon = {} },
+        };
+    }
+
+    pub fn epsilonClearing(to: StateId, captures: []const usize) Transition {
+        return .{
+            .transition_type = .epsilon,
+            .to = to,
+            .data = .{ .epsilon = {} },
+            .clear_captures = captures,
         };
     }
 
@@ -58,7 +68,7 @@ pub const Transition = struct {
             .data = .{ .char_class = .{
                 .ranges = ranges_copy,
                 .negated = class.negated,
-            }},
+            } },
         };
     }
 
@@ -98,10 +108,13 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
-        // Free char_class ranges in transitions
+        // Free owned transition payloads.
         for (self.transitions.items) |transition| {
             if (transition.transition_type == .char_class) {
                 self.allocator.free(transition.data.char_class.ranges);
+            }
+            if (transition.clear_captures.len != 0) {
+                self.allocator.free(transition.clear_captures);
             }
         }
         self.transitions.deinit(self.allocator);
@@ -311,8 +324,8 @@ pub const Compiler = struct {
 
         // Start state has epsilon transitions to both branches
         const start_state = self.nfa.getState(start);
-        try start_state.addTransition(Transition.epsilon(left_frag.start));
-        try start_state.addTransition(Transition.epsilon(right_frag.start));
+        try self.addBranchTransition(start_state, left_frag.start, alt.right);
+        try self.addBranchTransition(start_state, right_frag.start, alt.left);
 
         // Both branch accepts transition to final accept
         const left_accept = self.nfa.getState(left_frag.accept);
@@ -393,10 +406,10 @@ pub const Compiler = struct {
         if (greedy) {
             // Greedy: try to match first, then skip
             try start_state.addTransition(Transition.epsilon(child_frag.start));
-            try start_state.addTransition(Transition.epsilon(accept));
+            try self.addBranchTransition(start_state, accept, child);
         } else {
             // Lazy: try to skip first, then match
-            try start_state.addTransition(Transition.epsilon(accept));
+            try self.addBranchTransition(start_state, accept, child);
             try start_state.addTransition(Transition.epsilon(child_frag.start));
         }
 
@@ -586,6 +599,49 @@ pub const Compiler = struct {
         }
 
         return child_frag;
+    }
+
+    fn addBranchTransition(self: *Compiler, state: *State, to: StateId, skipped: *ast.Node) !void {
+        const captures = try self.captureIndicesIn(skipped);
+        errdefer self.allocator.free(captures);
+        if (captures.len == 0) {
+            self.allocator.free(captures);
+            try state.addTransition(Transition.epsilon(to));
+        } else {
+            try state.addTransition(Transition.epsilonClearing(to, captures));
+        }
+    }
+
+    fn captureIndicesIn(self: *Compiler, node: *ast.Node) ![]usize {
+        var captures: std.ArrayList(usize) = .empty;
+        errdefer captures.deinit(self.allocator);
+        try self.collectCaptureIndices(node, &captures);
+        return captures.toOwnedSlice(self.allocator);
+    }
+
+    fn collectCaptureIndices(self: *Compiler, node: *ast.Node, captures: *std.ArrayList(usize)) !void {
+        switch (node.node_type) {
+            .group => {
+                const group = node.data.group;
+                if (group.capture_index) |index| try captures.append(self.allocator, index);
+                try self.collectCaptureIndices(group.child, captures);
+            },
+            .concat => {
+                try self.collectCaptureIndices(node.data.concat.left, captures);
+                try self.collectCaptureIndices(node.data.concat.right, captures);
+            },
+            .alternation => {
+                try self.collectCaptureIndices(node.data.alternation.left, captures);
+                try self.collectCaptureIndices(node.data.alternation.right, captures);
+            },
+            .star => try self.collectCaptureIndices(node.data.star.child, captures),
+            .plus => try self.collectCaptureIndices(node.data.plus.child, captures),
+            .optional => try self.collectCaptureIndices(node.data.optional.child, captures),
+            .repeat => try self.collectCaptureIndices(node.data.repeat.child, captures),
+            .lookahead => try self.collectCaptureIndices(node.data.lookahead.child, captures),
+            .lookbehind => try self.collectCaptureIndices(node.data.lookbehind.child, captures),
+            else => {},
+        }
     }
 
     /// Compile anchor
