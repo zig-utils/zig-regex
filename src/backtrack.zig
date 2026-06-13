@@ -890,14 +890,14 @@ pub const BacktrackEngine = struct {
     fn matchGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {
         const start_pos = pos;
 
-        // Inline modifiers `(?imsu:...)` adjust i/m/s/u only within the group
-        // body. (The `x` and `U` flags are parse-time and never reach here.)
+        // Inline modifiers `(?ims:...)` adjust i/m/s only within the group
+        // body. (The local `x` and `U` flags are parse-time and never reach
+        // here; ECMAScript does not allow `u` as an inline modifier.)
         const saved_flags = self.flags;
         if (group.mod) |m| {
             if (m.i) |b| self.flags.case_insensitive = b;
             if (m.m) |b| self.flags.multiline = b;
             if (m.s) |b| self.flags.dot_all = b;
-            if (m.u) |b| self.flags.unicode = b;
         }
         defer if (group.mod != null) {
             self.flags = saved_flags;

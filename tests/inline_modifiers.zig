@@ -218,17 +218,11 @@ test "swap-greedy is scoped: outer quantifier stays greedy" {
     try std.testing.expectEqual(@as(usize, 3), m.slice.len); // "xxy"
 }
 
-test "unicode (?u:…) / (?-u:…) compile and compose" {
+test "unicode is not an inline modifier" {
     const allocator = std.testing.allocator;
-    inline for (.{ "(?u:abc)", "(?-u:abc)", "a(?u:b)c" }) |pat| {
-        var re = try Regex.compile(allocator, pat);
-        re.deinit();
+    inline for (.{ "(?u:abc)", "(?-u:abc)", "a(?u:b)c", "(?iu:abc)", "(?u-:abc)" }) |pat| {
+        try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, pat));
     }
-
-    // u composes with i — the i still folds case.
-    var re = try Regex.compile(allocator, "(?iu:abc)");
-    defer re.deinit();
-    try std.testing.expect(try re.isMatch("ABC"));
 }
 
 test "early error: unknown / repeated new flags" {

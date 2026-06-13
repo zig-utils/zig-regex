@@ -380,10 +380,11 @@ pub const Lexer = struct {
 };
 
 /// Whether `c` can begin an inline-modifier flag run after `(?` — one of the
-/// recognized flag letters (i/m/s/x/u/U) or the `-` that starts the unset group.
+/// recognized flag letters (i/m/s plus local x/U) or the `-` that starts the
+/// unset group. ECMAScript inline modifiers do not include `u`.
 fn isInlineFlagStart(c: u8) bool {
     return switch (c) {
-        'i', 'm', 's', 'x', 'u', 'U', '-' => true,
+        'i', 'm', 's', 'x', 'U', '-' => true,
         else => false,
     };
 }
@@ -898,12 +899,12 @@ pub const Parser = struct {
                                 return RegexError.UnexpectedCharacter;
                             }
                         } else if (isInlineFlagStart(self.current_token.value)) {
-                            // Inline modifiers: `(?imsxuU-imsxuU:...)` scopes a
-                            // group body; `(?imsxuU-imsxuU)` (no body) scopes the
-                            // rest of the enclosing sequence. The match-time flags
-                            // i/m/s/u become a FlagDelta on the group; the
-                            // parse-time flags x (extended) and U (swap-greedy)
-                            // are applied to the parser/lexer for the scope.
+                            // Inline modifiers: `(?imsxU-imsxU:...)` scopes a
+                            // group body; `(?imsxU-imsxU)` (no body) scopes the
+                            // rest of the enclosing sequence. The ECMAScript
+                            // match-time flags i/m/s become a FlagDelta on the
+                            // group; local parse-time flags x (extended) and U
+                            // (swap-greedy) are applied to the parser/lexer.
                             var mod = ast.Node.FlagDelta{};
                             var new_extended = self.extended;
                             var new_swap_greedy = self.swap_greedy;
@@ -911,10 +912,10 @@ pub const Parser = struct {
                             var standalone = false;
                             // Early errors: a flag may not repeat within, or appear
                             // in both, the add and remove groups (and only the
-                            // recognized flags i/m/s/x/u/U are permitted — any
+                            // recognized flags i/m/s/x/U are permitted — any
                             // other code point is a syntax error).
-                            var add_mask: u6 = 0;
-                            var remove_mask: u6 = 0;
+                            var add_mask: u5 = 0;
+                            var remove_mask: u5 = 0;
                             while (true) {
                                 if (self.peek() == .rparen) {
                                     standalone = true;
@@ -932,13 +933,12 @@ pub const Parser = struct {
                                     removing = true;
                                     try self.advance();
                                 } else {
-                                    const bit: u6 = switch (v) {
+                                    const bit: u5 = switch (v) {
                                         'i' => 1 << 0,
                                         'm' => 1 << 1,
                                         's' => 1 << 2,
                                         'x' => 1 << 3,
-                                        'u' => 1 << 4,
-                                        'U' => 1 << 5,
+                                        'U' => 1 << 4,
                                         else => return RegexError.UnexpectedCharacter,
                                     };
                                     const side = if (removing) &remove_mask else &add_mask;
@@ -950,7 +950,6 @@ pub const Parser = struct {
                                         'i' => mod.i = on,
                                         'm' => mod.m = on,
                                         's' => mod.s = on,
-                                        'u' => mod.u = on,
                                         'x' => new_extended = on,
                                         'U' => new_swap_greedy = on,
                                         else => unreachable,
