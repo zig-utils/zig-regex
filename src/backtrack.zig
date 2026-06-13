@@ -379,12 +379,6 @@ pub const BacktrackEngine = struct {
                 }
             },
             .star, .plus, .optional, .repeat => {
-                // Check if quantifier can match from pos to target_end
-                if (pos == target_end) {
-                    return node.node_type == .star or node.node_type == .optional or
-                        (node.node_type == .repeat and node.data.repeat.bounds.min == 0);
-                }
-
                 const child = switch (node.node_type) {
                     .star => node.data.star.child,
                     .plus => node.data.plus.child,
@@ -392,6 +386,24 @@ pub const BacktrackEngine = struct {
                     .repeat => node.data.repeat.child,
                     else => unreachable,
                 };
+                const min: usize = switch (node.node_type) {
+                    .star, .optional => 0,
+                    .plus => 1,
+                    .repeat => node.data.repeat.bounds.min,
+                    else => unreachable,
+                };
+
+                // A required zero-width iteration, such as `(?=(x)){1,1}`,
+                // still runs the child and can update captures. Optional
+                // zero-width iterations are skipped, matching RepeatMatcher's
+                // min=0 empty-iteration failure rule.
+                if (pos == target_end) {
+                    var count: usize = 0;
+                    while (count < min) : (count += 1) {
+                        if (!self.matchNodeConstrained(child, pos, target_end)) return false;
+                    }
+                    return true;
+                }
 
                 // For optional, only one match allowed
                 if (node.node_type == .optional) {

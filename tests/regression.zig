@@ -122,6 +122,33 @@ test "regression: nullable quantified iteration can continue with progress" {
     }
 }
 
+test "regression: required zero-width quantified lookahead preserves captures" {
+    const allocator = std.testing.allocator;
+
+    var required = try Regex.compile(allocator, "(?:(?=(abc))){1,1}a");
+    defer required.deinit();
+    if (try required.find("abc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("a", match.slice);
+        try std.testing.expectEqualStrings("abc", match.captures[0]);
+        try std.testing.expect(match.captures_present[0]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+
+    var optional = try Regex.compile(allocator, "(?:(?=(abc)))?a");
+    defer optional.deinit();
+    if (try optional.find("abc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("a", match.slice);
+        try std.testing.expect(!match.captures_present[0]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
 // --- min > max quantifier rejection ---
 
 test "regression: {10,5} is rejected as invalid" {
