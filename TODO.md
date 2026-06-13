@@ -510,91 +510,77 @@ optimizations — each was either prototyped and reverted, or scoped and judged 
 large/risky to rush. Benchmarks below are `count` over a ~14 MB code haystack
 (stdlib + this repo's `src/`) unless noted; ratios are `zig / rust` (lower is better).
 
-### 1. Rare-byte literal prefilter — *prototyped, reverted (do not re-add naively)*
+### 1. Literal prefilter (rare-byte / SIMD memmem) — ✅ DONE
 
-**What it is.** When scanning for a literal, anchor the SIMD `indexOfScalar` on the
-literal's **rarest** byte (then verify the whole literal) instead of always its
-**first** byte — the trick ripgrep's `memmem` uses. e.g. for `try\s+\w+`, scan for
-`y` instead of the common `t`.
+**Shipped** as `LiteralPrefilter` (`src/regex.zig`): a per-search, adaptive literal
+search behind every literal path (`exact_literal`, the `literal_prefix` prefilter in
+`skipToCandidate`, and the `\b`-bounded-literal fast path). From a small spread sample
+of the input it picks one of two strategies:
 
-**Why it's not in:** A first prototype used a **static English-frequency table** to
-pick the rare byte. It helped some patterns (`try\s+\w+` 5.4x → 1.5x) but **regressed
-the headline literal benchmarks** because English frequencies mispredict source code:
+- **first-byte** — SIMD `indexOfScalar` on the *rarer* probe byte, then verify
+  (optimal when a byte is rare, e.g. `h` in `hello`);
+- **two-byte SIMD memmem** — the generic-SIMD search ripgrep/`memchr` use: two
+  distinct probe bytes tested per 16-byte block with a cheap `@reduce(.Or)` (no
+  ARM-hostile per-lane movemask), scalar-confirming only blocks that hit.
 
-| pattern | haystack | first-byte (shipped) | static rare-byte (reverted) |
-|---|---|--:|--:|
-| `hello` | word haystack (#10) | **0.55x** | 2.39x ❌ |
-| `test` | word haystack (#10) | **~0.6x** | 2.44x ❌ |
-| `hello` | code haystack | ~0.9x | 10.6x ❌ |
+memmem is chosen when the anchor byte occurs far more often than the two-byte pair
+(`anchor > 3·pair`) — i.e. most anchor hits are dead ends (`f` is in `if`/`for` but
+`fn` is rare), so first-byte's many failed restarts lose. Results vs Rust on the code
+haystack: `fn` 5.8x → **1.4x**, `pub\s+fn` 3.9x → **0.6x**, `\bfn\b` 4x → **1.2x**,
+`regex` 1.1x → **0.4x**; no regression on `hello`/`test` (parity). Differential-fuzzed
+(20k random pattern/text trials).
 
-Root cause: `l` is *rare* in English but *common* in code (`null`, `all`, `while`,
-`call`, …), so the table picked a bad anchor. Reverted to first-byte scanning
-(commit history) to protect the issue's literal benchmarks.
+**The journey (why the obvious approaches don't work) — keep for context:** a static
+English-frequency table to pick the rare byte regressed `hello`/`test` badly (`l` is
+rare in English, common in code). An always-on two-byte filter regressed rare-first-byte
+literals (per-block overhead when first-byte is already sparse). The adaptive
+`anchor > 3·pair` rule (sampled from the *actual* input) is what makes it safe — it
+keeps `hello` on first-byte (every `h` precedes its `o`, ratio ~1) while routing `fn`
+(ratio ~19) to memmem.
 
-**What a correct version needs:**
+**Possible further work (optional):** a Teddy multi-substring SIMD matcher for literal
+*alternations* (`foo|bar|baz`); and AVX2 (32-byte) blocks on x86.
 
-- [ ] A **corpus-tuned byte-frequency table** (port ripgrep's `byte_frequencies`,
-      derived from a large mixed corpus — not hand-rolled English frequencies).
-- [ ] A **dynamic false-positive guard**: sample the prefilter's hit rate on the
-      first N KB; if the chosen "rare" byte isn't actually selective on *this*
-      haystack, fall back to first-byte (or disable the prefilter). ripgrep does
-      exactly this — the static table alone is not safe.
-- [ ] Apply it behind `literalSearch` so every literal path benefits (`exact_literal`,
-      `literal_prefix` prefilter in `skipToCandidate`, and the `\b`-bounded-literal
-      fast path), **gated** so it can never regress the simple-literal case.
-- [ ] Differential + benchmark tests across both word and code haystacks, asserting
-      no regression on `hello`/`test`/`fn` vs the current first-byte path.
+### 2. Lazy-DFA inner-loop tuning for general class patterns — *open (near-parity)*
 
-**Related deeper win:** a hand-written **SIMD `memmem`** (vectorized multi-byte
-compare, e.g. two-byte "generic SIMD" or a Teddy multi-substring matcher) would close
-the short-literal gap that remains even with a good rare byte — `fn` and `\bfn\b` are
-still ~4x on dense code purely because Rust uses a vectorized multi-byte search where
-we do first-byte-scan + scalar verify.
+The remaining behind-Rust patterns are all **leading-character-class** shapes that
+already run on the lazy DFA with the leading-class run-skip — they're at **near
+parity**, not the dramatic gaps the earlier work fixed:
 
-### 2. Unanchored single-pass DFA — *deferred (largest/most delicate)*
-
-**What it is.** Today `find`/`findAll`/`count`/`isMatch` on a general pattern run the
-lazy DFA **anchored from each candidate start** (with a leading-class run-skip). A true
-**unanchored** DFA would make one left-to-right O(n) pass for the whole input.
-
-**Why it's deferred:** it targets only the *smallest* remaining gaps, none of which are
-in the issue's reported benchmarks:
-
-| pattern | current ratio |
+| pattern | ratio |
 |---|--:|
 | `\w+[0-9]` | ~1.35x |
-| `[a-z]+[0-9]+` | ~1.30x |
-| `\d+\.\d+` | ~1.50x |
+| `[a-z]+[0-9]+` | ~1.37x |
+| `\d+\.\d+` | ~1.39x |
+| `\w+\s+\w+` | ~1.15x |
 
-and doing it **correctly is large and subtle**: a naive `.*?`-prefixed forward DFA
-finds *a* match end but not the engine's **leftmost-longest, non-overlapping** match.
-Preserving exact semantics needs a **forward DFA (find end) + reverse DFA (find the
-leftmost start)** — RE2's approach — i.e. a second compiled automaton and reverse
-scanning. Worth doing as a focused change, not a rushed one.
+The gap is **lazy-DFA stepping efficiency** vs Rust's heavily-tuned DFA (transition
+table layout / hot loop), *not* an anchoring problem — `dfaFailSkip` already skips the
+leading class run, so a per-start scan isn't the bottleneck here. Candidate work:
 
-**Plan when picked up:**
-
-- [ ] Build a reverse NFA/DFA alongside the forward one (`src/dfa.zig`).
-- [ ] Forward unanchored pass to locate each match's end; reverse anchored pass from
-      that end to recover the leftmost start; resume after the end (non-overlapping).
-- [ ] Wire into `count`/`isMatch` first (no captures), then capture-free
-      `find`/`findAll`; keep the per-start anchored path as the fallback.
-- [ ] **Heavy differential testing** vs the current engine across many
-      patterns/inputs/positions before enabling (this is the correctness risk).
-- [ ] Bound DFA state growth (reuse the existing `MAX_STATES` overflow → NFA fallback).
+- [ ] Tighten the `dfa.zig` hot loop (the `trans[s*256 + byte]` step): keep `trans`/
+      `acc` as raw pointers across the scan, prefetch, and avoid the per-byte
+      `UNCOMPUTED` branch once a state is fully realized.
+- [ ] An **unanchored single-pass DFA** *could* help patterns whose leading atom is
+      *not* an unbounded class (no run-skip), but it is the largest/most delicate
+      change: a naive `.*?`-prefixed forward DFA finds *a* match end, not the engine's
+      **leftmost-longest, non-overlapping** match. Exact semantics need a **forward +
+      reverse DFA** (RE2's approach: forward finds the end, reverse-anchored finds the
+      leftmost start), with **heavy differential testing** against the current engine
+      before enabling. Only worth it if profiling shows per-start scanning (not DFA
+      stepping) is the bottleneck for a real workload.
 
 ### 3. Remaining measured gaps (summary)
 
-After the `\s`, `.`, and `\b`-bounded-literal wins, these are the patterns still
-behind Rust on the code haystack — all explained by the two items above:
+After the `\s`, `.`, `\b`-bounded-literal, and SIMD-memmem wins, the only patterns
+still behind Rust on the code haystack are the near-parity class shapes:
 
 | pattern | ratio | closed by |
 |---|--:|---|
-| `fn`, `\bfn\b` | ~4–5x | SIMD `memmem` / rare-byte (item 1) |
-| `pub\s+fn`, `try\s+\w+` | ~1.5–3x | rare-byte prefilter (item 1) |
-| `\w+_\w+` | ~3.6x | inner-literal prefilter (find the required `_`, anchor the scan) — same selectivity-guard caveats as item 1 |
-| `\w+[0-9]`, `\d+\.\d+` | ~1.3–1.5x | unanchored DFA (item 2) |
+| `\w+[0-9]`, `[a-z]+[0-9]+`, `\d+\.\d+` | ~1.3–1.4x | DFA inner-loop tuning (item 2) |
+| `\w+\s+\w+` | ~1.15x | DFA inner-loop tuning (item 2) |
+| `\w+_\w+` | ~3.6x | inner-literal prefilter (scan the required `_`, then run the DFA around it) — same selectivity caveats as the memmem prefilter |
 
-Patterns already at parity-or-better and **not** to regress when touching the above:
-`\w+\s+\w+`, `//.*`, `a.c`, `\w{3,}`, `[A-Z]\w+`, `hello`/`test`/`regex` (word haystack),
+Now at parity-or-better (and **not** to regress): `fn`, `\bfn\b`, `pub\s+fn`, `regex`,
+`//.*`, `a.c`, `\w{3,}`, `[A-Z]\w+`, `hello`/`test` (word haystack),
 `\d+`, `\w+`.
