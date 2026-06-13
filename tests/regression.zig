@@ -880,3 +880,16 @@ test "regression: repeated alternatives preserve source-order iterations" {
         try std.testing.expectEqualStrings("ba", match.captures[0]);
     } else return error.TestExpectedMatch;
 }
+
+test "regression: unicode surrogate escape pairs match astral input" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true };
+
+    var pair = try Regex.compileWithFlags(allocator, "\\uD834\\uDF06", flags);
+    defer pair.deinit();
+    try std.testing.expect(try pair.isMatch("\u{1D306}"));
+
+    var codepoint = try Regex.compileWithFlags(allocator, "\\u{1D306}", flags);
+    defer codepoint.deinit();
+    try std.testing.expect(try codepoint.isMatch("\u{1D306}"));
+}

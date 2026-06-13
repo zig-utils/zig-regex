@@ -292,7 +292,25 @@ pub const Lexer = struct {
             }
             self.pos += 4;
         }
+        if (self.unicode_strict and cp >= 0xD800 and cp <= 0xDBFF) {
+            if (self.peekSurrogatePairLow()) |lo| {
+                self.pos += 6;
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            }
+        }
         return self.emitCodepoint(@intCast(cp));
+    }
+
+    fn peekSurrogatePairLow(self: *Lexer) ?u32 {
+        if (self.pos + 6 > self.input.len) return null;
+        if (self.input[self.pos] != '\\' or self.input[self.pos + 1] != 'u') return null;
+        var cp: u32 = 0;
+        var i: usize = 0;
+        while (i < 4) : (i += 1) {
+            const d = self.peekHex(2 + i) orelse return null;
+            cp = cp * 16 + d;
+        }
+        return if (cp >= 0xDC00 and cp <= 0xDFFF) cp else null;
     }
 
     /// The hex value of the digit at `self.pos + offset`, or null.
