@@ -1016,6 +1016,38 @@ test "regression: unicode sets reject complements containing strings" {
     );
 }
 
+test "regression: unicode mode rejects restricted identity escapes" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true };
+
+    const invalid = [_][]const u8{
+        "\\A",
+        "\\z",
+        "\\Z",
+        "\\k",
+        "[\\A]",
+    };
+    for (invalid) |pattern| {
+        try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, pattern, flags));
+    }
+}
+
+test "regression: unicode mode rejects quantified assertions" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true };
+
+    const invalid = [_][]const u8{
+        "(?=.)*",
+        "(?=.)+?",
+        "(?=.){1,2}",
+        "(?!.)?",
+        "(?!.){1,}?",
+    };
+    for (invalid) |pattern| {
+        try std.testing.expectError(RegexError.InvalidQuantifier, Regex.compileWithFlags(allocator, pattern, flags));
+    }
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is

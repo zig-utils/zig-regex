@@ -132,9 +132,9 @@ pub const Lexer = struct {
             'S' => self.makeToken(.escape_S, 0),
             'b' => self.makeToken(.escape_b, 0),
             'B' => self.makeToken(.escape_B, 0),
-            'A' => self.makeToken(.escape_A, 0),
-            'z' => self.makeToken(.escape_z, 0),
-            'Z' => self.makeToken(.escape_Z, 0),
+            'A' => if (self.unicode_strict) RegexError.InvalidEscapeSequence else self.makeToken(.escape_A, 0),
+            'z' => if (self.unicode_strict) RegexError.InvalidEscapeSequence else self.makeToken(.escape_z, 0),
+            'Z' => if (self.unicode_strict) RegexError.InvalidEscapeSequence else self.makeToken(.escape_Z, 0),
             'n' => self.makeToken(.escape_char, '\n'),
             't' => self.makeToken(.escape_char, '\t'),
             'r' => self.makeToken(.escape_char, '\r'),
@@ -170,6 +170,7 @@ pub const Lexer = struct {
                     }
                     return RegexError.UnexpectedEndOfPattern;
                 }
+                if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
                 return self.makeToken(.literal, 'k');
             },
             'f' => self.makeToken(.escape_char, 0x0C), // form feed
@@ -628,6 +629,16 @@ pub const Parser = struct {
         };
     }
 
+    fn checkQuantifierTarget(self: *Parser, node: *ast.Node) RegexError!void {
+        if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
+        if (self.unicode or self.unicode_sets) {
+            switch (node.node_type) {
+                .lookahead, .lookbehind => return RegexError.InvalidQuantifier,
+                else => {},
+            }
+        }
+    }
+
     /// Parse repetition operators (*, +, ?, {m,n})
     fn parseRepeat(self: *Parser) !*ast.Node {
         var node = try self.parsePrimary();
@@ -640,28 +651,28 @@ pub const Parser = struct {
 
             switch (token_type) {
                 .star => {
-                    if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
+                    try self.checkQuantifierTarget(node);
                     try self.advance();
                     // Check for lazy quantifier (? after *)
                     const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createStar(self.allocator, node, greedy, span);
                 },
                 .plus => {
-                    if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
+                    try self.checkQuantifierTarget(node);
                     try self.advance();
                     // Check for lazy quantifier (? after +)
                     const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createPlus(self.allocator, node, greedy, span);
                 },
                 .question => {
-                    if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
+                    try self.checkQuantifierTarget(node);
                     try self.advance();
                     // Check for lazy quantifier (? after ?)
                     const greedy = try self.quantifierGreedy();
                     node = try ast.Node.createOptional(self.allocator, node, greedy, span);
                 },
                 .lbrace => {
-                    if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
+                    try self.checkQuantifierTarget(node);
                     try self.advance(); // consume {
 
                     // Parse minimum with overflow protection
