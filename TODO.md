@@ -597,10 +597,15 @@ first-byte walk.
 
 ### Remaining open items (genuine larger features — do as focused efforts)
 
-- **3-byte Teddy** for alternations — the 2-byte filter above leaves
-  `error|warning|debug` at ~4x because common bigrams (`er`, `wa`, `de`) still
-  pass. A 3-byte fingerprint (or real PSHUFB-bucketed Teddy, if a runtime
-  byte-shuffle becomes available) would cut that further. Diminishing returns.
+- **3-byte Teddy** for alternations — *attempted with portable `@Vector`, net
+  loss, reverted.* The 2-byte filter leaves `error|warning|debug` at ~4x (bigrams
+  `er`/`wa`/`de` still pass). Widening lanes to u32 to test 3-byte prefixes
+  doubles the per-block scan cost (64-byte vs 32-byte vectors); the literal-set
+  scan is scan-bound, so the extra selectivity is outweighed — `fn|var|pub` and
+  `error|warning|debug` both got ~2x *slower* in a same-run A/B. Real 3-byte
+  Teddy keeps 1-byte-wide lanes via **PSHUFB-bucketed fingerprints**, which Zig's
+  `@Vector` can't express (no runtime byte shuffle) — needs an inline-asm /
+  target-specific path. Not worth it until then.
 - **Zero-alloc match iterator** so `findAll`-style iteration needn't materialize a
   `Match[]`. Contained but must mirror every fast-path dispatch lazily; `count`/
   `isMatch` are already alloc-free, so value is moderate.
