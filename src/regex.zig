@@ -558,6 +558,14 @@ pub const Regex = struct {
         return &(tmp.*.?);
     }
 
+    /// The NFA VM to use for the per-position fallback: the reused one (from a
+    /// `Matcher`) or a fresh temporary written into `tmp` (the caller deinits it).
+    fn obtainVm(self: *const Regex, reuse: ?*vm.VM, tmp: *?vm.VM) *vm.VM {
+        if (reuse) |v| return v;
+        tmp.* = vm.VM.init(self.allocator, @constCast(&self.nfa), self.capture_count, self.flags);
+        return &(tmp.*.?);
+    }
+
     /// count() via the lazy DFA. Returns error.DfaOverflow if the DFA exceeds its
     /// state cap, so the caller can fall back to the NFA.
     fn countWithDfa(self: *const Regex, d: *dfa.LazyDfa, input: []const u8) dfa.Error!usize {
@@ -816,9 +824,11 @@ pub const Regex = struct {
         re: *const Regex,
         dfa_cell: ?dfa.LazyDfa = null,
         dfa_failed: bool = false,
+        vm_cell: ?vm.VM = null,
 
         pub fn deinit(self: *Matcher) void {
             if (self.dfa_cell) |*d| d.deinit();
+            if (self.vm_cell) |*v| v.deinit();
         }
 
         /// The cached lazy DFA, built on first use; null when the pattern isn't
@@ -834,17 +844,28 @@ pub const Regex = struct {
             return &(self.dfa_cell.?);
         }
 
+        /// The cached NFA VM, built on first use — reused across calls so the
+        /// NFA-fallback path (mid-pattern assertions, lazy quantifiers) doesn't
+        /// rebuild its thread/capture scratch every call. Only built for the
+        /// Thompson engine (the backtracking engine is already stored on Regex).
+        fn vmPtr(self: *Matcher) ?*vm.VM {
+            if (self.vm_cell) |*v| return v;
+            if (self.re.engine_type != .thompson_nfa) return null;
+            self.vm_cell = vm.VM.init(self.re.allocator, @constCast(&self.re.nfa), self.re.capture_count, self.re.flags);
+            return &(self.vm_cell.?);
+        }
+
         pub fn isMatch(self: *Matcher, input: []const u8) !bool {
-            return self.re.isMatchInner(input, self.dfaPtr());
+            return self.re.isMatchInner(input, self.dfaPtr(), self.vmPtr());
         }
         pub fn find(self: *Matcher, input: []const u8) !?Match {
-            return self.re.findInner(input, self.dfaPtr());
+            return self.re.findInner(input, self.dfaPtr(), self.vmPtr());
         }
         pub fn findAll(self: *Matcher, allocator: std.mem.Allocator, input: []const u8) ![]Match {
-            return self.re.findAllInner(allocator, input, self.dfaPtr());
+            return self.re.findAllInner(allocator, input, self.dfaPtr(), self.vmPtr());
         }
         pub fn count(self: *Matcher, input: []const u8) !usize {
-            return self.re.countInner(input, self.dfaPtr());
+            return self.re.countInner(input, self.dfaPtr(), self.vmPtr());
         }
     };
 
@@ -856,13 +877,13 @@ pub const Regex = struct {
 
     /// Check if the pattern matches the entire input string
     pub fn isMatch(self: *const Regex, input: []const u8) !bool {
-        return self.isMatchInner(input, null);
+        return self.isMatchInner(input, null, null);
     }
 
     /// `reuse_dfa` lets a `Matcher` pass a cached lazy DFA so per-call DFA
     /// construction is amortized across calls (the grep hot path); null builds a
     /// fresh DFA per call (the thread-safe public path).
-    fn isMatchInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa) !bool {
+    fn isMatchInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) !bool {
         // Required-literal fast-fail: a mandatory substring that's absent means
         // there can be no match (works for every engine).
         if (self.requiredAbsent(input)) return false;
@@ -953,9 +974,9 @@ pub const Regex = struct {
         }
         switch (self.engine_type) {
             .thompson_nfa => {
-                const nfa_mut = @constCast(&self.nfa);
-                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
-                defer virtual_machine.deinit();
+                var tmp_vm: ?vm.VM = null;
+                defer if (tmp_vm) |*v| v.deinit();
+                const virtual_machine = self.obtainVm(reuse_vm, &tmp_vm);
                 // First-byte-set prefilter: skip positions that can't start a match.
                 if (self.opt_info.first_bytes) |fb| {
                     if (!self.flags.case_insensitive) {
@@ -1048,10 +1069,10 @@ pub const Regex = struct {
 
     /// Find the first match in the input string
     pub fn find(self: *const Regex, input: []const u8) !?Match {
-        return self.findInner(input, null);
+        return self.findInner(input, null, null);
     }
 
-    fn findInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa) !?Match {
+    fn findInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) !?Match {
         if (self.requiredAbsent(input)) return null;
         // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
         if (self.bounded_literal) |bl| {
@@ -1175,9 +1196,9 @@ pub const Regex = struct {
         }
         switch (self.engine_type) {
             .thompson_nfa => {
-                const nfa_mut = @constCast(&self.nfa);
-                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
-                defer virtual_machine.deinit();
+                var tmp_vm: ?vm.VM = null;
+                defer if (tmp_vm) |*v| v.deinit();
+                const virtual_machine = self.obtainVm(reuse_vm, &tmp_vm);
 
                 // Use literal prefix optimization if available (but not in case-insensitive mode)
                 if (self.opt_info.literal_prefix) |prefix| {
@@ -1324,10 +1345,10 @@ pub const Regex = struct {
 
     /// Find all matches in the input string
     pub fn findAll(self: *const Regex, allocator: std.mem.Allocator, input: []const u8) ![]Match {
-        return self.findAllInner(allocator, input, null);
+        return self.findAllInner(allocator, input, null, null);
     }
 
-    fn findAllInner(self: *const Regex, allocator: std.mem.Allocator, input: []const u8, reuse_dfa: ?*dfa.LazyDfa) ![]Match {
+    fn findAllInner(self: *const Regex, allocator: std.mem.Allocator, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) ![]Match {
         var matches: std.ArrayList(Match) = .empty;
         errdefer matches.deinit(allocator);
 
@@ -1451,9 +1472,9 @@ pub const Regex = struct {
         // uses; `findAll` previously rescanned every position, which is why it
         // was orders of magnitude slower on literal-led patterns.
         if (self.engine_type == .thompson_nfa) {
-            const nfa_mut = @constCast(&self.nfa);
-            var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
-            defer virtual_machine.deinit();
+            var tmp_vm: ?vm.VM = null;
+            defer if (tmp_vm) |*v| v.deinit();
+            const virtual_machine = self.obtainVm(reuse_vm, &tmp_vm);
             // Prefilters (skipped under case-insensitive matching, where the
             // byte-exact sets don't hold): a literal prefix is strongest; else a
             // first-byte set rules out positions that can't start a match.
@@ -1548,10 +1569,10 @@ pub const Regex = struct {
     /// Rust's `find_iter().count()`. Reuses every fast path and, on the NFA path,
     /// a single VM with the prefilter — no `Match` structs, no capture slices.
     pub fn count(self: *const Regex, input: []const u8) !usize {
-        return self.countInner(input, null);
+        return self.countInner(input, null, null);
     }
 
-    fn countInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa) !usize {
+    fn countInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) !usize {
         var n: usize = 0;
         var pos: usize = 0;
 
@@ -1631,9 +1652,9 @@ pub const Regex = struct {
 
         switch (self.engine_type) {
             .thompson_nfa => {
-                const nfa_mut = @constCast(&self.nfa);
-                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
-                defer virtual_machine.deinit();
+                var tmp_vm: ?vm.VM = null;
+                defer if (tmp_vm) |*v| v.deinit();
+                const virtual_machine = self.obtainVm(reuse_vm, &tmp_vm);
                 const prefix: ?[]const u8 = if (self.flags.case_insensitive) null else self.opt_info.literal_prefix;
                 const first_bytes: ?[256]bool = if (self.flags.case_insensitive or prefix != null) null else self.opt_info.first_bytes;
 

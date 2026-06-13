@@ -1156,7 +1156,10 @@ test "regression: Matcher matches the plain API and reuses safely" {
         "fn helper() void {}", "  return x + y;", "}", "", "const a = 1;",
         "a1 b2 c3", "no digits here", "x9", "    \t  ", "word another word",
     };
-    const pats = [_][]const u8{ "\\w+\\s+\\w+", "\\w+[0-9]", "fn", "[a-z]+[0-9]+", "\\bfn\\b", "//.*" };
+    // Mix of engines: DFA (`\w+\s+\w+`, `//.*`), literal (`fn`), bounded literal
+    // (`\bfn\b`), and NFA-fallback (`\w+\b\w`, `a.*?x`) + backtracking (`(\w)\1`)
+    // so both the cached DFA and the cached VM paths are exercised.
+    const pats = [_][]const u8{ "\\w+\\s+\\w+", "\\w+[0-9]", "fn", "[a-z]+[0-9]+", "\\bfn\\b", "//.*", "\\w+\\b\\w", "a.*?x", "(\\w)\\1" };
     for (pats) |pat| {
         var re = try Regex.compile(allocator, pat);
         defer re.deinit();
