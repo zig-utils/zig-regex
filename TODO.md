@@ -563,60 +563,76 @@ backtracker → now thompson/DFA; per-line with a `Matcher` 109ms → 1.3ms. The
 AST-derived byte prefilter is disabled under `i` (it's case-sensitive) — folding it
 to keep the prefilter is a follow-up.
 
-### 4. Remaining open items (lower value; need a quiet machine to benchmark)
+### 4. Matcher also caches the NFA VM — ✅ DONE (modest)
 
-- **Lazy-DFA inner-loop tuning for general class patterns** (below) — the only
-  patterns still behind Rust, all at *near parity*.
-- **Cache the NFA VM in `Matcher`** — after item 3, the per-call NFA build only
-  affects the *NFA-fallback* patterns (mid-pattern `\b`/anchors, lazy quantifiers);
-  caching the VM (like the DFA) would amortize those per-line too. Contained; the
-  threading mirrors the DFA reuse. Lower priority (these aren't common grep patterns).
-- **Teddy multi-substring SIMD** for literal alternations (`foo|bar|baz`, `fn|fn\s`).
-- **First-byte prefilter under `i`** — fold the prefilter bytes so the DFA prefilter
-  works for case-insensitive patterns too.
+The `Matcher` now caches the Thompson NFA VM as well as the DFA, so the
+NFA-fallback path (mid-pattern `\b`/anchors, lazy quantifiers) reuses its
+thread/capture scratch across calls. Only ~1.1x per-line, though — unlike DFA
+subset construction, `vm.VM.init` is cheap, so matching dominates. Correct
+(differential-tested), no regression; completes the per-line story.
+
+### 5. Case-insensitive DFA prefilter (folded first bytes) — ✅ DONE
+
+Under `i` the candidate prefilter was disabled (the AST first-byte/prefix hints
+are case-sensitive), so `i` patterns scanned every position. `compile` now folds
+the first-byte set to both cases and clears the case-sensitive prefix/single-byte
+hints; `dfaPrefilterActive` applies for `i` too. `(?i)pub\s+fn` 14.6ms → 3.6ms.
+Differential-fuzzed (60k trials). (Note: nullable `*`/`?` patterns count trailing
+empty matches slightly differently on the DFA vs backtracking — a pre-existing,
+orthogonal engine difference, not introduced here.)
+
+### Remaining open items (genuine larger features — do as focused efforts)
+
+- **Teddy multi-substring SIMD for literal alternations** — *real, significant
+  gap*: `error|warning|debug` **11.3x**, `fn|var|pub` 4.7x, `return|const|while|break`
+  4.9x vs Rust (code haystack). The DFA *can't* be used here — ECMAScript ordered
+  alternation is leftmost-**first** (`a|ab`→`a`), not the DFA's leftmost-longest —
+  so the literal-set path does a scalar first-byte-set walk + per-candidate
+  `firstLiteralAt`, and common first letters (`e`/`w`/`d`) mean many false
+  candidates. The fix is a **Teddy** SIMD prefilter (shuffle-bucketed 1–3 byte
+  fingerprints across all literals) feeding the existing source-order confirm.
+  Intricate (~hundreds of lines of `@Vector` shuffle code) — a focused effort, not
+  a marathon add-on. Highest-value remaining item.
 - **Zero-alloc match iterator** so `findAll`-style iteration needn't materialize a
-  `Match[]`.
+  `Match[]`. Contained but must mirror every fast-path dispatch lazily; `count`/
+  `isMatch` are already alloc-free, so value is moderate.
+- **Inner-literal prefilter** for `\d+\.\d+`-style (scan the rare required `.`,
+  recover the match start) — needs reverse scanning; same complexity class as the
+  unanchored DFA below.
 
-### Lazy-DFA inner-loop tuning for general class patterns — *open (near-parity)*
+### Lazy-DFA inner-loop tuning for general class patterns — *investigated: no win*
 
-The remaining behind-Rust patterns are all **leading-character-class** shapes that
-already run on the lazy DFA with the leading-class run-skip — they're at **near
-parity**, not the dramatic gaps the earlier work fixed:
+The near-parity leading-class patterns (`\w+[0-9]` ~1.35x, `\d+\.\d+` ~1.52x) were
+profiled. A hot-loop rewrite (raw pointers + cached per-state row to drop the
+per-byte `s*256`) made **no measurable difference** — the compiler already lowers
+`s*256` to a shift and ReleaseFast elides bounds checks. The residual gap is
+*structural*: Rust prefilters `\d+\.\d+` on the rare `.` (inner-literal, above) and
+does an unanchored single pass for `\w+[0-9]`; closing those needs the
+inner-literal / forward+reverse unanchored DFA below, not loop tuning.
 
-| pattern | ratio |
-|---|--:|
-| `\w+[0-9]` | ~1.35x |
-| `[a-z]+[0-9]+` | ~1.37x |
-| `\d+\.\d+` | ~1.39x |
-| `\w+\s+\w+` | ~1.15x |
+The near-parity patterns (`\w+[0-9]` ~1.35x, `[a-z]+[0-9]+` ~1.37x, `\d+\.\d+`
+~1.52x, `\w+\s+\w+` ~1.15x) all run on the lazy DFA with the leading-class
+run-skip. To go further:
 
-The gap is **lazy-DFA stepping efficiency** vs Rust's heavily-tuned DFA (transition
-table layout / hot loop), *not* an anchoring problem — `dfaFailSkip` already skips the
-leading class run, so a per-start scan isn't the bottleneck here. Candidate work:
+- An **unanchored single-pass DFA** *could* help patterns whose leading atom is
+  *not* an unbounded class (no run-skip), but it's the largest/most delicate
+  change: a naive `.*?`-prefixed forward DFA finds *a* match end, not the engine's
+  **leftmost-longest, non-overlapping** match. Exact semantics need a **forward +
+  reverse DFA** (RE2's approach), with heavy differential testing. Only worth it if
+  profiling shows per-start scanning (not DFA stepping) is the real bottleneck.
 
-- [ ] Tighten the `dfa.zig` hot loop (the `trans[s*256 + byte]` step): keep `trans`/
-      `acc` as raw pointers across the scan, prefetch, and avoid the per-byte
-      `UNCOMPUTED` branch once a state is fully realized.
-- [ ] An **unanchored single-pass DFA** *could* help patterns whose leading atom is
-      *not* an unbounded class (no run-skip), but it is the largest/most delicate
-      change: a naive `.*?`-prefixed forward DFA finds *a* match end, not the engine's
-      **leftmost-longest, non-overlapping** match. Exact semantics need a **forward +
-      reverse DFA** (RE2's approach: forward finds the end, reverse-anchored finds the
-      leftmost start), with **heavy differential testing** against the current engine
-      before enabling. Only worth it if profiling shows per-start scanning (not DFA
-      stepping) is the bottleneck for a real workload.
+### Measured gaps (summary, current)
 
-### 3. Remaining measured gaps (summary)
-
-After the `\s`, `.`, `\b`-bounded-literal, and SIMD-memmem wins, the only patterns
-still behind Rust on the code haystack are the near-parity class shapes:
+After `\s`, `.`, `\b`-bounded-literal, SIMD-memmem, the Matcher, and
+case-insensitive-on-DFA, the only patterns still behind Rust on the code haystack:
 
 | pattern | ratio | closed by |
 |---|--:|---|
-| `\w+[0-9]`, `[a-z]+[0-9]+`, `\d+\.\d+` | ~1.3–1.4x | DFA inner-loop tuning (item 2) |
-| `\w+\s+\w+` | ~1.15x | DFA inner-loop tuning (item 2) |
-| `\w+_\w+` | ~3.6x | inner-literal prefilter (scan the required `_`, then run the DFA around it) — same selectivity caveats as the memmem prefilter |
+| `error\|warning\|debug`, `fn\|var\|pub` | ~4.7–11.3x | **Teddy SIMD multi-literal** (biggest remaining win) |
+| `\d+\.\d+`, `\w+_\w+` | ~1.5–3.6x | inner-literal prefilter (scan the rare required literal, recover the start) |
+| `\w+[0-9]`, `[a-z]+[0-9]+` | ~1.3–1.4x | unanchored forward+reverse DFA (structural; loop tuning is a confirmed no-op) |
+| `\w+\s+\w+` | ~1.15x | near parity; same |
 
 Now at parity-or-better (and **not** to regress): `fn`, `\bfn\b`, `pub\s+fn`, `regex`,
-`//.*`, `a.c`, `\w{3,}`, `[A-Z]\w+`, `hello`/`test` (word haystack),
-`\d+`, `\w+`.
+`//.*`, `a.c`, `\w{3,}`, `[A-Z]\w+`, `(?i)\w+\s+\w+`, `(?i)pub\s+fn`,
+`hello`/`test` (word haystack), `\d+`, `\w+`, and per-line grep (via `Matcher`).
