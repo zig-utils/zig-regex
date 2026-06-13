@@ -180,7 +180,9 @@ pub const Node = struct {
             .range => |r| {
                 if (cp >= r.lo and cp <= r.hi) return true;
                 if (ignore_case) {
-                    // Simple ASCII case folding for the common `i` cases.
+                    const folded = simpleCaseFold(cp);
+                    if (folded >= r.lo and folded <= r.hi) return true;
+                    if (r.lo == r.hi and simpleCaseFold(r.lo) == folded) return true;
                     if (cp >= 'A' and cp <= 'Z') {
                         const l = cp + 32;
                         if (l >= r.lo and l <= r.hi) return true;
@@ -194,14 +196,20 @@ pub const Node = struct {
             .property => |p| return u.matchesSpec(cp, p.spec) != p.negated,
             .nested => |n| return n.matches(cp, ignore_case),
             // A single-code-point string contributes that code point to membership.
-            .string => |s| return s.len == 1 and (s[0] == cp or (ignore_case and asciiFoldEq(s[0], cp))),
+            .string => |s| return s.len == 1 and (s[0] == cp or (ignore_case and simpleCaseFold(s[0]) == simpleCaseFold(cp))),
         }
     }
 
-    fn asciiFoldEq(a: u21, b: u21) bool {
-        const la: u21 = if (a >= 'A' and a <= 'Z') a + 32 else a;
-        const lb: u21 = if (b >= 'A' and b <= 'Z') b + 32 else b;
-        return la == lb;
+    fn simpleCaseFold(cp: u21) u21 {
+        if (cp >= 'A' and cp <= 'Z') return cp + 32;
+        return switch (cp) {
+            0x017F => 's',
+            0x212A => 'k',
+            0x1FD3 => 0x0390,
+            0x1FE3 => 0x03B0,
+            0xFB05 => 0xFB06,
+            else => cp,
+        };
     }
 
     /// Match a `\q{...}` string (a sequence of code points) at `input[start..]`,
@@ -212,7 +220,7 @@ pub const Node = struct {
         for (s) |scp| {
             if (pos >= input.len) return null;
             const dec = u.decodeUtf8Lenient(input[pos..]) orelse return null;
-            if (dec.codepoint != scp and !(ignore_case and asciiFoldEq(dec.codepoint, scp))) return null;
+            if (dec.codepoint != scp and !(ignore_case and simpleCaseFold(dec.codepoint) == simpleCaseFold(scp))) return null;
             pos += dec.len;
         }
         return pos;

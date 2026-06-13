@@ -929,6 +929,28 @@ test "regression: unicode ignore-case word characters include canonicalized asci
     try std.testing.expect(try not_upper_prop.isMatch("a"));
 }
 
+test "regression: unicode class ignore-case uses simple common folds" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true, .case_insensitive = true };
+
+    const cases = [_]struct {
+        pattern: []const u8,
+        input: []const u8,
+    }{
+        .{ .pattern = "[\\u0390]", .input = "\u{1FD3}" },
+        .{ .pattern = "[\\u1FD3]", .input = "\u{0390}" },
+        .{ .pattern = "[\\u03B0]", .input = "\u{1FE3}" },
+        .{ .pattern = "[\\u1FE3]", .input = "\u{03B0}" },
+        .{ .pattern = "[\\uFB05]", .input = "\u{FB06}" },
+        .{ .pattern = "[\\uFB06]", .input = "\u{FB05}" },
+    };
+    for (cases) |case| {
+        var regex = try Regex.compileWithFlags(allocator, case.pattern, flags);
+        defer regex.deinit();
+        try std.testing.expect(try regex.isMatch(case.input));
+    }
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is
