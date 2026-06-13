@@ -928,3 +928,58 @@ test "regression: unicode ignore-case word characters include canonicalized asci
     try std.testing.expect(try not_upper_prop.isMatch("A"));
     try std.testing.expect(try not_upper_prop.isMatch("a"));
 }
+
+// --- two-byte memmem literal search (common first byte) ---
+//
+// Literal search picks a two-byte vectorized filter when the first byte is
+// common (e.g. `fn` in a haystack full of `f`s). The decision is haystack-
+// dependent, so exercise both strategies and the awkward boundaries (probe
+// offsets, overlapping starts, repeated bytes) and confirm results match a
+// naive scan.
+
+test "regression: memmem literal search matches a naive scan" {
+    const allocator = std.testing.allocator;
+
+    const naive = struct {
+        fn count(h: []const u8, n: []const u8) usize {
+            var c: usize = 0;
+            var i: usize = 0;
+            while (i + n.len <= h.len) {
+                if (std.mem.eql(u8, h[i .. i + n.len], n)) {
+                    c += 1;
+                    i += n.len;
+                } else i += 1;
+            }
+            return c;
+        }
+    };
+    const cases = [_]struct { pat: []const u8, hay: []const u8 }{
+        .{ .pat = "fn", .hay = "fn if for fn self off fn" },
+        .{ .pat = "ab", .hay = "ababab" }, // overlapping starts, non-overlapping count
+        .{ .pat = "aa", .hay = "aaaa" }, // repeated byte → degenerate probes
+        .{ .pat = "xyz", .hay = "xy xz xyz xyzz" },
+        .{ .pat = "the", .hay = "the theme breathe other the" },
+    };
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pat);
+        defer re.deinit();
+        try std.testing.expectEqual(naive.count(c.hay, c.pat), try re.count(c.hay));
+        const want_first = std.mem.indexOf(u8, c.hay, c.pat).?;
+        const m = (try re.find(c.hay)).?;
+        try std.testing.expectEqual(want_first, m.start);
+    }
+}
+
+test "regression: memmem holds on a large common-first-byte haystack" {
+    const allocator = std.testing.allocator;
+    // "xf...f xfn ..." — `f` everywhere (forces the two-byte filter), `fn` rare.
+    var buf = try std.ArrayList(u8).initCapacity(allocator, 200 * 1000);
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < 50_000) : (i += 1) {
+        try buf.appendSlice(allocator, if (i % 100 == 0) "fn " else "ff ");
+    }
+    var re = try Regex.compile(allocator, "fn");
+    defer re.deinit();
+    try std.testing.expectEqual(@as(usize, 500), try re.count(buf.items));
+}
