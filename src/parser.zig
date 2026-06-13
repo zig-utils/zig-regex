@@ -3,6 +3,7 @@ const ast = @import("ast.zig");
 const common = @import("common.zig");
 const unicode = @import("unicode.zig");
 const prop_data = @import("unicode_prop_data.zig");
+const rgi_data = @import("rgi_emoji_data.zig");
 const RegexError = @import("errors.zig").RegexError;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
@@ -59,6 +60,8 @@ fn isStringPropertyName(name: []const u8) bool {
         std.mem.eql(u8, name, "RGI_Emoji_Tag_Sequence") or
         std.mem.eql(u8, name, "RGI_Emoji_Modifier_Sequence") or
         std.mem.eql(u8, name, "RGI_Emoji_Flag_Sequence") or
+        std.mem.eql(u8, name, "RGI_Emoji_ZWJ_Sequence") or
+        std.mem.eql(u8, name, "RGI_Emoji") or
         std.mem.eql(u8, name, "Basic_Emoji");
 }
 
@@ -1477,6 +1480,10 @@ pub const Parser = struct {
             try self.appendModifierSequenceStrings(&items);
         } else if (std.mem.eql(u8, name, "RGI_Emoji_Flag_Sequence")) {
             try self.appendFlagSequenceStrings(&items);
+        } else if (std.mem.eql(u8, name, "RGI_Emoji_ZWJ_Sequence")) {
+            try self.appendZwjSequenceStrings(&items);
+        } else if (std.mem.eql(u8, name, "RGI_Emoji")) {
+            try self.appendRgiEmojiStrings(&items);
         } else if (std.mem.eql(u8, name, "Basic_Emoji")) {
             try self.appendBasicEmojiStrings(&items);
         } else {
@@ -1541,6 +1548,23 @@ pub const Parser = struct {
                 0x1F1E6 + @as(u21, region[1] - 'A'),
             });
         }
+    }
+
+    fn appendZwjSequenceStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {
+        for (rgi_data.zwj_sequences) |seq| {
+            try self.appendStringItem(items, seq);
+        }
+    }
+
+    fn appendRgiEmojiStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {
+        try self.appendBasicEmojiStrings(items);
+        try self.appendKeycapStrings(items);
+        try self.appendModifierSequenceStrings(items);
+        try self.appendFlagSequenceStrings(items);
+        try self.appendStringItem(items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067, 0xE007F });
+        try self.appendStringItem(items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0073, 0xE0063, 0xE0074, 0xE007F });
+        try self.appendStringItem(items, &.{ 0x1F3F4, 0xE0067, 0xE0062, 0xE0077, 0xE006C, 0xE0073, 0xE007F });
+        try self.appendZwjSequenceStrings(items);
     }
 
     fn appendBasicEmojiStrings(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem)) RegexError!void {

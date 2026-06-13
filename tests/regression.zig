@@ -986,6 +986,16 @@ test "regression: unicode string properties work as atom escapes" {
     try std.testing.expect(try flag.isMatch("\u{1F1FA}\u{1F1F8}"));
     try std.testing.expect(try flag.isMatch("\u{1F1FA}\u{1F1F8}\u{1F1EC}\u{1F1E7}"));
     try std.testing.expect(!try flag.isMatch("\u{1F1FA}"));
+
+    var zwj = try Regex.compileWithFlags(allocator, "^\\p{RGI_Emoji_ZWJ_Sequence}+$", flags);
+    defer zwj.deinit();
+    try std.testing.expect(try zwj.isMatch("\u{1F468}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F468}"));
+    try std.testing.expect(!try zwj.isMatch("\u{1F3FB}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F48B}\u{200D}\u{1F468}\u{1F3FB}"));
+
+    var rgi = try Regex.compileWithFlags(allocator, "^\\p{RGI_Emoji}+$", flags);
+    defer rgi.deinit();
+    try std.testing.expect(try rgi.isMatch("#\u{FE0F}\u{20E3}\u{1F1FA}\u{1F1F8}\u{1F468}\u{200D}\u{1F466}"));
+    try std.testing.expect(!try rgi.isMatch("\u{1F3FB}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F48B}\u{200D}\u{1F468}\u{1F3FB}"));
 }
 
 test "regression: unicode property aliases include generated Test262 gc aliases" {
