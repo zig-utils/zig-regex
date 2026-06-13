@@ -253,21 +253,139 @@ pub const Regex = struct {
         return null;
     }
 
-    /// Substring search using a SIMD first-byte scan (`indexOfScalarPos`) plus a
-    /// tail compare. For the literal patterns we fast-path, the first byte is
-    /// usually rare, so this beats Boyer-Moore-Horspool (what `std.mem.indexOf`
-    /// uses) by jumping directly between candidates.
-    fn literalSearch(input: []const u8, lit: []const u8, from: usize) ?usize {
-        if (lit.len == 1) return std.mem.indexOfScalarPos(u8, input, from, lit[0]);
-        if (from + lit.len > input.len) return null;
-        var i = from;
-        const last = input.len - lit.len;
-        while (std.mem.indexOfScalarPos(u8, input, i, lit[0])) |p| {
-            if (p > last) return null;
-            if (std.mem.eql(u8, input[p + 1 .. p + lit.len], lit[1..])) return p;
-            i = p + 1;
+    const memmem_width = 16;
+    const sample_budget = 16 * 1024; // small: keeps the one-time cost ~1% even on small inputs
+    const sample_windows = 4;
+
+    fn sampleLayout(input: []const u8) struct { win: usize, n: usize } {
+        if (input.len <= sample_budget) return .{ .win = input.len, .n = 1 };
+        return .{ .win = sample_budget / sample_windows, .n = sample_windows };
+    }
+
+    fn windowStart(input: []const u8, win: usize, n: usize, w: usize) usize {
+        if (n <= 1) return 0;
+        return (input.len - win) * w / (n - 1);
+    }
+
+    fn countByte(input: []const u8, b: u8) u32 {
+        const L = sampleLayout(input);
+        var c: u32 = 0;
+        var w: usize = 0;
+        while (w < L.n) : (w += 1) {
+            const s = windowStart(input, L.win, L.n, w);
+            c += @intCast(std.mem.count(u8, input[s .. s + L.win], &[_]u8{b}));
+        }
+        return c;
+    }
+
+    fn countPair(input: []const u8, b1: u8, b2: u8, o1: usize, o2: usize) u32 {
+        const hi = @max(o1, o2);
+        const L = sampleLayout(input);
+        var c: u32 = 0;
+        var w: usize = 0;
+        while (w < L.n) : (w += 1) {
+            const s = windowStart(input, L.win, L.n, w);
+            if (s + L.win <= hi) continue;
+            var p = s;
+            const stop = s + L.win - hi;
+            while (p < stop) : (p += 1) {
+                if (input[p + o1] == b1 and input[p + o2] == b2) c += 1;
+            }
+        }
+        return c;
+    }
+
+    /// Scalar two-byte-filtered substring search over starts in `[from, last]`.
+    fn literalScalar(input: []const u8, lit: []const u8, from: usize, last: usize, o1: usize, o2: usize) ?usize {
+        var p = from;
+        while (p <= last) : (p += 1) {
+            if (input[p + o1] == lit[o1] and input[p + o2] == lit[o2] and
+                std.mem.eql(u8, input[p .. p + lit.len], lit)) return p;
         }
         return null;
+    }
+
+    /// Per-search literal prefilter, decided once from a small spread sample so
+    /// it never regresses below a plain first-byte scan. Two strategies:
+    ///   - **first-byte**: SIMD `indexOfScalar` on the rarer probe byte, then
+    ///     verify — optimal when that byte is rare (e.g. `h` in `hello`);
+    ///   - **memmem**: a vectorized two-byte filter (the generic-SIMD search
+    ///     ripgrep/`memchr` use) testing two distinct probe bytes per 16-byte
+    ///     block with a cheap `@reduce(.Or)` (no ARM-hostile per-lane movemask),
+    ///     scalar-confirming only blocks that hit.
+    /// memmem is chosen when the anchor byte occurs much more often than the
+    /// two-byte pair (`anchor > 3·pair`): most anchor hits are then dead ends
+    /// (`f` in `if`/`for` but `fn` is rare), so first-byte's many failed SIMD
+    /// restarts cost more than memmem's filtered pass. When nearly every anchor
+    /// hit is also a pair hit (every `h` precedes the `o` of `hello`), there are
+    /// no wasted restarts and first-byte wins.
+    const LiteralPrefilter = struct {
+        lit: []const u8,
+        o1: usize,
+        o2: usize,
+        use_memmem: bool,
+
+        fn init(input: []const u8, lit: []const u8) LiteralPrefilter {
+            if (lit.len < 2) return .{ .lit = lit, .o1 = 0, .o2 = 0, .use_memmem = false };
+            const oa: usize = 0;
+            var ob: usize = lit.len - 1;
+            if (lit[ob] == lit[oa]) {
+                var k: usize = 1;
+                while (k < lit.len) : (k += 1) {
+                    if (lit[k] != lit[oa]) {
+                        ob = k;
+                        break;
+                    }
+                }
+            }
+            const oa_count = countByte(input, lit[oa]);
+            const ob_count = countByte(input, lit[ob]);
+            const o1: usize = if (oa_count <= ob_count) oa else ob; // rarer = anchor
+            const o2: usize = if (o1 == oa) ob else oa;
+            const anchor_count = @min(oa_count, ob_count);
+            const pair = countPair(input, lit[o1], lit[o2], o1, o2);
+            return .{ .lit = lit, .o1 = o1, .o2 = o2, .use_memmem = anchor_count > pair *| 3 };
+        }
+
+        fn next(self: LiteralPrefilter, input: []const u8, from: usize) ?usize {
+            const lit = self.lit;
+            if (lit.len == 1) return std.mem.indexOfScalarPos(u8, input, from, lit[0]);
+            if (from + lit.len > input.len) return null;
+            const last = input.len - lit.len;
+
+            if (!self.use_memmem) {
+                var i = from + self.o1;
+                while (std.mem.indexOfScalarPos(u8, input, i, lit[self.o1])) |q| {
+                    const start = q - self.o1;
+                    if (start > last) return null;
+                    if (std.mem.eql(u8, input[start .. start + lit.len], lit)) return start;
+                    i = q + 1;
+                }
+                return null;
+            }
+
+            const W = memmem_width;
+            const v1: @Vector(W, u8) = @splat(lit[self.o1]);
+            const v2: @Vector(W, u8) = @splat(lit[self.o2]);
+            const hi = @max(self.o1, self.o2);
+            var p = from;
+            while (p + hi + W <= input.len) {
+                const c1: @Vector(W, u8) = input[p + self.o1 ..][0..W].*;
+                const c2: @Vector(W, u8) = input[p + self.o2 ..][0..W].*;
+                const m: @Vector(W, bool) = (c1 == v1) & (c2 == v2);
+                if (@reduce(.Or, m)) {
+                    if (literalScalar(input, lit, p, @min(last, p + W - 1), self.o1, self.o2)) |r| return r;
+                }
+                p += W;
+            }
+            return literalScalar(input, lit, p, last, self.o1, self.o2);
+        }
+    };
+
+    /// One-shot literal search (picks the strategy and searches once). Looping
+    /// callers build a `LiteralPrefilter` once instead.
+    fn literalSearch(input: []const u8, lit: []const u8, from: usize) ?usize {
+        return LiteralPrefilter.init(input, lit).next(input, from);
     }
 
     /// Whether a `\b` word boundary holds at `pos` (same rule as `vm.isWordBoundary`).
@@ -297,9 +415,9 @@ pub const Regex = struct {
 
     /// Next `\bfn\b`-style match at or after `from`: a literal occurrence whose
     /// surrounding zero-width assertions all hold. Returns `{start, end}`.
-    fn boundedLiteralNext(self: *const Regex, bl: BoundedLiteral, input: []const u8, from: usize) ?[2]usize {
+    fn boundedLiteralNext(self: *const Regex, bl: BoundedLiteral, pf: LiteralPrefilter, input: []const u8, from: usize) ?[2]usize {
         var i = from;
-        while (literalSearch(input, bl.literal, i)) |p| {
+        while (pf.next(input, i)) |p| {
             const e = p + bl.literal.len;
             if (self.anchorsHold(bl.pre[0..bl.pre_len], input, p) and
                 self.anchorsHold(bl.post[0..bl.post_len], input, e))
@@ -401,11 +519,10 @@ pub const Regex = struct {
     /// `try\s+\w+` or `pub\s+fn`), then a single first byte (SIMD
     /// `indexOfScalar`), then a first-byte table walk. Callers invoke this only
     /// when `dfaPrefilterActive`.
-    fn skipToCandidate(self: *const Regex, input: []const u8, scan: usize) usize {
-        if (self.opt_info.literal_prefix) |p| {
-            // SIMD first-byte scan + tail compare — keeps the scan vectorized
-            // while being far more selective than a single byte.
-            return literalSearch(input, p, scan) orelse input.len;
+    fn skipToCandidate(self: *const Regex, input: []const u8, scan: usize, pref: ?LiteralPrefilter) usize {
+        if (pref) |pf| {
+            // Vectorized literal-prefix scan (strategy chosen once per search).
+            return pf.next(input, scan) orelse input.len;
         }
         if (self.opt_info.first_byte_single) |b| {
             return std.mem.indexOfScalarPos(u8, input, scan, b) orelse input.len;
@@ -432,6 +549,7 @@ pub const Regex = struct {
         var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
         defer d.deinit();
         const pf = self.dfaPrefilterActive();
+        const pref: ?LiteralPrefilter = if (self.opt_info.literal_prefix) |p| LiteralPrefilter.init(input, p) else null;
         var n: usize = 0;
         var pos: usize = 0;
         while (pos <= input.len) {
@@ -439,7 +557,7 @@ pub const Regex = struct {
             var found_end: ?usize = null;
             while (scan <= input.len) {
                 if (pf) {
-                    scan = self.skipToCandidate(input, scan);
+                    scan = self.skipToCandidate(input, scan, pref);
                     if (scan >= input.len) break;
                 }
                 const sc = try d.longestMatchFrom(input, scan);
@@ -470,10 +588,11 @@ pub const Regex = struct {
         defer if (v) |*vv| vv.deinit();
 
         const pf = self.dfaPrefilterActive();
+        const pref: ?LiteralPrefilter = if (self.opt_info.literal_prefix) |p| LiteralPrefilter.init(input, p) else null;
         var scan: usize = 0;
         while (scan <= input.len) {
             if (pf) {
-                scan = self.skipToCandidate(input, scan);
+                scan = self.skipToCandidate(input, scan, pref);
                 if (scan >= input.len) break;
             }
             const sc = try d.longestMatchFrom(input, scan);
@@ -506,13 +625,14 @@ pub const Regex = struct {
         defer if (v) |*vv| vv.deinit();
 
         const pf = self.dfaPrefilterActive();
+        const pref: ?LiteralPrefilter = if (self.opt_info.literal_prefix) |p| LiteralPrefilter.init(input, p) else null;
         var pos: usize = 0;
         while (pos <= input.len) {
             var scan = pos;
             var matched_end: ?usize = null;
             while (scan <= input.len) {
                 if (pf) {
-                    scan = self.skipToCandidate(input, scan);
+                    scan = self.skipToCandidate(input, scan, pref);
                     if (scan >= input.len) break;
                 }
                 const sc = try d.longestMatchFrom(input, scan);
@@ -543,10 +663,11 @@ pub const Regex = struct {
         var d = try dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags);
         defer d.deinit();
         const pf = self.dfaPrefilterActive();
+        const pref: ?LiteralPrefilter = if (self.opt_info.literal_prefix) |p| LiteralPrefilter.init(input, p) else null;
         var pos: usize = 0;
         while (pos <= input.len) {
             if (pf) {
-                pos = self.skipToCandidate(input, pos);
+                pos = self.skipToCandidate(input, pos, pref);
                 if (pos >= input.len) break;
             }
             const sc = try d.longestMatchFrom(input, pos);
@@ -667,7 +788,7 @@ pub const Regex = struct {
         // there can be no match (works for every engine).
         if (self.requiredAbsent(input)) return false;
         // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
-        if (self.bounded_literal) |bl| return self.boundedLiteralNext(bl, input, 0) != null;
+        if (self.bounded_literal) |bl| return self.boundedLiteralNext(bl, LiteralPrefilter.init(input, bl.literal), input, 0) != null;
         // Exact-literal fast path: a fixed-string pattern is a substring search.
         if (self.opt_info.exact_literal) |lit| {
             if (self.flags.case_insensitive) {
@@ -847,7 +968,7 @@ pub const Regex = struct {
         if (self.requiredAbsent(input)) return null;
         // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
         if (self.bounded_literal) |bl| {
-            if (self.boundedLiteralNext(bl, input, 0)) |m|
+            if (self.boundedLiteralNext(bl, LiteralPrefilter.init(input, bl.literal), input, 0)) |m|
                 return Match{ .slice = input[m[0]..m[1]], .start = m[0], .end = m[1] };
             return null;
         }
@@ -1121,7 +1242,8 @@ pub const Regex = struct {
 
         // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
         if (self.bounded_literal) |bl| {
-            while (self.boundedLiteralNext(bl, input, pos)) |m| {
+            const bpf = LiteralPrefilter.init(input, bl.literal);
+            while (self.boundedLiteralNext(bl, bpf, input, pos)) |m| {
                 try matches.append(allocator, Match{ .slice = input[m[0]..m[1]], .start = m[0], .end = m[1] });
                 pos = if (m[1] > m[0]) m[1] else m[1] + 1;
             }
@@ -1137,7 +1259,8 @@ pub const Regex = struct {
                 }
                 return matches.toOwnedSlice(allocator);
             }
-            while (literalSearch(input, lit, pos)) |i| {
+            const lpf = LiteralPrefilter.init(input, lit);
+            while (lpf.next(input, pos)) |i| {
                 try matches.append(allocator, Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len });
                 pos = i + lit.len;
             }
@@ -1333,7 +1456,8 @@ pub const Regex = struct {
 
         // `\bfn\b`-style bounded literal: SIMD literal scan + inline assertions.
         if (self.bounded_literal) |bl| {
-            while (self.boundedLiteralNext(bl, input, pos)) |m| {
+            const bpf = LiteralPrefilter.init(input, bl.literal);
+            while (self.boundedLiteralNext(bl, bpf, input, pos)) |m| {
                 n += 1;
                 pos = if (m[1] > m[0]) m[1] else m[1] + 1;
             }
@@ -1347,7 +1471,8 @@ pub const Regex = struct {
                 while (sc.next()) |_| n += 1;
                 return n;
             }
-            while (literalSearch(input, lit, pos)) |i| {
+            const lpf = LiteralPrefilter.init(input, lit);
+            while (lpf.next(input, pos)) |i| {
                 n += 1;
                 pos = i + lit.len;
             }
