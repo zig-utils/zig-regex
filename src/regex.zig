@@ -134,6 +134,21 @@ pub const Regex = struct {
         var opt_info = try opt.analyze(tree.root);
         errdefer opt_info.deinit(allocator);
 
+        // Under `i`, the AST-derived byte prefilter is case-sensitive. Fold the
+        // first-byte set so both cases are candidates (the byte engine is
+        // case-folded), and drop the prefix / single-byte hints, which can't
+        // represent both cases — the folded table-walk replaces them. This lets
+        // the DFA prefilter skip non-candidate positions for `i` patterns too
+        // (e.g. `(?i)pub\s+fn` was ~6x slower without it).
+        if (flags.case_insensitive) {
+            if (opt_info.first_bytes) |t| opt_info.first_bytes = foldTableCI(t);
+            if (opt_info.literal_prefix) |lp| {
+                allocator.free(lp);
+                opt_info.literal_prefix = null;
+            }
+            opt_info.first_byte_single = null;
+        }
+
         // Collect named captures from AST
         var named_captures = std.StringHashMap(usize).init(allocator);
         errdefer deinitNamedCaptureMap(allocator, &named_captures);
@@ -510,12 +525,10 @@ pub const Regex = struct {
             !self.opt_info.has_lazy;
     }
 
-    /// Whether the DFA loops have any candidate prefilter to apply. The
-    /// `literal_prefix`/`first_bytes` hints come from the (unfolded) AST, so they
-    /// are case-sensitive — under `i` they'd skip valid opposite-case starts, so
-    /// the prefilter is disabled there (the folded DFA still scans correctly).
+    /// Whether the DFA loops have any candidate prefilter to apply. Under `i`,
+    /// `compile` already folded `first_bytes` and cleared the case-sensitive
+    /// `literal_prefix`/`first_byte_single`, so this stays correct for `i` too.
     fn dfaPrefilterActive(self: *const Regex) bool {
-        if (self.flags.case_insensitive) return false;
         return self.opt_info.literal_prefix != null or self.opt_info.first_bytes != null;
     }
 

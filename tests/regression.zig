@@ -1254,3 +1254,16 @@ test "regression: negated class under `i` folds before negating" {
     try std.testing.expectEqual(@as(usize, 0), try plus.count("aAbBcC"));
     try std.testing.expectEqual(@as(usize, 1), try plus.count("xyZ"));
 }
+
+test "regression: case-insensitive prefilter (folded first bytes) finds both cases" {
+    const allocator = std.testing.allocator;
+    // `pub\s+fn` under `i`: the first-byte prefilter is folded to {p,P}, so the
+    // DFA must still find matches starting with either case and at any position,
+    // not just the first 'p'.
+    var re = try Regex.compileWithFlags(allocator, "pub\\s+fn", .{ .case_insensitive = true });
+    defer re.deinit();
+    try std.testing.expectEqual(@as(usize, 3), try re.count("x PUB FN y pub fn z Pub Fn"));
+    const m = (try re.find("...... PUB  FN")).?;
+    try std.testing.expectEqualStrings("PUB  FN", m.slice);
+    try std.testing.expect(!try re.isMatch("public function"));
+}
