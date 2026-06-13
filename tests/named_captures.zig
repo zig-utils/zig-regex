@@ -1,5 +1,6 @@
 const std = @import("std");
 const Regex = @import("regex").Regex;
+const RegexError = @import("regex").RegexError;
 
 // Tests for named capture groups (?P<name>...) and (?<name>...)
 
@@ -320,4 +321,15 @@ test "named group: duplicate names in alternatives use participating capture" {
     } else {
         return error.TestExpectedMatch;
     }
+}
+
+test "named group: duplicate names in same alternative are rejected" {
+    const allocator = std.testing.allocator;
+    const result = Regex.compile(allocator, "(?<x>a)(?<x>b)");
+    try std.testing.expectError(RegexError.DuplicateGroupName, result);
+
+    var regex = try Regex.compile(allocator, "(?<x>a)|(?<x>b)");
+    defer regex.deinit();
+    try std.testing.expect(try regex.isMatch("a"));
+    try std.testing.expect(try regex.isMatch("b"));
 }

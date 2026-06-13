@@ -449,8 +449,59 @@ pub const Parser = struct {
             };
         }
         if (self.unicode or self.unicode_sets) try self.validateUnicodeBackrefs(root);
+        try self.validateDuplicateGroupNames(root);
 
         return ast.AST.init(self.allocator, root, self.capture_count);
+    }
+
+    fn cloneNameSet(
+        self: *Parser,
+        src: *const std.StringHashMapUnmanaged(void),
+    ) !std.StringHashMapUnmanaged(void) {
+        var dst: std.StringHashMapUnmanaged(void) = .empty;
+        var it = src.iterator();
+        while (it.next()) |entry| {
+            try dst.put(self.allocator, entry.key_ptr.*, {});
+        }
+        return dst;
+    }
+
+    fn validateDuplicateGroupNames(self: *Parser, root: *ast.Node) !void {
+        var names: std.StringHashMapUnmanaged(void) = .empty;
+        defer names.deinit(self.allocator);
+        try self.validateDuplicateGroupNamesBranch(root, &names);
+    }
+
+    fn validateDuplicateGroupNamesBranch(
+        self: *Parser,
+        node: *ast.Node,
+        names: *std.StringHashMapUnmanaged(void),
+    ) !void {
+        switch (node.data) {
+            .group => |group| {
+                if (group.name) |name| {
+                    if (names.contains(name)) return RegexError.DuplicateGroupName;
+                    try names.put(self.allocator, name, {});
+                }
+                try self.validateDuplicateGroupNamesBranch(group.child, names);
+            },
+            .concat => |concat| {
+                try self.validateDuplicateGroupNamesBranch(concat.left, names);
+                try self.validateDuplicateGroupNamesBranch(concat.right, names);
+            },
+            .alternation => |alt| {
+                var left_names = try self.cloneNameSet(names);
+                defer left_names.deinit(self.allocator);
+                var right_names = try self.cloneNameSet(names);
+                defer right_names.deinit(self.allocator);
+                try self.validateDuplicateGroupNamesBranch(alt.left, &left_names);
+                try self.validateDuplicateGroupNamesBranch(alt.right, &right_names);
+            },
+            .star, .plus, .optional => |quant| try self.validateDuplicateGroupNamesBranch(quant.child, names),
+            .repeat => |repeat| try self.validateDuplicateGroupNamesBranch(repeat.child, names),
+            .lookahead, .lookbehind => |assertion| try self.validateDuplicateGroupNamesBranch(assertion.child, names),
+            else => {},
+        }
     }
 
     fn validateUnicodeBackrefs(self: *Parser, node: *ast.Node) RegexError!void {
