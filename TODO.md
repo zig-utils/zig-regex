@@ -541,7 +541,43 @@ keeps `hello` on first-byte (every `h` precedes its `o`, ratio ~1) while routing
 **Possible further work (optional):** a Teddy multi-substring SIMD matcher for literal
 *alternations* (`foo|bar|baz`); and AVX2 (32-byte) blocks on x86.
 
-### 2. Lazy-DFA inner-loop tuning for general class patterns — *open (near-parity)*
+### 2. Reusable `Matcher` for per-line / grep matching — ✅ DONE
+
+`find`/`count`/`isMatch`/`findAll` rebuilt the lazy DFA every call — fine for one
+whole-buffer scan, catastrophic for a grep doing millions of per-line calls (DFA
+subset-construction per line). `Regex.matcher()` returns a reusable, single-threaded
+`Matcher` that builds the DFA once and reuses it. Per-line `isMatch`: `\w+\s+\w+`
+212ms → 3.8ms (**56x**), `\w+[0-9]`/`[a-z]+[0-9]+` ~21x. `Regex` stays immutable /
+thread-safe; one `Matcher` per thread. (Caches the DFA; the NFA VM for the
+assertion/lazy fallback is still per-call — see item 4.)
+
+### 3. Case-insensitive matching on the byte engine — ✅ DONE
+
+Under `i` the DFA was disabled and `\s`/class-sets fell to the backtracker. The
+compiler now ASCII-case-folds char/class/literal/class-set transitions at compile
+time, so `i` patterns run on the folded NFA/DFA. `dfaEligible` allows `i`; folding
+happens on the positive set *before* any complement (fixed a pre-existing negated-class
+bug where `[^a-c]` under `i` matched everything). `u`+`i` (Unicode simple folds) and
+unrepresentable class-sets stay on the backtracker. `(?i)\w+\s+\w+` was on the
+backtracker → now thompson/DFA; per-line with a `Matcher` 109ms → 1.3ms. The
+AST-derived byte prefilter is disabled under `i` (it's case-sensitive) — folding it
+to keep the prefilter is a follow-up.
+
+### 4. Remaining open items (lower value; need a quiet machine to benchmark)
+
+- **Lazy-DFA inner-loop tuning for general class patterns** (below) — the only
+  patterns still behind Rust, all at *near parity*.
+- **Cache the NFA VM in `Matcher`** — after item 3, the per-call NFA build only
+  affects the *NFA-fallback* patterns (mid-pattern `\b`/anchors, lazy quantifiers);
+  caching the VM (like the DFA) would amortize those per-line too. Contained; the
+  threading mirrors the DFA reuse. Lower priority (these aren't common grep patterns).
+- **Teddy multi-substring SIMD** for literal alternations (`foo|bar|baz`, `fn|fn\s`).
+- **First-byte prefilter under `i`** — fold the prefilter bytes so the DFA prefilter
+  works for case-insensitive patterns too.
+- **Zero-alloc match iterator** so `findAll`-style iteration needn't materialize a
+  `Match[]`.
+
+### Lazy-DFA inner-loop tuning for general class patterns — *open (near-parity)*
 
 The remaining behind-Rust patterns are all **leading-character-class** shapes that
 already run on the lazy DFA with the leading-class run-skip — they're at **near
