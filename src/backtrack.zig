@@ -977,38 +977,516 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchLookbehind(self: *BacktrackEngine, assertion: ast.Node.Assertion, pos: usize) ?usize {
-        // Lookbehind: test if pattern matches BEFORE current position
-        // This is complex because we need to search backwards
-
         if (assertion.positive) {
-            // Positive lookbehind (?<=...): the child must match a substring that
-            // ends exactly at `pos`. First try the plain (greedy) match at each
-            // start, which also SETS the child's capture groups — preserving the
-            // existing behavior for the common case. If no start's greedy match
-            // happens to end at `pos`, fall back to the constrained matcher, which
-            // explores backtracking choices (e.g. `(?<=\w*)`, where the greedy
-            // `\w*` overshoots `pos` but a shorter match ends there).
-            var start: usize = 0;
-            while (start <= pos) : (start += 1) {
-                if (self.matchNode(assertion.child, start)) |end| {
-                    if (end == pos) return pos;
+            // ECMAScript evaluates lookbehind patterns with direction = -1:
+            // concatenations run right-to-left and captures inside repetitions end
+            // up with the leftmost participating iteration.
+            return if (self.matchReverseNode(assertion.child, pos) != null) pos else null;
+        }
+
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+        defer self.allocator.free(saved);
+        @memcpy(saved, self.captures);
+
+        const matches = self.matchReverseNode(assertion.child, pos) != null;
+        @memcpy(self.captures, saved);
+        return if (matches) null else pos;
+    }
+
+    fn matchReverseNode(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
+        self.step_count += 1;
+        if (self.step_count > self.max_steps) return null;
+
+        return switch (node.node_type) {
+            .literal => self.matchReverseLiteral(node.data.literal, pos),
+            .any => self.matchReverseAny(pos),
+            .concat => self.matchReverseConcat(node.data.concat, pos),
+            .alternation => self.matchReverseAlternation(node.data.alternation, pos),
+            .star => self.matchReverseStar(node.data.star, pos),
+            .plus => self.matchReversePlus(node.data.plus, pos),
+            .optional => self.matchReverseOptional(node.data.optional, pos),
+            .repeat => self.matchReverseRepeat(node.data.repeat, pos),
+            .char_class => self.matchReverseCharClass(node.data.char_class, pos),
+            .group => self.matchReverseGroup(node.data.group, pos),
+            .anchor => self.matchAnchor(node.data.anchor, pos),
+            .empty => pos,
+            .lookahead => self.matchLookahead(node.data.lookahead, pos),
+            .lookbehind => self.matchLookbehind(node.data.lookbehind, pos),
+            .backref => self.matchReverseBackreference(node.data.backref, pos),
+            .unicode_property => self.matchReverseUnicodeProperty(node.data.unicode_property, pos),
+            .class_set => self.matchReverseClassSet(node.data.class_set, pos),
+        };
+    }
+
+    fn matchReverseConcat(self: *BacktrackEngine, concat: ast.Node.Concat, pos: usize) ?usize {
+        const right_has_choices = self.hasQuantifiers(concat.right) or self.hasAlternation(concat.right);
+
+        if (!right_has_choices) {
+            const split = self.matchReverseNode(concat.right, pos) orelse return null;
+            return self.matchReverseNode(concat.left, split);
+        }
+
+        const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+        defer self.allocator.free(base_captures);
+        @memcpy(base_captures, self.captures);
+
+        var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+        defer splits.deinit(self.allocator);
+        self.collectAllReverseMatches(concat.right, pos, &splits) catch return null;
+
+        for (splits.items) |split| {
+            @memcpy(self.captures, base_captures);
+            if (!self.matchReverseNodeConstrained(concat.right, pos, split)) continue;
+            if (self.matchReverseNode(concat.left, split)) |start| return start;
+        }
+
+        @memcpy(self.captures, base_captures);
+        return null;
+    }
+
+    fn matchReverseAlternation(self: *BacktrackEngine, alt: ast.Node.Alternation, pos: usize) ?usize {
+        if (self.matchReverseNode(alt.left, pos)) |start| return start;
+        return self.matchReverseNode(alt.right, pos);
+    }
+
+    fn matchReverseGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {
+        const saved_flags = self.flags;
+        if (group.mod) |m| {
+            if (m.i) |b| self.flags.case_insensitive = b;
+            if (m.m) |b| self.flags.multiline = b;
+            if (m.s) |b| self.flags.dot_all = b;
+        }
+        defer if (group.mod != null) {
+            self.flags = saved_flags;
+        };
+
+        const start_pos = self.matchReverseNode(group.child, pos) orelse return null;
+        if (group.capture_index) |index| {
+            if (index > 0 and index <= self.captures.len) {
+                self.captures[index - 1] = .{
+                    .start = start_pos,
+                    .end = pos,
+                    .matched = true,
+                };
+            }
+        }
+        return start_pos;
+    }
+
+    fn matchReverseStar(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
+        if (!quant.greedy) return pos;
+        var current = pos;
+        while (true) {
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            defer self.allocator.free(saved);
+            @memcpy(saved, self.captures);
+
+            self.clearCapturesIn(quant.child);
+            const next = self.matchReverseNode(quant.child, current) orelse {
+                @memcpy(self.captures, saved);
+                break;
+            };
+            if (next >= current) {
+                @memcpy(self.captures, saved);
+                break;
+            }
+            current = next;
+        }
+        return current;
+    }
+
+    fn matchReversePlus(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
+        self.clearCapturesIn(quant.child);
+        var current = self.matchReverseNode(quant.child, pos) orelse return null;
+        if (!quant.greedy) return current;
+
+        while (true) {
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            defer self.allocator.free(saved);
+            @memcpy(saved, self.captures);
+
+            self.clearCapturesIn(quant.child);
+            const next = self.matchReverseNode(quant.child, current) orelse {
+                @memcpy(self.captures, saved);
+                break;
+            };
+            if (next >= current) {
+                @memcpy(self.captures, saved);
+                break;
+            }
+            current = next;
+        }
+        return current;
+    }
+
+    fn matchReverseOptional(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
+        if (!quant.greedy) return pos;
+        return self.matchReverseNode(quant.child, pos) orelse pos;
+    }
+
+    fn matchReverseRepeat(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize) ?usize {
+        const min = repeat.bounds.min;
+        const max = repeat.bounds.max;
+
+        var current = pos;
+        var count: usize = 0;
+        while (count < min) : (count += 1) {
+            self.clearCapturesIn(repeat.child);
+            const next = self.matchReverseNode(repeat.child, current) orelse return null;
+            if (next > current) return null;
+            current = next;
+        }
+
+        if (!repeat.greedy) return current;
+
+        while (max == null or count < max.?) : (count += 1) {
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            defer self.allocator.free(saved);
+            @memcpy(saved, self.captures);
+
+            self.clearCapturesIn(repeat.child);
+            const next = self.matchReverseNode(repeat.child, current) orelse {
+                @memcpy(self.captures, saved);
+                break;
+            };
+            if (next >= current) {
+                @memcpy(self.captures, saved);
+                break;
+            }
+            current = next;
+        }
+        return current;
+    }
+
+    fn matchReverseNodeConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_start: usize) bool {
+        switch (node.node_type) {
+            .literal => return if (self.matchReverseLiteral(node.data.literal, pos)) |start| start == target_start else false,
+            .any => return if (self.matchReverseAny(pos)) |start| start == target_start else false,
+            .char_class => return if (self.matchReverseCharClass(node.data.char_class, pos)) |start| start == target_start else false,
+            .unicode_property => return if (self.matchReverseUnicodeProperty(node.data.unicode_property, pos)) |start| start == target_start else false,
+            .class_set => return if (self.matchReverseClassSet(node.data.class_set, pos)) |start| start == target_start else false,
+            .anchor => return if (self.matchAnchor(node.data.anchor, pos)) |start| start == target_start else false,
+            .empty => return pos == target_start,
+            .group => {
+                const group = node.data.group;
+                if (self.matchReverseNodeConstrained(group.child, pos, target_start)) {
+                    if (group.capture_index) |index| {
+                        if (index > 0 and index <= self.captures.len) {
+                            self.captures[index - 1] = .{
+                                .start = target_start,
+                                .end = pos,
+                                .matched = true,
+                            };
+                        }
+                    }
+                    return true;
                 }
+                return false;
+            },
+            .concat => {
+                const c = node.data.concat;
+                var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+                defer splits.deinit(self.allocator);
+                self.collectAllReverseMatches(c.right, pos, &splits) catch return false;
+
+                const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+                defer self.allocator.free(base_captures);
+                @memcpy(base_captures, self.captures);
+
+                for (splits.items) |split| {
+                    if (split < target_start) continue;
+                    @memcpy(self.captures, base_captures);
+                    if (!self.matchReverseNodeConstrained(c.right, pos, split)) continue;
+                    if (self.matchReverseNodeConstrained(c.left, split, target_start)) return true;
+                }
+                @memcpy(self.captures, base_captures);
+                return false;
+            },
+            .star, .plus, .optional, .repeat => {
+                var starts = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+                defer starts.deinit(self.allocator);
+                self.collectAllReverseMatches(node, pos, &starts) catch return false;
+                for (starts.items) |start| {
+                    if (start == target_start) return true;
+                }
+                return false;
+            },
+            .alternation => {
+                if (self.matchReverseNodeConstrained(node.data.alternation.left, pos, target_start)) return true;
+                return self.matchReverseNodeConstrained(node.data.alternation.right, pos, target_start);
+            },
+            .backref => return if (self.matchReverseBackreference(node.data.backref, pos)) |start| start == target_start else false,
+            .lookahead => return if (self.matchLookahead(node.data.lookahead, pos)) |start| start == target_start else false,
+            .lookbehind => return if (self.matchLookbehind(node.data.lookbehind, pos)) |start| start == target_start else false,
+        }
+    }
+
+    fn collectAllReverseMatches(self: *BacktrackEngine, node: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
+        switch (node.node_type) {
+            .star => {
+                const quant = node.data.star;
+                if (!quant.greedy) try positions.append(self.allocator, pos);
+
+                var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+                defer all.deinit(self.allocator);
+                try all.append(self.allocator, pos);
+
+                var current = pos;
+                while (true) {
+                    self.clearCapturesIn(quant.child);
+                    const next = self.matchReverseNode(quant.child, current) orelse break;
+                    if (next >= current) break;
+                    current = next;
+                    try all.append(self.allocator, current);
+                }
+
+                if (quant.greedy) {
+                    var i = all.items.len;
+                    while (i > 0) {
+                        i -= 1;
+                        try positions.append(self.allocator, all.items[i]);
+                    }
+                } else {
+                    for (all.items[1..]) |start| try positions.append(self.allocator, start);
+                }
+            },
+            .plus => {
+                const quant = node.data.plus;
+                self.clearCapturesIn(quant.child);
+                const first = self.matchReverseNode(quant.child, pos) orelse return;
+                try self.collectReverseQuantifierTail(quant.child, first, quant.greedy, positions);
+            },
+            .optional => {
+                const quant = node.data.optional;
+                if (quant.greedy) {
+                    try self.collectAllReverseMatches(quant.child, pos, positions);
+                    try positions.append(self.allocator, pos);
+                } else {
+                    try positions.append(self.allocator, pos);
+                    try self.collectAllReverseMatches(quant.child, pos, positions);
+                }
+            },
+            .repeat => try self.collectReverseRepeatMatches(node.data.repeat, pos, positions),
+            .concat => {
+                const c = node.data.concat;
+                var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+                defer right_positions.deinit(self.allocator);
+                try self.collectAllReverseMatches(c.right, pos, &right_positions);
+
+                const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return;
+                defer self.allocator.free(base_captures);
+                @memcpy(base_captures, self.captures);
+
+                for (right_positions.items) |split| {
+                    @memcpy(self.captures, base_captures);
+                    _ = self.matchReverseNodeConstrained(c.right, pos, split);
+                    try self.collectAllReverseMatches(c.left, split, positions);
+                }
+                @memcpy(self.captures, base_captures);
+            },
+            .group => {
+                const group = node.data.group;
+                if (self.hasQuantifiers(group.child) or self.hasAlternation(group.child)) {
+                    try self.collectAllReverseMatches(group.child, pos, positions);
+                } else if (self.matchReverseNode(node, pos)) |start| {
+                    try positions.append(self.allocator, start);
+                }
+            },
+            .alternation => {
+                try self.collectAllReverseMatches(node.data.alternation.left, pos, positions);
+                try self.collectAllReverseMatches(node.data.alternation.right, pos, positions);
+            },
+            else => {
+                if (self.matchReverseNode(node, pos)) |start| try positions.append(self.allocator, start);
+            },
+        }
+    }
+
+    fn collectReverseQuantifierTail(self: *BacktrackEngine, child: *ast.Node, pos: usize, greedy: bool, positions: *std.ArrayList(usize)) !void {
+        var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+        defer all.deinit(self.allocator);
+        try all.append(self.allocator, pos);
+
+        var current = pos;
+        while (true) {
+            self.clearCapturesIn(child);
+            const next = self.matchReverseNode(child, current) orelse break;
+            if (next >= current) break;
+            current = next;
+            try all.append(self.allocator, current);
+        }
+
+        if (greedy) {
+            var i = all.items.len;
+            while (i > 0) {
+                i -= 1;
+                try positions.append(self.allocator, all.items[i]);
             }
-            start = 0;
-            while (start <= pos) : (start += 1) {
-                if (self.matchNodeConstrained(assertion.child, start, pos)) return pos;
-            }
-            return null;
         } else {
-            // Negative lookbehind (?<!...): succeeds iff NO substring ending at
-            // `pos` matches the child. The constrained matcher explores backtracking
-            // choices, so a non-greedy match that ends at `pos` is not missed (a
-            // greedy-only probe could overshoot and wrongly let the assertion pass).
-            var start: usize = 0;
-            while (start <= pos) : (start += 1) {
-                if (self.matchNodeConstrained(assertion.child, start, pos)) return null;
+            for (all.items) |start| try positions.append(self.allocator, start);
+        }
+    }
+
+    fn collectReverseRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize)) !void {
+        var current = pos;
+        var count: usize = 0;
+        while (count < repeat.bounds.min) : (count += 1) {
+            self.clearCapturesIn(repeat.child);
+            const next = self.matchReverseNode(repeat.child, current) orelse return;
+            if (next > current) return;
+            current = next;
+        }
+
+        var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+        defer all.deinit(self.allocator);
+        try all.append(self.allocator, current);
+
+        while (repeat.bounds.max == null or count < repeat.bounds.max.?) : (count += 1) {
+            self.clearCapturesIn(repeat.child);
+            const next = self.matchReverseNode(repeat.child, current) orelse break;
+            if (next >= current) break;
+            current = next;
+            try all.append(self.allocator, current);
+        }
+
+        if (repeat.greedy) {
+            var i = all.items.len;
+            while (i > 0) {
+                i -= 1;
+                try positions.append(self.allocator, all.items[i]);
             }
-            return pos;
+        } else {
+            for (all.items) |start| try positions.append(self.allocator, start);
+        }
+    }
+
+    fn matchReverseLiteral(self: *BacktrackEngine, c: u8, pos: usize) ?usize {
+        if (pos == 0) return null;
+        const start = pos - 1;
+        const input_char = self.input[start];
+        const matches = if (self.flags.case_insensitive)
+            std.ascii.toLower(input_char) == std.ascii.toLower(c)
+        else
+            input_char == c;
+        return if (matches) start else null;
+    }
+
+    fn previousCodepointStart(self: *BacktrackEngine, pos: usize) ?usize {
+        if (pos == 0 or pos > self.input.len) return null;
+        var start = pos - 1;
+        while (start > 0 and (self.input[start] & 0xC0) == 0x80) : (start -= 1) {}
+        return start;
+    }
+
+    fn matchReverseAny(self: *BacktrackEngine, pos: usize) ?usize {
+        const start = self.previousCodepointStart(pos) orelse return null;
+        const len = common.dotMatchLen(self.input, start, self.flags) orelse return null;
+        return if (start + len == pos) start else null;
+    }
+
+    fn matchReverseCharClass(self: *BacktrackEngine, char_class: common.CharClass, pos: usize) ?usize {
+        if (pos == 0) return null;
+        const start = pos - 1;
+        const c = self.input[start];
+        const matches = if (self.flags.case_insensitive)
+            char_class.matchesCI(c)
+        else
+            char_class.matches(c);
+        return if (matches) start else null;
+    }
+
+    fn matchReverseUnicodeProperty(self: *BacktrackEngine, up: ast.Node.UnicodeProp, pos: usize) ?usize {
+        const start = self.previousCodepointStart(pos) orelse return null;
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[start..]) orelse return null;
+        if (start + dec.len != pos) return null;
+        const matched = unicode_mod.matchesSpec(dec.codepoint, up.spec);
+        if (matched == up.negated) return null;
+        return start;
+    }
+
+    fn matchReverseClassSet(self: *BacktrackEngine, set: *ast.Node.ClassSet, pos: usize) ?usize {
+        var start: usize = 0;
+        while (start < pos) : (start += 1) {
+            if (set.matchLongest(self.input, start, self.flags.case_insensitive)) |end| {
+                if (end == pos) return start;
+            }
+        }
+        return null;
+    }
+
+    fn matchReverseBackreference(self: *BacktrackEngine, backref: ast.Node.Backreference, pos: usize) ?usize {
+        if (backref.name) |name| return self.matchNamedBackreferenceReverse(self.ast_root, name, pos);
+        return self.matchCaptureBackreferenceReverse(backref.index, pos);
+    }
+
+    fn matchCaptureBackreferenceReverse(self: *BacktrackEngine, capture_index: usize, pos: usize) ?usize {
+        if (capture_index == 0 or capture_index > self.captures.len) return null;
+        const capture = self.captures[capture_index - 1];
+        if (!capture.matched) return pos;
+        return self.matchCaptureTextReverse(capture, pos);
+    }
+
+    fn matchPresentCaptureBackreferenceReverse(self: *BacktrackEngine, capture_index: usize, pos: usize) ?usize {
+        if (capture_index == 0 or capture_index > self.captures.len) return null;
+        const capture = self.captures[capture_index - 1];
+        if (!capture.matched) return null;
+        return self.matchCaptureTextReverse(capture, pos);
+    }
+
+    fn matchCaptureTextReverse(self: *BacktrackEngine, capture: CaptureGroup, pos: usize) ?usize {
+        const captured_text = self.input[capture.start..capture.end];
+        if (captured_text.len > pos) return null;
+        const start = pos - captured_text.len;
+        const text_to_match = self.input[start..pos];
+
+        if (self.flags.case_insensitive) {
+            for (captured_text, text_to_match) |a, b| {
+                if (std.ascii.toLower(a) != std.ascii.toLower(b)) return null;
+            }
+            return start;
+        }
+
+        return if (std.mem.eql(u8, captured_text, text_to_match)) start else null;
+    }
+
+    fn matchNamedBackreferenceReverse(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize) ?usize {
+        var found_name = false;
+        var found_participating = false;
+        if (self.matchNamedBackreferenceParticipatingReverse(node, name, pos, &found_name, &found_participating)) |start| return start;
+        return if (found_name and !found_participating) pos else null;
+    }
+
+    fn matchNamedBackreferenceParticipatingReverse(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize, found_name: *bool, found_participating: *bool) ?usize {
+        switch (node.node_type) {
+            .group => {
+                const group = node.data.group;
+                if (group.name) |group_name| {
+                    if (std.mem.eql(u8, group_name, name)) {
+                        found_name.* = true;
+                        if (group.capture_index) |index| {
+                            if (index > 0 and index <= self.captures.len and self.captures[index - 1].matched)
+                                found_participating.* = true;
+                            if (self.matchPresentCaptureBackreferenceReverse(index, pos)) |start| return start;
+                        }
+                    }
+                }
+                return self.matchNamedBackreferenceParticipatingReverse(group.child, name, pos, found_name, found_participating);
+            },
+            .concat => {
+                if (self.matchNamedBackreferenceParticipatingReverse(node.data.concat.left, name, pos, found_name, found_participating)) |start| return start;
+                return self.matchNamedBackreferenceParticipatingReverse(node.data.concat.right, name, pos, found_name, found_participating);
+            },
+            .alternation => {
+                if (self.matchNamedBackreferenceParticipatingReverse(node.data.alternation.left, name, pos, found_name, found_participating)) |start| return start;
+                return self.matchNamedBackreferenceParticipatingReverse(node.data.alternation.right, name, pos, found_name, found_participating);
+            },
+            .star => return self.matchNamedBackreferenceParticipatingReverse(node.data.star.child, name, pos, found_name, found_participating),
+            .plus => return self.matchNamedBackreferenceParticipatingReverse(node.data.plus.child, name, pos, found_name, found_participating),
+            .optional => return self.matchNamedBackreferenceParticipatingReverse(node.data.optional.child, name, pos, found_name, found_participating),
+            .repeat => return self.matchNamedBackreferenceParticipatingReverse(node.data.repeat.child, name, pos, found_name, found_participating),
+            .lookahead => return self.matchNamedBackreferenceParticipatingReverse(node.data.lookahead.child, name, pos, found_name, found_participating),
+            .lookbehind => return self.matchNamedBackreferenceParticipatingReverse(node.data.lookbehind.child, name, pos, found_name, found_participating),
+            else => return null,
         }
     }
 

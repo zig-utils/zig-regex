@@ -788,3 +788,63 @@ test "regression: duplicate named captures backtrack alternatives before named b
     }
     try std.testing.expect((try repeated.find("abab")) == null);
 }
+
+test "regression: lookbehind evaluates captures in reverse direction" {
+    const allocator = std.testing.allocator;
+
+    var fixed = try Regex.compile(allocator, "(?<=(\\w){3})f");
+    defer fixed.deinit();
+    if (try fixed.find("abcdef")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("f", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("c", match.captures[0]);
+    } else return error.TestExpectedMatch;
+
+    var greedy = try Regex.compile(allocator, "(?<=(?<a>\\w)+)f");
+    defer greedy.deinit();
+    if (try greedy.find("abcdef")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("f", match.slice);
+        try std.testing.expectEqualStrings("a", greedy.getNamedCapture(&match, "a").?);
+    } else return error.TestExpectedMatch;
+}
+
+test "regression: lookbehind backreferences can bind captures to their right" {
+    const allocator = std.testing.allocator;
+
+    var before_capture = try Regex.compileWithFlags(allocator, "(?<=\\1(\\w))d", .{ .case_insensitive = true });
+    defer before_capture.deinit();
+    if (try before_capture.find("abcCd")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("d", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("C", match.captures[0]);
+    } else return error.TestExpectedMatch;
+
+    var mutual = try Regex.compile(allocator, "(?<=a(.\\2)b(\\1)).{4}");
+    defer mutual.deinit();
+    if (try mutual.find("aabcacbc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("cacb", match.slice);
+        try std.testing.expectEqualStrings("a", match.captures[0]);
+        try std.testing.expectEqualStrings("", match.captures[1]);
+    } else return error.TestExpectedMatch;
+}
+
+test "regression: negative lookbehind restores inner captures" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "(?<!(?<a>\\D){3})f|f");
+    defer regex.deinit();
+    if (try regex.find("abcdef")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("f", match.slice);
+        try std.testing.expect(regex.getNamedCapture(&match, "a") == null);
+    } else return error.TestExpectedMatch;
+}
