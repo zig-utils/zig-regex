@@ -1959,6 +1959,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
                 requiresBacktracking(node.data.concat.right, flags);
         },
         .alternation => {
+            if (containsCapture(node)) return true;
             return requiresBacktracking(node.data.alternation.left, flags) or
                 requiresBacktracking(node.data.alternation.right, flags);
         },

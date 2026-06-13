@@ -983,3 +983,27 @@ test "regression: memmem holds on a large common-first-byte haystack" {
     defer re.deinit();
     try std.testing.expectEqual(@as(usize, 500), try re.count(buf.items));
 }
+
+test "regression: capture-bearing alternatives preserve participating captures" {
+    const allocator = std.testing.allocator;
+
+    var empty_left = try Regex.compile(allocator, "()|");
+    defer empty_left.deinit();
+    if (try empty_left.find("")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("", match.captures[0]);
+    } else return error.TestExpectedMatch;
+
+    var left_capture = try Regex.compile(allocator, "(.)..|abc");
+    defer left_capture.deinit();
+    if (try left_capture.find("abc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("abc", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("a", match.captures[0]);
+    } else return error.TestExpectedMatch;
+}

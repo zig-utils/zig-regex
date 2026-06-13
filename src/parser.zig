@@ -427,7 +427,7 @@ pub const Parser = struct {
     swap_greedy: bool = false,
 
     /// Maximum nesting depth to prevent stack overflow from patterns like (((((...
-    pub const MAX_NESTING_DEPTH: usize = 100;
+    pub const MAX_NESTING_DEPTH: usize = 512;
 
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !Parser {
         var lexer = Lexer.init(pattern);
@@ -1822,12 +1822,12 @@ test "parser group" {
 test "parser: nesting depth limit" {
     const allocator = std.testing.allocator;
 
-    // Create a pattern with 101 levels of nesting (exceeds MAX_NESTING_DEPTH of 100)
-    var pattern_buf: [300]u8 = undefined;
+    // Create a pattern with 513 levels of nesting (exceeds MAX_NESTING_DEPTH of 512)
+    var pattern_buf: [1100]u8 = undefined;
     var pos: usize = 0;
 
-    // Write 101 opening parens
-    for (0..101) |_| {
+    // Write 513 opening parens
+    for (0..513) |_| {
         pattern_buf[pos] = '(';
         pos += 1;
     }
@@ -1836,8 +1836,8 @@ test "parser: nesting depth limit" {
     pattern_buf[pos] = 'a';
     pos += 1;
 
-    // Write 101 closing parens
-    for (0..101) |_| {
+    // Write 513 closing parens
+    for (0..513) |_| {
         pattern_buf[pos] = ')';
         pos += 1;
     }
@@ -1852,12 +1852,12 @@ test "parser: nesting depth limit" {
 test "parser: acceptable nesting depth" {
     const allocator = std.testing.allocator;
 
-    // Create a pattern with 50 levels of nesting (well within MAX_NESTING_DEPTH of 100)
-    var pattern_buf: [200]u8 = undefined;
+    // Create a pattern with 200 levels of nesting (well within MAX_NESTING_DEPTH of 512)
+    var pattern_buf: [500]u8 = undefined;
     var pos: usize = 0;
 
-    // Write 50 opening parens
-    for (0..50) |_| {
+    // Write 200 opening parens
+    for (0..200) |_| {
         pattern_buf[pos] = '(';
         pos += 1;
     }
@@ -1866,8 +1866,8 @@ test "parser: acceptable nesting depth" {
     pattern_buf[pos] = 'a';
     pos += 1;
 
-    // Write 50 closing parens
-    for (0..50) |_| {
+    // Write 200 closing parens
+    for (0..200) |_| {
         pattern_buf[pos] = ')';
         pos += 1;
     }
@@ -1877,5 +1877,5 @@ test "parser: acceptable nesting depth" {
     var result = try parser.parse();
     defer result.deinit();
 
-    try std.testing.expectEqual(@as(usize, 50), result.capture_count);
+    try std.testing.expectEqual(@as(usize, 200), result.capture_count);
 }
