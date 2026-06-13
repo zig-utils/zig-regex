@@ -1815,6 +1815,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
                 .optional => node.data.optional.child,
                 else => unreachable,
             };
+            if (containsAlternation(child)) return true;
             return requiresBacktracking(child, flags);
         },
         .repeat => {
@@ -1823,6 +1824,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
             if (node.data.repeat.bounds.max) |max| {
                 if (max > MAX_NFA_REPEAT_EXPANSION) return true;
             }
+            if (containsAlternation(node.data.repeat.child)) return true;
             return requiresBacktracking(node.data.repeat.child, flags);
         },
 
@@ -1847,6 +1849,21 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         // These don't require backtracking
         .literal, .char_class, .anchor, .empty => return false,
     }
+}
+
+fn containsAlternation(node: *ast.Node) bool {
+    return switch (node.node_type) {
+        .alternation => true,
+        .concat => containsAlternation(node.data.concat.left) or containsAlternation(node.data.concat.right),
+        .star => containsAlternation(node.data.star.child),
+        .plus => containsAlternation(node.data.plus.child),
+        .optional => containsAlternation(node.data.optional.child),
+        .repeat => containsAlternation(node.data.repeat.child),
+        .group => containsAlternation(node.data.group.child),
+        .lookahead => containsAlternation(node.data.lookahead.child),
+        .lookbehind => containsAlternation(node.data.lookbehind.child),
+        else => false,
+    };
 }
 
 const ByteSet = [256]bool;

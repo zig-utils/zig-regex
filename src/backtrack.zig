@@ -802,8 +802,19 @@ pub const BacktrackEngine = struct {
 
         // Collect all possible match positions
         while (true) {
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch break;
+            defer self.allocator.free(saved);
+            @memcpy(saved, self.captures);
+
             self.clearCapturesIn(child);
-            const next_pos = self.matchNodeProgress(child, current_pos) orelse break;
+            const next_pos = self.matchNodeProgress(child, current_pos) orelse {
+                @memcpy(self.captures, saved);
+                break;
+            };
+            if (next_pos <= current_pos) {
+                @memcpy(self.captures, saved);
+                break;
+            }
             current_pos = next_pos;
             match_positions.append(self.allocator, current_pos) catch break;
         }

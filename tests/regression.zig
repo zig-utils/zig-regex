@@ -848,3 +848,35 @@ test "regression: negative lookbehind restores inner captures" {
         try std.testing.expect(regex.getNamedCapture(&match, "a") == null);
     } else return error.TestExpectedMatch;
 }
+
+test "regression: hex escapes above ascii match utf8 input" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "\\xFF");
+    defer regex.deinit();
+    if (try regex.find("\u{00FF}")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("\u{00FF}", match.slice);
+    } else return error.TestExpectedMatch;
+}
+
+test "regression: empty inline modifier arithmetic is rejected" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(RegexError.UnexpectedCharacter, Regex.compile(allocator, "(?-:a)"));
+}
+
+test "regression: repeated alternatives preserve source-order iterations" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "(aa|aabaac|ba|b|c)*");
+    defer regex.deinit();
+    if (try regex.find("aabaac")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("aaba", match.slice);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expectEqualStrings("ba", match.captures[0]);
+    } else return error.TestExpectedMatch;
+}

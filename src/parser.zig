@@ -210,8 +210,8 @@ pub const Lexer = struct {
         };
     }
 
-    /// `\xHH`: two hex digits → a single byte (`\x` with fewer than two hex
-    /// digits is an IdentityEscape of `x`, per Annex B).
+    /// `\xHH`: two hex digits → that code point's UTF-8 bytes (`\x` with fewer
+    /// than two hex digits is an IdentityEscape of `x`, per Annex B).
     /// `\p{Name}` / `\P{Name}` — a Unicode property escape. Resolves a
     /// General_Category name (short or long, optionally `gc=Name`) to the
     /// `UnicodeProperty` enum and emits its ordinal in the token value. Without a
@@ -252,7 +252,7 @@ pub const Lexer = struct {
         const h2 = self.peekHex(1);
         if (h1 != null and h2 != null) {
             self.pos += 2;
-            return self.makeToken(.escape_char, h1.? * 16 + h2.?);
+            return self.emitCodepoint(h1.? * 16 + h2.?);
         }
         self.pos = save;
         if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
@@ -957,6 +957,7 @@ pub const Parser = struct {
                                     try self.advance();
                                 }
                             }
+                            if (removing and add_mask == 0 and remove_mask == 0) return RegexError.UnexpectedCharacter;
 
                             // Push the parse-time flag scope; restore on all exits.
                             const saved_extended = self.extended;
