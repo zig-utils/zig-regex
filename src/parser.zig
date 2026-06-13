@@ -47,10 +47,15 @@ pub const Token = struct {
     value: u8 = 0,
     index: usize = 0,
     name: ?[]const u8 = null,
-    /// For `escape_p`/`escape_P`: the resolved Unicode property operand.
+    /// For `escape_p`/`escape_P`: either a resolved code-point property operand
+    /// or, for `/v` properties of strings, a raw property name in `name`.
     prop: ?unicode.PropSpec = null,
     span: common.Span,
 };
+
+fn isStringPropertyName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "Emoji_Keycap_Sequence");
+}
 
 /// Lexer for tokenizing regex patterns
 pub const Lexer = struct {
@@ -240,9 +245,14 @@ pub const Lexer = struct {
             lhs = body[0..eq_i];
             name = body[eq_i + 1 ..];
         }
-        const spec = unicode.resolveProperty(lhs, name) orelse return RegexError.InvalidEscapeSequence;
         var tok = self.makeToken(if (negated) .escape_P else .escape_p, 0);
-        tok.prop = spec;
+        if (unicode.resolveProperty(lhs, name)) |spec| {
+            tok.prop = spec;
+        } else if (lhs == null and isStringPropertyName(name)) {
+            tok.name = name;
+        } else {
+            return RegexError.InvalidEscapeSequence;
+        }
         return tok;
     }
 
@@ -839,7 +849,13 @@ pub const Parser = struct {
             },
             .escape_p, .escape_P => {
                 try self.advance();
-                return ast.Node.createUnicodeProperty(self.allocator, token.prop.?, token.token_type == .escape_P, span);
+                if (token.prop) |prop| {
+                    return ast.Node.createUnicodeProperty(self.allocator, prop, token.token_type == .escape_P, span);
+                }
+                if (token.token_type == .escape_P) return RegexError.UnexpectedCharacter;
+                if (!self.unicode_sets) return RegexError.InvalidEscapeSequence;
+                const name = token.name orelse return RegexError.InvalidEscapeSequence;
+                return self.stringPropertyNode(name, span);
             },
             .lparen => {
                 // SECURITY: Check nesting depth to prevent stack overflow
@@ -1457,6 +1473,21 @@ pub const Parser = struct {
         const set = try self.allocator.create(ast.Node.ClassSet);
         set.* = .{ .op = .union_, .items = try items.toOwnedSlice(self.allocator) };
         return .{ .nested = set };
+    }
+
+    fn stringPropertyNode(self: *Parser, name: []const u8, span: common.Span) RegexError!*ast.Node {
+        const item = (try self.stringPropertyItem(name)) orelse return RegexError.InvalidEscapeSequence;
+        const set = switch (item) {
+            .nested => |nested| nested,
+            else => blk: {
+                const items = try self.allocator.alloc(ast.Node.ClassItem, 1);
+                items[0] = item;
+                const nested = try self.allocator.create(ast.Node.ClassSet);
+                nested.* = .{ .op = .union_, .items = items };
+                break :blk nested;
+            },
+        };
+        return ast.Node.createClassSet(self.allocator, set, span);
     }
 
     /// Parse one `\p{...}`/`\P{...}` property escape as a class item.
