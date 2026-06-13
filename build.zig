@@ -109,11 +109,8 @@ pub fn build(b: *std.Build) void {
     // installation directory rather than directly from within the cache directory.
     run_cmd.step.dependOn(b.getInstallStep());
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const run_arg = b.option([]const u8, "run-arg", "Pass one argument to the run executable") orelse null;
+    if (run_arg) |arg| run_cmd.addArg(arg);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -476,7 +473,8 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(findall_bench);
 
     const findall_bench_run = b.addRunArtifact(findall_bench);
-    if (b.args) |args| findall_bench_run.addArgs(args);
+    const findall_bench_arg = b.option([]const u8, "findall-bench-arg", "Pass one argument to the findAll benchmark") orelse null;
+    if (findall_bench_arg) |arg| findall_bench_run.addArg(arg);
     const findall_bench_step = b.step("bench-findall", "Run findAll throughput benchmark (issue #10)");
     findall_bench_step.dependOn(&findall_bench_run.step);
 
