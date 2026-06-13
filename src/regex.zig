@@ -500,16 +500,22 @@ pub const Regex = struct {
     /// engine, ASCII-exact matching, no position assertions, and all-greedy
     /// quantifiers (so longest-match equals the engine's semantics).
     fn dfaEligible(self: *const Regex) bool {
+        // Case-insensitivity is handled by folding both ASCII cases into the
+        // NFA's char transitions at compile time (compiler.caseFold*), so the
+        // DFA — which matches case-sensitively — is correct for `i` too. (The
+        // AST-derived byte prefilter is *not* folded, so it's disabled under `i`
+        // by `dfaPrefilterActive`.)
         return self.engine_type == .thompson_nfa and
-            !self.flags.case_insensitive and
             !self.opt_info.has_assertions and
             !self.opt_info.has_lazy;
     }
 
-    /// Whether the DFA loops have any candidate prefilter to apply. The DFA path
-    /// is ASCII-exact (never case-insensitive), so a literal prefix is usable
-    /// directly.
+    /// Whether the DFA loops have any candidate prefilter to apply. The
+    /// `literal_prefix`/`first_bytes` hints come from the (unfolded) AST, so they
+    /// are case-sensitive — under `i` they'd skip valid opposite-case starts, so
+    /// the prefilter is disabled there (the folded DFA still scans correctly).
     fn dfaPrefilterActive(self: *const Regex) bool {
+        if (self.flags.case_insensitive) return false;
         return self.opt_info.literal_prefix != null or self.opt_info.first_bytes != null;
     }
 
@@ -705,6 +711,20 @@ pub const Regex = struct {
         return r;
     }
 
+    /// The effective membership table for a repeated atom: the positive set
+    /// (ASCII-case-folded under `i`), with negation applied last. Folding before
+    /// negation is essential — folding a negated `[^a-c]` table would wrongly
+    /// re-admit `a`-`c` (their uppercase matches `[^a-c]`, whose lowercase folds
+    /// back in). `table[byte]` then means "byte matches the atom".
+    fn repeatTable(ra: optimizer.OptimizationInfo.RepeatAtom, ci: bool) [256]bool {
+        var t = if (ci) foldTableCI(ra.table) else ra.table;
+        if (ra.negated) {
+            var b: usize = 0;
+            while (b < 256) : (b += 1) t[b] = !t[b];
+        }
+        return t;
+    }
+
     /// First source-order literal in `set` that matches at `input[pos..]`, or 0
     /// if none. ECMAScript alternation is ordered (`a|ab` matches `a`).
     fn firstLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
@@ -859,7 +879,7 @@ pub const Regex = struct {
         // Repeated-atom fast path: a match exists iff some run of `table` bytes
         // reaches the minimum length.
         if (self.opt_info.repeat_atom) |ra| if (!(self.flags.multiline and self.opt_info.has_assertions)) {
-            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
                 const run = repeatRunAt(input, table, 0, max);
@@ -1052,7 +1072,7 @@ pub const Regex = struct {
         }
         // Repeated-atom fast path: leftmost maximal run of `table` bytes.
         if (self.opt_info.repeat_atom) |ra| if (!(self.flags.multiline and self.opt_info.has_assertions)) {
-            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
                 const run = repeatRunAt(input, table, 0, max);
@@ -1345,7 +1365,7 @@ pub const Regex = struct {
         // (capped at max) is one non-overlapping match. No NFA, no per-match
         // capture allocation.
         if (self.opt_info.repeat_atom) |ra| {
-            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             while (pos < input.len) {
                 while (pos < input.len and !table[input[pos]]) pos += 1;
@@ -1563,7 +1583,7 @@ pub const Regex = struct {
         }
         // Repeated-atom: count maximal runs of >= min table bytes.
         if (self.opt_info.repeat_atom) |ra| {
-            const table = if (self.flags.case_insensitive) foldTableCI(ra.table) else ra.table;
+            const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             while (pos < input.len) {
                 while (pos < input.len and !table[input[pos]]) pos += 1;
@@ -2003,12 +2023,13 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         .lookahead, .lookbehind, .backref, .unicode_property => return true,
 
         // A `class_set` (`\s`, `\S`, `/v` Unicode brackets) lowers to a UTF-8
-        // byte automaton when it's a union of code-point ranges, so it can run
-        // on the fast byte engine. Under `i` (case folding happens at the byte
-        // level in the NFA/DFA) and for unrepresentable shapes (properties,
-        // multi-code-point strings, intersection/difference) it stays on the
-        // backtracker.
-        .class_set => return flags.case_insensitive or !@import("utf8_class.zig").compilable(node.data.class_set),
+        // byte automaton when it's a union of code-point ranges — including under
+        // plain `i`, where the compiler ASCII-case-folds the ranges. But `u`+`i`
+        // needs *Unicode* simple case folds (e.g. U+0390↔U+1FD3), which only the
+        // backtracker does; and unrepresentable shapes (Unicode properties,
+        // multi-code-point strings, intersection/difference) also need it.
+        .class_set => return (flags.case_insensitive and flags.unicode) or
+            !@import("utf8_class.zig").compilable(node.data.class_set),
 
         // Check for lazy quantifiers
         .star, .plus, .optional => {

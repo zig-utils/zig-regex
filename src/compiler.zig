@@ -219,7 +219,33 @@ pub const Compiler = struct {
     }
 
     /// Compile a literal character
+    /// ASCII-case-fold byte ranges: add each range's opposite-case letter span,
+    /// so a folded class matched case-*sensitively* (`.matches`) accepts both
+    /// cases. Lets case-insensitive patterns run on the byte NFA / lazy DFA
+    /// instead of the per-position NFA. (`negated` is carried unchanged: folding
+    /// the *set* and keeping the negation gives the correct `[^a]`→`[^aA]`.)
+    fn caseFoldByteRanges(allocator: std.mem.Allocator, ranges: []const common.CharRange, negated: bool) !common.CharClass {
+        var list: std.ArrayList(common.CharRange) = .empty;
+        errdefer list.deinit(allocator);
+        for (ranges) |r| {
+            try list.append(allocator, r);
+            const lo_a = @max(r.start, 'a');
+            const hi_a = @min(r.end, 'z');
+            if (lo_a <= hi_a) try list.append(allocator, .{ .start = lo_a - 'a' + 'A', .end = hi_a - 'a' + 'A' });
+            const lo_b = @max(r.start, 'A');
+            const hi_b = @min(r.end, 'Z');
+            if (lo_b <= hi_b) try list.append(allocator, .{ .start = lo_b - 'A' + 'a', .end = hi_b - 'A' + 'a' });
+        }
+        return .{ .ranges = try list.toOwnedSlice(allocator), .negated = negated };
+    }
+
     fn compileLiteral(self: *Compiler, c: u8) !Fragment {
+        // Under `i`, an ASCII letter matches both cases — emit a folded class.
+        if (self.flags.case_insensitive and ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z'))) {
+            const folded = try caseFoldByteRanges(self.allocator, &[_]common.CharRange{.{ .start = c, .end = c }}, false);
+            defer self.allocator.free(folded.ranges);
+            return self.compileCharClassValue(folded);
+        }
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
 
@@ -470,6 +496,16 @@ pub const Compiler = struct {
 
     /// Compile character class
     fn compileCharClass(self: *Compiler, char_class: common.CharClass) !Fragment {
+        // Under `i`, fold the class so it matches both cases case-sensitively.
+        if (self.flags.case_insensitive) {
+            const folded = try caseFoldByteRanges(self.allocator, char_class.ranges, char_class.negated);
+            defer self.allocator.free(folded.ranges);
+            return self.compileCharClassValue(folded);
+        }
+        return self.compileCharClassValue(char_class);
+    }
+
+    fn compileCharClassValue(self: *Compiler, char_class: common.CharClass) !Fragment {
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
 
@@ -485,7 +521,9 @@ pub const Compiler = struct {
     /// `char_class` byte transitions, all sharing one start/accept pair. A set
     /// that matches nothing yields an (unreachable-accept) dead fragment.
     fn compileClassSet(self: *Compiler, set: *ast.Node.ClassSet) !Fragment {
-        const ranges = (try utf8_class.toCodepointRanges(self.allocator, set)) orelse
+        // Folding happens on the positive set before any complement (inside
+        // toCodepointRanges), so negated classes stay correct under `i`.
+        const ranges = (try utf8_class.toCodepointRanges(self.allocator, set, self.flags.case_insensitive)) orelse
             return RegexError.NotImplemented;
         defer self.allocator.free(ranges);
         return self.compileCodepointRanges(ranges);

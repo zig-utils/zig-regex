@@ -1202,3 +1202,52 @@ test "regression: Matcher leftmost-longest count over many lines equals plain" {
     try std.testing.expectEqual(total_plain, total_matcher);
     try std.testing.expect(total_plain > 0);
 }
+
+// --- case-insensitive on the byte engine (folded NFA/DFA) ---
+//
+// Under `i` (without the `u` flag) the compiler ASCII-case-folds char/class
+// transitions, so case-insensitive patterns run on the fast byte NFA/DFA
+// instead of the per-position NFA/backtracker. These guard the folding,
+// especially **negated** classes (folding must precede negation) and the
+// engine actually used.
+
+test "regression: case-insensitive runs on the byte engine, not the backtracker" {
+    const allocator = std.testing.allocator;
+    inline for (.{ "\\w+\\s+\\w+", "[a-z]+[0-9]+", "foo.*bar" }) |p| {
+        var re = try Regex.compileWithFlags(allocator, p, .{ .case_insensitive = true });
+        defer re.deinit();
+        try std.testing.expect(re.engine_type == .thompson_nfa);
+    }
+}
+
+test "regression: case-insensitive matching folds both cases" {
+    const allocator = std.testing.allocator;
+
+    var lit = try Regex.compileWithFlags(allocator, "Foo", .{ .case_insensitive = true });
+    defer lit.deinit();
+    try std.testing.expect(try lit.isMatch("FOO"));
+    try std.testing.expect(try lit.isMatch("foo"));
+    try std.testing.expect(try lit.isMatch("fOo"));
+    try std.testing.expect(!try lit.isMatch("bar"));
+
+    var cls = try Regex.compileWithFlags(allocator, "[a-c]", .{ .case_insensitive = true });
+    defer cls.deinit();
+    for ([_][]const u8{ "a", "A", "b", "B", "c", "C" }) |s| try std.testing.expect(try cls.isMatch(s));
+    try std.testing.expect(!try cls.isMatch("d"));
+    try std.testing.expect(!try cls.isMatch("D"));
+}
+
+test "regression: negated class under `i` folds before negating" {
+    const allocator = std.testing.allocator;
+    // [^a-c] under `i` must exclude a-c AND A-C (folding the set, not the
+    // complement). Previously the repeat-atom fold re-admitted them.
+    var re = try Regex.compileWithFlags(allocator, "[^a-c]", .{ .case_insensitive = true });
+    defer re.deinit();
+    for ([_][]const u8{ "a", "A", "b", "B", "c", "C" }) |s| try std.testing.expect(!try re.isMatch(s));
+    for ([_][]const u8{ "d", "D", "z", "Z", "0" }) |s| try std.testing.expect(try re.isMatch(s));
+
+    var plus = try Regex.compileWithFlags(allocator, "[^a-c]+", .{ .case_insensitive = true });
+    defer plus.deinit();
+    try std.testing.expectEqual(@as(usize, 0), try plus.count("aAbBcC"));
+    try std.testing.expectEqual(@as(usize, 1), try plus.count("xyZ"));
+}

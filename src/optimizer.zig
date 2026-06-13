@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const common = @import("common.zig");
 const unicode = @import("unicode.zig");
 const utf8_class = @import("utf8_class.zig");
 
@@ -78,8 +79,13 @@ pub const OptimizationInfo = struct {
     max_length: ?usize = null,
 
     pub const RepeatAtom = struct {
-        /// Membership table for the repeated byte atom.
+        /// Positive membership table for the repeated byte atom (the class's
+        /// ranges, *before* any negation). Kept positive so case-folding under
+        /// `i` is correct — fold the set, then apply `negated` when matching.
         table: [256]bool,
+        /// Whether the atom is a negated class (`[^…]`); membership is then the
+        /// complement of `table`.
+        negated: bool,
         min: usize,
         /// Null means unbounded (`+`, `{m,}`).
         max: ?usize,
@@ -407,18 +413,22 @@ pub const Optimizer = struct {
             else => {}, // bare atom: min = max = 1
         }
         var table = std.mem.zeroes([256]bool);
+        var negated = false;
         switch (node.node_type) {
             .literal => table[node.data.literal] = true,
             .char_class => {
                 const cc = node.data.char_class;
+                negated = cc.negated;
+                // Positive membership (ranges only); negation applied at match.
+                const positive = common.CharClass{ .ranges = cc.ranges, .negated = false };
                 var b: usize = 0;
                 while (b < 256) : (b += 1) {
-                    if (cc.matches(@intCast(b))) table[b] = true;
+                    if (positive.matches(@intCast(b))) table[b] = true;
                 }
             },
             else => return null,
         }
-        return .{ .table = table, .min = min, .max = max };
+        return .{ .table = table, .negated = negated, .min = min, .max = max };
     }
 
     /// Detect a whole-pattern single greedy-repeated Unicode property atom

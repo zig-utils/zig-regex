@@ -119,14 +119,38 @@ fn complement(allocator: std.mem.Allocator, ranges: []const CpRange) ![]CpRange 
     return out.toOwnedSlice(allocator);
 }
 
+/// Append each range's opposite-case ASCII-letter span (in place), so the set
+/// matches both cases. Must run on the *positive* ranges **before** any
+/// complement, or a negated set would wrongly re-include the folded letters.
+fn caseFoldAscii(list: *std.ArrayList(CpRange), allocator: std.mem.Allocator) !void {
+    const n = list.items.len;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const r = list.items[i];
+        if (r.lo <= 'z' and r.hi >= 'a') {
+            const lo: u21 = @max(r.lo, 'a');
+            const hi: u21 = @min(r.hi, 'z');
+            try list.append(allocator, .{ .lo = lo - 'a' + 'A', .hi = hi - 'a' + 'A' });
+        }
+        if (r.lo <= 'Z' and r.hi >= 'A') {
+            const lo: u21 = @max(r.lo, 'A');
+            const hi: u21 = @min(r.hi, 'Z');
+            try list.append(allocator, .{ .lo = lo - 'A' + 'a', .hi = hi - 'A' + 'a' });
+        }
+    }
+}
+
 /// The set's matching code points as a clean ascending range list, or null if
-/// the set isn't a lowerable shape. Caller owns the returned slice.
-pub fn toCodepointRanges(allocator: std.mem.Allocator, set: *const ClassSet) !?[]CpRange {
+/// the set isn't a lowerable shape. With `fold_ascii`, both ASCII cases are
+/// added to the positive set before any complement (correct for negated sets).
+/// Caller owns the returned slice.
+pub fn toCodepointRanges(allocator: std.mem.Allocator, set: *const ClassSet, fold_ascii: bool) !?[]CpRange {
     if (!compilable(set)) return null;
 
     var raw: std.ArrayList(CpRange) = .empty;
     defer raw.deinit(allocator);
     try collectUnion(set, &raw, allocator);
+    if (fold_ascii) try caseFoldAscii(&raw, allocator);
 
     const positive = try normalize(allocator, raw.items);
     if (!set.negated) return positive;
