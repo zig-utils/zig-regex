@@ -240,6 +240,7 @@ test "UTF-8 encoding" {
 pub const UnicodeProperty = enum {
     // General categories (short & long forms)
     Letter, L,
+    Cased_Letter, LC,
     Lowercase_Letter, Ll,
     Uppercase_Letter, Lu,
     Titlecase_Letter, Lt,
@@ -286,6 +287,7 @@ pub const UnicodeProperty = enum {
     pub fn fromString(s: []const u8) ?UnicodeProperty {
         const map = std.StaticStringMap(UnicodeProperty).initComptime(.{
             .{ "Letter", .Letter },                       .{ "L", .L },
+            .{ "Cased_Letter", .Cased_Letter },           .{ "LC", .LC },
             .{ "Lowercase_Letter", .Lowercase_Letter },   .{ "Ll", .Ll },
             .{ "Uppercase_Letter", .Uppercase_Letter },   .{ "Lu", .Lu },
             .{ "Titlecase_Letter", .Titlecase_Letter },   .{ "Lt", .Lt },
@@ -298,9 +300,11 @@ pub const UnicodeProperty = enum {
             .{ "Enclosing_Mark", .Enclosing_Mark },       .{ "Me", .Me },
             .{ "Number", .Number },                       .{ "N", .N },
             .{ "Decimal_Number", .Decimal_Number },       .{ "Nd", .Nd },
+            .{ "digit", .Decimal_Number },
             .{ "Letter_Number", .Letter_Number },         .{ "Nl", .Nl },
             .{ "Other_Number", .Other_Number },           .{ "No", .No },
             .{ "Punctuation", .Punctuation },             .{ "P", .P },
+            .{ "punct", .Punctuation },
             .{ "Connector_Punctuation", .Connector_Punctuation }, .{ "Pc", .Pc },
             .{ "Dash_Punctuation", .Dash_Punctuation },   .{ "Pd", .Pd },
             .{ "Open_Punctuation", .Open_Punctuation },   .{ "Ps", .Ps },
@@ -338,6 +342,7 @@ pub fn matchesProperty(cp: Codepoint, property: UnicodeProperty) bool {
 fn matchesCategory(c: GeneralCategory, property: UnicodeProperty) bool {
     return switch (property) {
         .Letter, .L => c == .Lu or c == .Ll or c == .Lt or c == .Lm or c == .Lo,
+        .Cased_Letter, .LC => c == .Lu or c == .Ll or c == .Lt,
         .Lowercase_Letter, .Ll => c == .Ll,
         .Uppercase_Letter, .Lu => c == .Lu,
         .Titlecase_Letter, .Lt => c == .Lt,

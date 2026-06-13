@@ -964,6 +964,29 @@ test "regression: unicode set difference keeps string literals distinct from cha
     try std.testing.expect(!try regex.isMatch("4"));
 }
 
+test "regression: unicode property aliases include generated Test262 gc aliases" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true };
+
+    const cases = [_]struct {
+        pattern: []const u8,
+        should_match: []const u8,
+        should_not_match: []const u8,
+    }{
+        .{ .pattern = "^\\p{General_Category=digit}+$", .should_match = "٣", .should_not_match = "A" },
+        .{ .pattern = "^\\p{gc=punct}+$", .should_match = "!", .should_not_match = "A" },
+        .{ .pattern = "^\\p{General_Category=Cased_Letter}+$", .should_match = "A", .should_not_match = "1" },
+        .{ .pattern = "^\\p{gc=LC}+$", .should_match = "ǅ", .should_not_match = "1" },
+    };
+
+    for (cases) |case| {
+        var regex = try Regex.compileWithFlags(allocator, case.pattern, flags);
+        defer regex.deinit();
+        try std.testing.expect(try regex.isMatch(case.should_match));
+        try std.testing.expect(!try regex.isMatch(case.should_not_match));
+    }
+}
+
 test "regression: unicode sets reject unescaped reserved punctuators" {
     const allocator = std.testing.allocator;
     const flags = @import("regex").common.CompileFlags{ .unicode_sets = true };
