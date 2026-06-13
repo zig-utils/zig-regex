@@ -497,3 +497,104 @@ Building a production-ready regular expression library for Zig that provides:
 - **155+ tests** passing with 100% success rate
 - New test files: `string_anchors.zig`, `multiline_dotall.zig`
 - All memory leaks resolved
+
+---
+
+## Performance Follow-ups (engine speed vs the Rust `regex` crate / ripgrep)
+
+Context: [issue #10](https://github.com/zig-utils/zig-regex/issues/10). The engine
+now matches or beats the Rust `regex` crate on the reported benchmarks (`\w+\s+\w+`,
+literal and `\s` patterns) and on `.`-heavy patterns (`//.*` went from ~45x slower
+to faster than Rust). The items below are **known, deliberately-deferred**
+optimizations — each was either prototyped and reverted, or scoped and judged too
+large/risky to rush. Benchmarks below are `count` over a ~14 MB code haystack
+(stdlib + this repo's `src/`) unless noted; ratios are `zig / rust` (lower is better).
+
+### 1. Rare-byte literal prefilter — *prototyped, reverted (do not re-add naively)*
+
+**What it is.** When scanning for a literal, anchor the SIMD `indexOfScalar` on the
+literal's **rarest** byte (then verify the whole literal) instead of always its
+**first** byte — the trick ripgrep's `memmem` uses. e.g. for `try\s+\w+`, scan for
+`y` instead of the common `t`.
+
+**Why it's not in:** A first prototype used a **static English-frequency table** to
+pick the rare byte. It helped some patterns (`try\s+\w+` 5.4x → 1.5x) but **regressed
+the headline literal benchmarks** because English frequencies mispredict source code:
+
+| pattern | haystack | first-byte (shipped) | static rare-byte (reverted) |
+|---|---|--:|--:|
+| `hello` | word haystack (#10) | **0.55x** | 2.39x ❌ |
+| `test` | word haystack (#10) | **~0.6x** | 2.44x ❌ |
+| `hello` | code haystack | ~0.9x | 10.6x ❌ |
+
+Root cause: `l` is *rare* in English but *common* in code (`null`, `all`, `while`,
+`call`, …), so the table picked a bad anchor. Reverted to first-byte scanning
+(commit history) to protect the issue's literal benchmarks.
+
+**What a correct version needs:**
+
+- [ ] A **corpus-tuned byte-frequency table** (port ripgrep's `byte_frequencies`,
+      derived from a large mixed corpus — not hand-rolled English frequencies).
+- [ ] A **dynamic false-positive guard**: sample the prefilter's hit rate on the
+      first N KB; if the chosen "rare" byte isn't actually selective on *this*
+      haystack, fall back to first-byte (or disable the prefilter). ripgrep does
+      exactly this — the static table alone is not safe.
+- [ ] Apply it behind `literalSearch` so every literal path benefits (`exact_literal`,
+      `literal_prefix` prefilter in `skipToCandidate`, and the `\b`-bounded-literal
+      fast path), **gated** so it can never regress the simple-literal case.
+- [ ] Differential + benchmark tests across both word and code haystacks, asserting
+      no regression on `hello`/`test`/`fn` vs the current first-byte path.
+
+**Related deeper win:** a hand-written **SIMD `memmem`** (vectorized multi-byte
+compare, e.g. two-byte "generic SIMD" or a Teddy multi-substring matcher) would close
+the short-literal gap that remains even with a good rare byte — `fn` and `\bfn\b` are
+still ~4x on dense code purely because Rust uses a vectorized multi-byte search where
+we do first-byte-scan + scalar verify.
+
+### 2. Unanchored single-pass DFA — *deferred (largest/most delicate)*
+
+**What it is.** Today `find`/`findAll`/`count`/`isMatch` on a general pattern run the
+lazy DFA **anchored from each candidate start** (with a leading-class run-skip). A true
+**unanchored** DFA would make one left-to-right O(n) pass for the whole input.
+
+**Why it's deferred:** it targets only the *smallest* remaining gaps, none of which are
+in the issue's reported benchmarks:
+
+| pattern | current ratio |
+|---|--:|
+| `\w+[0-9]` | ~1.35x |
+| `[a-z]+[0-9]+` | ~1.30x |
+| `\d+\.\d+` | ~1.50x |
+
+and doing it **correctly is large and subtle**: a naive `.*?`-prefixed forward DFA
+finds *a* match end but not the engine's **leftmost-longest, non-overlapping** match.
+Preserving exact semantics needs a **forward DFA (find end) + reverse DFA (find the
+leftmost start)** — RE2's approach — i.e. a second compiled automaton and reverse
+scanning. Worth doing as a focused change, not a rushed one.
+
+**Plan when picked up:**
+
+- [ ] Build a reverse NFA/DFA alongside the forward one (`src/dfa.zig`).
+- [ ] Forward unanchored pass to locate each match's end; reverse anchored pass from
+      that end to recover the leftmost start; resume after the end (non-overlapping).
+- [ ] Wire into `count`/`isMatch` first (no captures), then capture-free
+      `find`/`findAll`; keep the per-start anchored path as the fallback.
+- [ ] **Heavy differential testing** vs the current engine across many
+      patterns/inputs/positions before enabling (this is the correctness risk).
+- [ ] Bound DFA state growth (reuse the existing `MAX_STATES` overflow → NFA fallback).
+
+### 3. Remaining measured gaps (summary)
+
+After the `\s`, `.`, and `\b`-bounded-literal wins, these are the patterns still
+behind Rust on the code haystack — all explained by the two items above:
+
+| pattern | ratio | closed by |
+|---|--:|---|
+| `fn`, `\bfn\b` | ~4–5x | SIMD `memmem` / rare-byte (item 1) |
+| `pub\s+fn`, `try\s+\w+` | ~1.5–3x | rare-byte prefilter (item 1) |
+| `\w+_\w+` | ~3.6x | inner-literal prefilter (find the required `_`, anchor the scan) — same selectivity-guard caveats as item 1 |
+| `\w+[0-9]`, `\d+\.\d+` | ~1.3–1.5x | unanchored DFA (item 2) |
+
+Patterns already at parity-or-better and **not** to regress when touching the above:
+`\w+\s+\w+`, `//.*`, `a.c`, `\w{3,}`, `[A-Z]\w+`, `hello`/`test`/`regex` (word haystack),
+`\d+`, `\w+`.
