@@ -165,7 +165,6 @@ pub const Lexer = struct {
                             tok.name = name;
                             return tok;
                         }
-                        if (!std.ascii.isAlphanumeric(p) and p != '_') return RegexError.InvalidEscapeSequence;
                         _ = self.advance();
                     }
                     return RegexError.UnexpectedEndOfPattern;
@@ -833,7 +832,7 @@ pub const Parser = struct {
             },
             .backref => {
                 try self.advance();
-                const name = if (token.name) |n| try self.allocator.dupe(u8, n) else null;
+                const name = if (token.name) |n| try self.normalizeGroupName(n) else null;
                 errdefer if (name) |n| self.allocator.free(n);
                 const index = token.index; // 1-based capture group index; 0 for named-only references
                 return ast.Node.createBackreference(self.allocator, index, name, span);
@@ -899,33 +898,29 @@ pub const Parser = struct {
                             const saved_token = self.current_token;
                             try self.advance(); // consume <
 
-                            if (self.current_token.token_type == .literal) {
-                                if (self.current_token.value == '=') {
-                                    // Positive lookbehind (?<=...)
-                                    try self.advance(); // consume =
-                                    const child = try self.parseAlternation();
-                                    errdefer child.destroy(self.allocator);
-                                    try self.expect(.rparen);
-                                    return ast.Node.createLookbehind(self.allocator, child, true, span);
-                                } else if (self.current_token.value == '!') {
-                                    // Negative lookbehind (?<!...)
-                                    try self.advance(); // consume !
-                                    const child = try self.parseAlternation();
-                                    errdefer child.destroy(self.allocator);
-                                    try self.expect(.rparen);
-                                    return ast.Node.createLookbehind(self.allocator, child, false, span);
-                                } else {
-                                    // .NET/Perl-style named group (?<name>...)
-                                    // Restore position to re-parse the name
-                                    self.lexer.pos = saved_pos;
-                                    self.current_token = saved_token;
-                                    try self.advance(); // consume <
-                                    group_name = try self.parseGroupName();
-                                    self.capture_count += 1;
-                                    capture_index = self.capture_count;
-                                }
+                            if (self.current_token.token_type == .literal and self.current_token.value == '=') {
+                                // Positive lookbehind (?<=...)
+                                try self.advance(); // consume =
+                                const child = try self.parseAlternation();
+                                errdefer child.destroy(self.allocator);
+                                try self.expect(.rparen);
+                                return ast.Node.createLookbehind(self.allocator, child, true, span);
+                            } else if (self.current_token.token_type == .literal and self.current_token.value == '!') {
+                                // Negative lookbehind (?<!...)
+                                try self.advance(); // consume !
+                                const child = try self.parseAlternation();
+                                errdefer child.destroy(self.allocator);
+                                try self.expect(.rparen);
+                                return ast.Node.createLookbehind(self.allocator, child, false, span);
                             } else {
-                                return RegexError.UnexpectedCharacter;
+                                // .NET/Perl-style named group (?<name>...)
+                                // Restore position to re-parse the name.
+                                self.lexer.pos = saved_pos;
+                                self.current_token = saved_token;
+                                try self.advance(); // consume <
+                                group_name = try self.parseGroupName();
+                                self.capture_count += 1;
+                                capture_index = self.capture_count;
                             }
                         } else if (isInlineFlagStart(self.current_token.value)) {
                             // Inline modifiers: `(?imsxU-imsxU:...)` scopes a
@@ -1067,46 +1062,122 @@ pub const Parser = struct {
     /// Expects current token to be first character of name
     /// Consumes tokens until > is found
     fn parseGroupName(self: *Parser) ![]const u8 {
-        var name_buf: [64]u8 = undefined;
-        var name_len: usize = 0;
+        const start = self.current_token.span.start;
+        var end = start;
+        while (end < self.lexer.input.len and self.lexer.input[end] != '>') : (end += 1) {}
+        if (end >= self.lexer.input.len) return RegexError.UnexpectedEndOfPattern;
 
-        // Collect name characters until we hit >
-        while (self.current_token.token_type != .eof) {
-            if (self.current_token.token_type == .literal) {
-                if (self.current_token.value == '>') {
-                    try self.advance(); // consume >
-                    break;
-                }
-
-                // Valid name characters: alphanumeric and underscore
-                const c = self.current_token.value;
-                if ((c >= 'a' and c <= 'z') or
-                    (c >= 'A' and c <= 'Z') or
-                    (c >= '0' and c <= '9') or
-                    c == '_')
-                {
-                    if (name_len >= name_buf.len) {
-                        return RegexError.InvalidCharacterClass; // Name too long
-                    }
-                    name_buf[name_len] = c;
-                    name_len += 1;
-                    try self.advance();
-                } else {
-                    return RegexError.InvalidCharacterClass; // Invalid character in name
-                }
-            } else {
-                return RegexError.InvalidCharacterClass; // Unexpected token in name
-            }
-        }
-
-        if (name_len == 0) {
-            return RegexError.InvalidCharacterClass; // Empty name
-        }
-
-        // Allocate and copy name
-        const name = try self.allocator.alloc(u8, name_len);
-        @memcpy(name, name_buf[0..name_len]);
+        const name = try self.normalizeGroupName(self.lexer.input[start..end]);
+        self.lexer.pos = end + 1;
+        self.lexer.pending_len = 0;
+        self.lexer.pending_pos = 0;
+        try self.advance();
         return name;
+    }
+
+    fn normalizeGroupName(self: *Parser, raw: []const u8) ![]const u8 {
+        if (raw.len == 0) return RegexError.InvalidCharacterClass;
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+
+        var i: usize = 0;
+        var first = true;
+        while (i < raw.len) {
+            const cp = try readGroupNameCodepoint(raw, &i);
+            if (first) {
+                if (!unicode.isIdentifierStart(cp)) return RegexError.InvalidCharacterClass;
+                first = false;
+            } else if (!unicode.isIdentifierContinue(cp)) {
+                return RegexError.InvalidCharacterClass;
+            }
+
+            var buf: [4]u8 = undefined;
+            const len = unicode.encodeUtf8(cp, &buf) catch return RegexError.InvalidCharacterClass;
+            try out.appendSlice(self.allocator, buf[0..len]);
+        }
+
+        if (first) return RegexError.InvalidCharacterClass;
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn readGroupNameCodepoint(raw: []const u8, i: *usize) !unicode.Codepoint {
+        if (raw[i.*] == '\\') return readGroupNameEscape(raw, i);
+        const dec = unicode.decodeUtf8Lenient(raw[i.*..]) orelse return RegexError.InvalidCharacterClass;
+        i.* += dec.len;
+        if (dec.codepoint >= 0xD800 and dec.codepoint <= 0xDBFF) {
+            const save = i.*;
+            const lo = if (i.* < raw.len and raw[i.*] == '\\')
+                readGroupNameEscape(raw, i) catch blk: {
+                    i.* = save;
+                    break :blk 0;
+                }
+            else if (i.* < raw.len) blk: {
+                const next = unicode.decodeUtf8Lenient(raw[i.*..]) orelse break :blk 0;
+                i.* += next.len;
+                break :blk next.codepoint;
+            } else 0;
+
+            if (lo >= 0xDC00 and lo <= 0xDFFF)
+                return @intCast(0x10000 + ((dec.codepoint - 0xD800) << 10) + (lo - 0xDC00));
+            i.* = save;
+        }
+        if (dec.codepoint >= 0xD800 and dec.codepoint <= 0xDFFF) return RegexError.InvalidEscapeSequence;
+        return dec.codepoint;
+    }
+
+    fn readGroupNameEscape(raw: []const u8, i: *usize) !unicode.Codepoint {
+        if (i.* + 1 >= raw.len or raw[i.* + 1] != 'u') return RegexError.InvalidEscapeSequence;
+        i.* += 2;
+        const cp = try readUnicodeEscapeCodepoint(raw, i);
+        if (cp >= 0xD800 and cp <= 0xDBFF) {
+            const save = i.*;
+            if (i.* + 2 <= raw.len and raw[i.*] == '\\' and raw[i.* + 1] == 'u') {
+                i.* += 2;
+                const lo = try readUnicodeEscapeCodepoint(raw, i);
+                if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                    return @intCast(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
+                }
+            }
+            i.* = save;
+        }
+        if (cp >= 0xD800 and cp <= 0xDFFF) return RegexError.InvalidEscapeSequence;
+        return @intCast(cp);
+    }
+
+    fn readUnicodeEscapeCodepoint(raw: []const u8, i: *usize) !u32 {
+        var cp: u32 = 0;
+        if (i.* < raw.len and raw[i.*] == '{') {
+            i.* += 1;
+            var n: usize = 0;
+            while (i.* < raw.len) : (i.* += 1) {
+                const d = hexValue(raw[i.*]) orelse break;
+                cp = cp * 16 + d;
+                n += 1;
+                if (cp > 0x10FFFF) return RegexError.InvalidEscapeSequence;
+            }
+            if (n == 0 or i.* >= raw.len or raw[i.*] != '}') return RegexError.InvalidEscapeSequence;
+            i.* += 1;
+            return cp;
+        }
+
+        var n: usize = 0;
+        while (n < 4) : (n += 1) {
+            if (i.* + n >= raw.len) return RegexError.InvalidEscapeSequence;
+            const d = hexValue(raw[i.* + n]) orelse return RegexError.InvalidEscapeSequence;
+            cp = cp * 16 + d;
+        }
+        i.* += 4;
+        return cp;
+    }
+
+    fn hexValue(c: u8) ?u8 {
+        return switch (c) {
+            '0'...'9' => |d| d - '0',
+            'a'...'f' => |d| d - 'a' + 10,
+            'A'...'F' => |d| d - 'A' + 10,
+            else => null,
+        };
     }
 
     /// Get POSIX character class by name

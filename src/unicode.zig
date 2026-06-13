@@ -483,6 +483,18 @@ fn matchBinary(cp: Codepoint, bp: prop_data.BinaryProp) bool {
     };
 }
 
+/// ECMAScript IdentifierStart for RegExp group names: Unicode ID_Start plus
+/// `$` and `_` (both allowed by IdentifierName but not by Unicode ID_Start).
+pub fn isIdentifierStart(cp: Codepoint) bool {
+    return cp == '$' or cp == '_' or matchBinary(cp, .ID_Start);
+}
+
+/// ECMAScript IdentifierContinue for RegExp group names: Unicode ID_Continue
+/// plus `$`, U+200C ZERO WIDTH NON-JOINER, and U+200D ZERO WIDTH JOINER.
+pub fn isIdentifierContinue(cp: Codepoint) bool {
+    return cp == '$' or cp == 0x200C or cp == 0x200D or matchBinary(cp, .ID_Continue);
+}
+
 /// Match a codepoint against any resolved `\p{...}` operand.
 pub fn matchesSpec(cp: Codepoint, spec: PropSpec) bool {
     return switch (spec) {

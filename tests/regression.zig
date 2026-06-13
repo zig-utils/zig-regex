@@ -1098,6 +1098,73 @@ test "regression: repeated alternatives clear captures from previous iterations"
     } else return error.TestExpectedMatch;
 }
 
+test "regression: unicode regexp group names are normalized identifiers" {
+    const allocator = std.testing.allocator;
+
+    var non_unicode = try Regex.compile(allocator, "(?<\\u{1d4d3}\\u{1d4f8}\\u{1d4f0}>dog)");
+    defer non_unicode.deinit();
+    if (try non_unicode.find("dog")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("dog", non_unicode.getNamedCapture(&match, "𝓓𝓸𝓰").?);
+    } else return error.TestExpectedMatch;
+
+    var dollar = try Regex.compileWithFlags(allocator, "(?<$>a)", .{ .unicode = true });
+    defer dollar.deinit();
+    if (try dollar.find("ba")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("a", dollar.getNamedCapture(&match, "$").?);
+    } else return error.TestExpectedMatch;
+
+    var literal = try Regex.compileWithFlags(allocator, "(?<𝓓𝓸𝓰>dog)", .{ .unicode = true });
+    defer literal.deinit();
+    if (try literal.find("dog")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("dog", literal.getNamedCapture(&match, "𝓓𝓸𝓰").?);
+    } else return error.TestExpectedMatch;
+
+    var escaped = try Regex.compileWithFlags(allocator, "(?<\\u{1d4d3}\\u{1d4f8}\\u{1d4f0}>dog)", .{ .unicode = true });
+    defer escaped.deinit();
+    if (try escaped.find("dog")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("dog", escaped.getNamedCapture(&match, "𝓓𝓸𝓰").?);
+    } else return error.TestExpectedMatch;
+
+    var surrogate = try Regex.compileWithFlags(allocator, "(?<\\ud835\\udcd3\\ud835\\udcf8\\ud835\\udcf0>dog)", .{ .unicode = true });
+    defer surrogate.deinit();
+    if (try surrogate.find("dog")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("dog", surrogate.getNamedCapture(&match, "𝓓𝓸𝓰").?);
+    } else return error.TestExpectedMatch;
+
+    var backref = try Regex.compileWithFlags(allocator, "(?<𝓓𝓸𝓰>dog).*\\k<\\u{1d4d3}\\u{1d4f8}\\u{1d4f0}>", .{ .unicode = true });
+    defer backref.deinit();
+    try std.testing.expect(try backref.isMatch("dog eat dog"));
+
+    var wtf8_pattern: std.ArrayList(u8) = .empty;
+    defer wtf8_pattern.deinit(allocator);
+    try wtf8_pattern.appendSlice(allocator, "(?<");
+    const dog_surrogates = [_]u16{ 0xD835, 0xDCD3, 0xD835, 0xDCF8, 0xD835, 0xDCF0 };
+    for (dog_surrogates) |cu| {
+        try wtf8_pattern.append(allocator, @intCast(0xE0 | (cu >> 12)));
+        try wtf8_pattern.append(allocator, @intCast(0x80 | ((cu >> 6) & 0x3F)));
+        try wtf8_pattern.append(allocator, @intCast(0x80 | (cu & 0x3F)));
+    }
+    try wtf8_pattern.appendSlice(allocator, ">dog)");
+
+    var wtf8 = try Regex.compile(allocator, wtf8_pattern.items);
+    defer wtf8.deinit();
+    if (try wtf8.find("dog")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("dog", wtf8.getNamedCapture(&match, "𝓓𝓸𝓰").?);
+    } else return error.TestExpectedMatch;
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is
