@@ -1048,6 +1048,22 @@ test "regression: unicode mode rejects quantified assertions" {
     }
 }
 
+test "regression: xml shallow parser delimiter pattern is not too complex" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "[^\\]]*\\]([^\\]]+\\])*\\]+([^\\]>][^\\]]*\\]([^\\]]+\\])*\\]+)*>");
+    defer regex.deinit();
+    try std.testing.expect(try regex.isMatch("abc]]>"));
+
+    var attrs = try Regex.compile(allocator, "[ \\n\\t\\r]+([A-Za-z_:]|[^\\x00-\\x7F])([A-Za-z0-9_:.-]|[^\\x00-\\x7F])*([ \\n\\t\\r]+(([A-Za-z_:]|[^\\x00-\\x7F])([A-Za-z0-9_:.-]|[^\\x00-\\x7F])*|\"[^\"]*\"|'[^']*'))*");
+    defer attrs.deinit();
+    try std.testing.expect(try attrs.isMatch(" name attr=\"value\""));
+
+    var markup = try Regex.compile(allocator, "([^\\]\"'><]+|\"[^\"]*\"|'[^']*')*>");
+    defer markup.deinit();
+    try std.testing.expect(try markup.isMatch("name \"value\">"));
+}
+
 // --- two-byte memmem literal search (common first byte) ---
 //
 // Literal search picks a two-byte vectorized filter when the first byte is

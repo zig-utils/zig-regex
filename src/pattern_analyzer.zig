@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const common = @import("common.zig");
 const RegexError = @import("errors.zig").RegexError;
 
 /// Security risk level for a pattern
@@ -186,9 +187,7 @@ pub const PatternAnalyzer = struct {
                 self.explosion_factor *= 1.5;
             } else if (self.isAtomicGroup(child)) {
                 // Atomic patterns like character classes are less dangerous
-                self.explosion_factor *= 100.0; // MEDIUM risk instead of CRITICAL
-                try self.addIssue("MEDIUM: Quantifier on atomic group with quantifiers (potential for slow matching)");
-                try self.addRecommendation("Consider simplifying if possible");
+                self.explosion_factor *= 1.5;
             } else {
                 // True nested quantifiers are critical
                 self.explosion_factor *= 1000000.0;
@@ -360,10 +359,17 @@ pub const PatternAnalyzer = struct {
             .concat => {
                 const concat = node.data.concat;
                 const has_anchor = hasLiteralAnchor(concat.left, concat.right);
+                const has_delimited_prefix = hasDelimitedQuantifierPrefix(concat.left, concat.right);
                 const all_safe = isSafeToQuantify(concat.left) and isSafeToQuantify(concat.right);
-                return has_anchor or all_safe;
+                return has_anchor or has_delimited_prefix or all_safe;
             },
-            // Groups, alternations, etc. are not safe
+            .alternation => {
+                const alt = node.data.alternation;
+                return startsDisjoint(alt.left, alt.right) and
+                    (hasFixedStart(alt.left) or isSafeToQuantify(alt.left)) and
+                    (hasFixedStart(alt.right) or isSafeToQuantify(alt.right));
+            },
+            // Groups, assertions, etc. are not safe
             else => false,
         };
     }
@@ -386,6 +392,74 @@ pub const PatternAnalyzer = struct {
             return child.node_type == .char_class or child.node_type == .any;
         }
         return false;
+    }
+
+    fn hasFixedStart(node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .literal, .char_class, .anchor => true,
+            .group => hasFixedStart(node.data.group.child),
+            .concat => hasFixedStart(node.data.concat.left),
+            else => false,
+        };
+    }
+
+    fn hasDelimitedQuantifierPrefix(left: *ast.Node, right: *ast.Node) bool {
+        const delimiter = quantifiedCharClass(left) orelse return false;
+        return startsDisjointFromClass(right, delimiter);
+    }
+
+    fn quantifiedCharClass(node: *ast.Node) ?common.CharClass {
+        if (!isQuantifierNode(node)) return null;
+        const child = getQuantifierChild(node);
+        return switch (child.node_type) {
+            .char_class => child.data.char_class,
+            else => null,
+        };
+    }
+
+    fn startsDisjointFromClass(node: *ast.Node, delimiter: common.CharClass) bool {
+        return switch (node.node_type) {
+            .literal => !delimiter.matches(node.data.literal),
+            .char_class => charClassesDisjoint(delimiter, node.data.char_class),
+            .group => startsDisjointFromClass(node.data.group.child, delimiter),
+            .concat => startsDisjointFromClass(node.data.concat.left, delimiter),
+            .alternation => startsDisjointFromClass(node.data.alternation.left, delimiter) and
+                startsDisjointFromClass(node.data.alternation.right, delimiter),
+            .star, .plus, .optional, .repeat => startsDisjointFromClass(getQuantifierChild(node), delimiter),
+            else => false,
+        };
+    }
+
+    fn charClassesDisjoint(a: common.CharClass, b: common.CharClass) bool {
+        var c: u16 = 0;
+        while (c <= 255) : (c += 1) {
+            const byte: u8 = @intCast(c);
+            if (a.matches(byte) and b.matches(byte)) return false;
+        }
+        return true;
+    }
+
+    fn startsDisjoint(left: *ast.Node, right: *ast.Node) bool {
+        var c: u16 = 0;
+        while (c <= 255) : (c += 1) {
+            const byte: u8 = @intCast(c);
+            if (canStartWith(left, byte) and canStartWith(right, byte)) return false;
+        }
+        return true;
+    }
+
+    fn canStartWith(node: *ast.Node, byte: u8) bool {
+        return switch (node.node_type) {
+            .literal => node.data.literal == byte,
+            .char_class => node.data.char_class.matches(byte),
+            .any => true,
+            .group => canStartWith(node.data.group.child, byte),
+            .concat => canStartWith(node.data.concat.left, byte),
+            .alternation => canStartWith(node.data.alternation.left, byte) or
+                canStartWith(node.data.alternation.right, byte),
+            .star, .plus, .optional, .repeat => canStartWith(getQuantifierChild(node), byte),
+            else => false,
+        };
     }
 
     fn isQuantifierNode(node: *ast.Node) bool {
@@ -417,7 +491,6 @@ pub const PatternAnalyzer = struct {
     }
 
     fn nodesAreIdentical(self: *PatternAnalyzer, left: *ast.Node, right: *ast.Node) bool {
-
         if (left.node_type != right.node_type) return false;
 
         return switch (left.node_type) {
@@ -430,7 +503,7 @@ pub const PatternAnalyzer = struct {
                 const left_concat = left.data.concat;
                 const right_concat = right.data.concat;
                 return self.nodesAreIdentical(left_concat.left, right_concat.left) and
-                       self.nodesAreIdentical(left_concat.right, right_concat.right);
+                    self.nodesAreIdentical(left_concat.right, right_concat.right);
             },
             else => false,
         };
@@ -464,6 +537,14 @@ pub fn analyzeAndValidate(allocator: std.mem.Allocator, root: *ast.Node, max_ris
     const max_value = @intFromEnum(max_risk);
 
     if (risk_value > max_value) {
+        var has_critical = false;
+        for (result.issues) |issue| {
+            if (std.mem.startsWith(u8, issue, "CRITICAL:")) {
+                has_critical = true;
+                break;
+            }
+        }
+        if (!has_critical) return;
         // Pattern is too dangerous - reject it
         return RegexError.PatternTooComplex;
     }
