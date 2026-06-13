@@ -581,18 +581,26 @@ Differential-fuzzed (60k trials). (Note: nullable `*`/`?` patterns count trailin
 empty matches slightly differently on the DFA vs backtracking — a pre-existing,
 orthogonal engine difference, not introduced here.)
 
+### 6. Two-byte (simplified-Teddy) prefilter for literal alternations — ✅ DONE
+
+Literal alternations (`foo|bar|baz`) can't use the DFA (ECMAScript ordered
+alternation is leftmost-**first**, `a|ab`→`a`), so the set path confirms
+candidates with source-order `firstLiteralAt`. The candidate finder is now a
+vectorized **two-byte-prefix** filter (`LiteralSetScanner`): a position is a
+candidate only when the overlapping 2-byte value `input[p]|input[p+1]<<8` equals
+some literal's exact 2-byte prefix — tested per 16-byte block by widening to u16
+lanes + `@reduce(.Or)` (no runtime shuffle; full Teddy's PSHUFB bucketing isn't
+available in portable `@Vector`). vs Rust: `fn|var|pub` 4.66x → **1.41x**,
+`error|warning|debug` 11.3x → **3.98x**, `return|const|while|break` 4.89x →
+**2.26x**. Differential-fuzzed (30k trials). Literals < 2 bytes fall back to the
+first-byte walk.
+
 ### Remaining open items (genuine larger features — do as focused efforts)
 
-- **Teddy multi-substring SIMD for literal alternations** — *real, significant
-  gap*: `error|warning|debug` **11.3x**, `fn|var|pub` 4.7x, `return|const|while|break`
-  4.9x vs Rust (code haystack). The DFA *can't* be used here — ECMAScript ordered
-  alternation is leftmost-**first** (`a|ab`→`a`), not the DFA's leftmost-longest —
-  so the literal-set path does a scalar first-byte-set walk + per-candidate
-  `firstLiteralAt`, and common first letters (`e`/`w`/`d`) mean many false
-  candidates. The fix is a **Teddy** SIMD prefilter (shuffle-bucketed 1–3 byte
-  fingerprints across all literals) feeding the existing source-order confirm.
-  Intricate (~hundreds of lines of `@Vector` shuffle code) — a focused effort, not
-  a marathon add-on. Highest-value remaining item.
+- **3-byte Teddy** for alternations — the 2-byte filter above leaves
+  `error|warning|debug` at ~4x because common bigrams (`er`, `wa`, `de`) still
+  pass. A 3-byte fingerprint (or real PSHUFB-bucketed Teddy, if a runtime
+  byte-shuffle becomes available) would cut that further. Diminishing returns.
 - **Zero-alloc match iterator** so `findAll`-style iteration needn't materialize a
   `Match[]`. Contained but must mirror every fast-path dispatch lazily; `count`/
   `isMatch` are already alloc-free, so value is moderate.
