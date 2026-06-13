@@ -122,8 +122,18 @@ pub const Regex = struct {
         errdefer deinitNamedCaptureList(allocator, &named_capture_list);
         try collectNamedCaptures(allocator, tree.root, &named_captures, &named_capture_list);
 
-        // Detect if backtracking is required
-        const needs_backtracking = requiresBacktracking(tree.root, flags);
+        // Detect if backtracking is required. One-pass keeps proven-unambiguous
+        // capture patterns linear; when that plan cannot apply and adjacent
+        // quantified capture boundaries overlap, ECMAScript capture precedence
+        // needs the capture-aware backtracker.
+        var onepass_plan: ?*onepass.Plan = null;
+        var needs_backtracking = requiresBacktracking(tree.root, flags);
+        if (!needs_backtracking and tree.capture_count > 0) {
+            onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
+            errdefer if (onepass_plan) |pl| pl.deinit();
+            if (onepass_plan == null and hasAmbiguousCaptureBoundary(tree.root, flags))
+                needs_backtracking = true;
+        }
 
         if (needs_backtracking) {
             // Use backtracking engine
@@ -151,10 +161,6 @@ pub const Regex = struct {
         } else {
             // Use Thompson NFA engine
             defer tree.deinit();
-
-            // One-pass capture plan (built from the AST, independent of it).
-            const onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
-            errdefer if (onepass_plan) |pl| pl.deinit();
 
             var comp = compiler.Compiler.init(allocator);
             errdefer comp.deinit();
@@ -1666,6 +1672,165 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
 
         // These don't require backtracking
         .literal, .char_class, .anchor, .empty => return false,
+    }
+}
+
+const ByteSet = [256]bool;
+
+fn anyByteSet(flags: common.CompileFlags) ByteSet {
+    var set: ByteSet = undefined;
+    var b: usize = 0;
+    while (b < 256) : (b += 1) set[b] = if (flags.dot_all) true else b != '\n';
+    return set;
+}
+
+fn foldByteSetCI(set: ByteSet) ByteSet {
+    var folded = set;
+    var b: usize = 0;
+    while (b < 256) : (b += 1) {
+        if (!set[b]) continue;
+        folded[std.ascii.toLower(@intCast(b))] = true;
+        folded[std.ascii.toUpper(@intCast(b))] = true;
+    }
+    return folded;
+}
+
+fn literalByteSet(c: u8, flags: common.CompileFlags) ByteSet {
+    var set: ByteSet = undefined;
+    @memset(&set, false);
+    set[c] = true;
+    return if (flags.case_insensitive) foldByteSetCI(set) else set;
+}
+
+fn charClassByteSet(cc: common.CharClass, flags: common.CompileFlags) ByteSet {
+    var set: ByteSet = undefined;
+    var b: usize = 0;
+    while (b < 256) : (b += 1) {
+        set[b] = if (flags.case_insensitive) cc.matchesCI(@intCast(b)) else cc.matches(@intCast(b));
+    }
+    return set;
+}
+
+fn unionByteSet(a: ByteSet, b: ByteSet) ByteSet {
+    var out = a;
+    for (&out, b) |*slot, rhs| slot.* = slot.* or rhs;
+    return out;
+}
+
+fn byteSetsOverlap(a: ByteSet, b: ByteSet) bool {
+    for (a, b) |x, y| if (x and y) return true;
+    return false;
+}
+
+fn canMatchEmpty(node: *ast.Node) bool {
+    return switch (node.node_type) {
+        .empty, .anchor, .lookahead, .lookbehind => true,
+        .literal, .any, .char_class, .backref, .unicode_property, .class_set => false,
+        .star, .optional => true,
+        .plus => canMatchEmpty(node.data.plus.child),
+        .repeat => node.data.repeat.bounds.min == 0 or canMatchEmpty(node.data.repeat.child),
+        .group => canMatchEmpty(node.data.group.child),
+        .concat => canMatchEmpty(node.data.concat.left) and canMatchEmpty(node.data.concat.right),
+        .alternation => canMatchEmpty(node.data.alternation.left) or canMatchEmpty(node.data.alternation.right),
+    };
+}
+
+fn firstByteSet(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
+    return switch (node.node_type) {
+        .literal => literalByteSet(node.data.literal, flags),
+        .any => anyByteSet(flags),
+        .char_class => charClassByteSet(node.data.char_class, flags),
+        .group => firstByteSet(node.data.group.child, flags),
+        .star => firstByteSet(node.data.star.child, flags),
+        .plus => firstByteSet(node.data.plus.child, flags),
+        .optional => firstByteSet(node.data.optional.child, flags),
+        .repeat => if (node.data.repeat.bounds.max == 0) null else firstByteSet(node.data.repeat.child, flags),
+        .concat => blk: {
+            const left = firstByteSet(node.data.concat.left, flags);
+            if (!canMatchEmpty(node.data.concat.left)) break :blk left;
+            const right = firstByteSet(node.data.concat.right, flags);
+            if (left) |l| {
+                if (right) |r| break :blk unionByteSet(l, r);
+                break :blk l;
+            }
+            break :blk right;
+        },
+        .alternation => blk: {
+            const left = firstByteSet(node.data.alternation.left, flags);
+            const right = firstByteSet(node.data.alternation.right, flags);
+            if (left) |l| {
+                if (right) |r| break :blk unionByteSet(l, r);
+                break :blk l;
+            }
+            break :blk right;
+        },
+        .empty, .anchor, .lookahead, .lookbehind => null,
+        .backref, .unicode_property, .class_set => null,
+    };
+}
+
+fn variableQuantifierTailBytes(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
+    switch (node.node_type) {
+        .star => return firstByteSet(node.data.star.child, flags),
+        .plus => return firstByteSet(node.data.plus.child, flags),
+        .optional => return firstByteSet(node.data.optional.child, flags),
+        .repeat => {
+            const r = node.data.repeat;
+            const variable = r.bounds.max == null or r.bounds.max.? != r.bounds.min;
+            return if (variable) firstByteSet(r.child, flags) else null;
+        },
+        .group => return variableQuantifierTailBytes(node.data.group.child, flags),
+        .concat => {
+            if (variableQuantifierTailBytes(node.data.concat.right, flags)) |set| return set;
+            if (canMatchEmpty(node.data.concat.right))
+                return variableQuantifierTailBytes(node.data.concat.left, flags);
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn capturedVariableTailBytes(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
+    switch (node.node_type) {
+        .group => {
+            if (node.data.group.capture_index != null)
+                return variableQuantifierTailBytes(node.data.group.child, flags);
+            return capturedVariableTailBytes(node.data.group.child, flags);
+        },
+        .concat => {
+            if (capturedVariableTailBytes(node.data.concat.right, flags)) |set| return set;
+            if (canMatchEmpty(node.data.concat.right))
+                return capturedVariableTailBytes(node.data.concat.left, flags);
+            return null;
+        },
+        else => return null,
+    }
+}
+
+fn hasAmbiguousCaptureBoundary(node: *ast.Node, flags: common.CompileFlags) bool {
+    switch (node.node_type) {
+        .concat => {
+            const c = node.data.concat;
+            if (capturedVariableTailBytes(c.left, flags)) |tail| {
+                if (firstByteSet(c.right, flags)) |first| {
+                    if (byteSetsOverlap(tail, first)) return true;
+                } else if (!canMatchEmpty(c.right)) {
+                    return true;
+                }
+            }
+            return hasAmbiguousCaptureBoundary(c.left, flags) or
+                hasAmbiguousCaptureBoundary(c.right, flags);
+        },
+        .group => return hasAmbiguousCaptureBoundary(node.data.group.child, flags),
+        .alternation => return hasAmbiguousCaptureBoundary(node.data.alternation.left, flags) or
+            hasAmbiguousCaptureBoundary(node.data.alternation.right, flags),
+        .star => return hasAmbiguousCaptureBoundary(node.data.star.child, flags),
+        .plus => return hasAmbiguousCaptureBoundary(node.data.plus.child, flags),
+        .optional => return hasAmbiguousCaptureBoundary(node.data.optional.child, flags),
+        .repeat => return hasAmbiguousCaptureBoundary(node.data.repeat.child, flags),
+        .lookahead => return hasAmbiguousCaptureBoundary(node.data.lookahead.child, flags),
+        .lookbehind => return hasAmbiguousCaptureBoundary(node.data.lookbehind.child, flags),
+        else => return false,
     }
 }
 

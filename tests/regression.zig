@@ -71,6 +71,41 @@ test "regression: unmatched named backreference matches empty" {
     try std.testing.expect(regex.getNamedCapture(&match, "x") == null);
 }
 
+test "regression: ambiguous adjacent quantified captures use ECMAScript partition" {
+    const allocator = std.testing.allocator;
+
+    var regex = try Regex.compile(allocator, "(b+)(b*)");
+    defer regex.deinit();
+
+    if (try regex.find("abbbbbbbc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+
+        try std.testing.expectEqualStrings("bbbbbbb", match.slice);
+        try std.testing.expectEqual(@as(usize, 2), match.captures.len);
+        try std.testing.expectEqualStrings("bbbbbbb", match.captures[0]);
+        try std.testing.expectEqualStrings("", match.captures[1]);
+        try std.testing.expect(match.captures_present[0]);
+        try std.testing.expect(match.captures_present[1]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+
+    var suffix_regex = try Regex.compile(allocator, "(b+)(b*)c");
+    defer suffix_regex.deinit();
+
+    if (try suffix_regex.find("abbbbbbbc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+
+        try std.testing.expectEqualStrings("bbbbbbbc", match.slice);
+        try std.testing.expectEqualStrings("bbbbbbb", match.captures[0]);
+        try std.testing.expectEqualStrings("", match.captures[1]);
+    } else {
+        return error.TestExpectedMatch;
+    }
+}
+
 // --- min > max quantifier rejection ---
 
 test "regression: {10,5} is rejected as invalid" {
