@@ -417,22 +417,98 @@ pub const PropSpec = union(enum) {
 /// null for the lone form.
 pub fn resolveProperty(lhs: ?[]const u8, name: []const u8) ?PropSpec {
     if (lhs) |l| {
-        if (eqi(l, "gc") or eqi(l, "General_Category"))
-            return if (UnicodeProperty.fromString(name)) |p| .{ .gc = p } else null;
-        if (eqi(l, "sc") or eqi(l, "Script"))
-            return if (prop_data.scriptId(name)) |id| .{ .script = id } else null;
-        if (eqi(l, "scx") or eqi(l, "Script_Extensions"))
-            return if (prop_data.scriptId(name)) |id| .{ .script_extensions = id } else null;
+        if (eqi(l, "gc") or looseEquals(l, "General_Category"))
+            return if (unicodePropertyFromString(name)) |p| .{ .gc = p } else null;
+        if (eqi(l, "sc") or looseEquals(l, "Script"))
+            return if (scriptIdFromString(name)) |id| .{ .script = id } else null;
+        if (eqi(l, "scx") or looseEquals(l, "Script_Extensions"))
+            return if (scriptIdFromString(name)) |id| .{ .script_extensions = id } else null;
         return null;
     }
-    // Lone form: a binary property name, or a General_Category value.
-    if (prop_data.binaryFromName(name)) |bp| return .{ .binary = bp };
-    if (UnicodeProperty.fromString(name)) |p| return .{ .gc = p };
+    // Lone form: a binary property name, a General_Category value, or a script
+    // shorthand. Use Script_Extensions for bare scripts, which matches common
+    // PCRE/Rust-regex behavior and handles shared/inherited marks naturally.
+    if (binaryPropertyFromString(name)) |bp| return .{ .binary = bp };
+    if (unicodePropertyFromString(name)) |p| return .{ .gc = p };
+    if (scriptIdFromString(name)) |id| return .{ .script_extensions = id };
     return null;
 }
 
 fn eqi(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+fn looseChar(c: u8) ?u8 {
+    if (std.ascii.isAlphanumeric(c)) return std.ascii.toLower(c);
+    return switch (c) {
+        '_', '-', ' ' => null,
+        else => c,
+    };
+}
+
+fn looseEquals(a: []const u8, b: []const u8) bool {
+    var ai: usize = 0;
+    var bi: usize = 0;
+    while (true) {
+        while (ai < a.len and looseChar(a[ai]) == null) ai += 1;
+        while (bi < b.len and looseChar(b[bi]) == null) bi += 1;
+        if (ai >= a.len or bi >= b.len) return ai >= a.len and bi >= b.len;
+        const ac = looseChar(a[ai]) orelse unreachable;
+        const bc = looseChar(b[bi]) orelse unreachable;
+        if (ac != bc) return false;
+        ai += 1;
+        bi += 1;
+    }
+}
+
+fn unicodePropertyFromString(name: []const u8) ?UnicodeProperty {
+    if (UnicodeProperty.fromString(name)) |p| return p;
+    inline for (@typeInfo(UnicodeProperty).@"enum".fields) |field| {
+        if (looseEquals(name, field.name)) return @field(UnicodeProperty, field.name);
+    }
+    return null;
+}
+
+fn binaryPropertyFromString(name: []const u8) ?prop_data.BinaryProp {
+    if (prop_data.binaryFromName(name)) |bp| return bp;
+    inline for (@typeInfo(prop_data.BinaryProp).@"enum".fields) |field| {
+        if (looseEquals(name, field.name)) return @field(prop_data.BinaryProp, field.name);
+    }
+    return null;
+}
+
+fn canonicalAliasFromLoose(name: []const u8, buf: *[128]u8) ?[]const u8 {
+    var out: usize = 0;
+    var word_start = true;
+    var saw_sep = false;
+    for (name) |c| {
+        if (c == '_' or c == '-' or c == ' ') {
+            saw_sep = out > 0;
+            word_start = true;
+            continue;
+        }
+        if (!std.ascii.isAlphanumeric(c)) return null;
+        if (saw_sep) {
+            if (out >= buf.len) return null;
+            buf[out] = '_';
+            out += 1;
+            saw_sep = false;
+        }
+        if (out >= buf.len) return null;
+        buf[out] = if (word_start) std.ascii.toUpper(c) else std.ascii.toLower(c);
+        out += 1;
+        word_start = false;
+    }
+    return buf[0..out];
+}
+
+fn scriptIdFromString(name: []const u8) ?u16 {
+    if (prop_data.scriptId(name)) |id| return id;
+    var canonical_buf: [128]u8 = undefined;
+    if (canonicalAliasFromLoose(name, &canonical_buf)) |canonical| {
+        if (prop_data.scriptId(canonical)) |id| return id;
+    }
+    return null;
 }
 
 /// The Script value of a codepoint (Unknown when not in any explicit range).

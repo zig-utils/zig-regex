@@ -1021,6 +1021,74 @@ test "regression: unicode property aliases include generated Test262 gc aliases"
     }
 }
 
+test "regression: issue 7 unicode property escapes compile without explicit unicode flag" {
+    const allocator = std.testing.allocator;
+
+    inline for (.{ "\\p{L}+", "\\p{N}+", "\\p{Lu}", "\\P{L}", "[^\\p{L}\\p{N}]" }) |pattern| {
+        var regex = try Regex.compile(allocator, pattern);
+        defer regex.deinit();
+    }
+}
+
+test "regression: issue 7 unicode property escapes match common tokenizer classes" {
+    const allocator = std.testing.allocator;
+
+    var letters = try Regex.compile(allocator, "^\\p{L}+$");
+    defer letters.deinit();
+    try std.testing.expect(try letters.isMatch("café世界"));
+    try std.testing.expect(!try letters.isMatch("abc123"));
+
+    var numbers = try Regex.compile(allocator, "^\\p{N}+$");
+    defer numbers.deinit();
+    try std.testing.expect(try numbers.isMatch("123٣"));
+    try std.testing.expect(!try numbers.isMatch("123a"));
+
+    var not_letters = try Regex.compile(allocator, "^\\P{L}+$");
+    defer not_letters.deinit();
+    try std.testing.expect(try not_letters.isMatch("123!"));
+    try std.testing.expect(!try not_letters.isMatch("é"));
+
+    var not_alnum = try Regex.compile(allocator, "^[^\\p{L}\\p{N}]+$");
+    defer not_alnum.deinit();
+    try std.testing.expect(try not_alnum.isMatch("! \n"));
+    try std.testing.expect(!try not_alnum.isMatch("é"));
+    try std.testing.expect(!try not_alnum.isMatch("5"));
+}
+
+test "regression: issue 7 unicode property loose matching negation and script shorthand" {
+    const allocator = std.testing.allocator;
+
+    var loose_gc = try Regex.compile(allocator, "^\\p{general-category=lowercase-letter}+$");
+    defer loose_gc.deinit();
+    try std.testing.expect(try loose_gc.isMatch("é"));
+    try std.testing.expect(!try loose_gc.isMatch("É"));
+
+    var loose_binary = try Regex.compile(allocator, "^\\p{white space}+$");
+    defer loose_binary.deinit();
+    try std.testing.expect(try loose_binary.isMatch(" \u{00A0}\t"));
+    try std.testing.expect(!try loose_binary.isMatch("x"));
+
+    var script = try Regex.compile(allocator, "^\\p{Greek}+$");
+    defer script.deinit();
+    try std.testing.expect(try script.isMatch("Ωβ"));
+    try std.testing.expect(!try script.isMatch("ab"));
+
+    var loose_script = try Regex.compile(allocator, "^\\p{script extensions=old-hungarian}+$");
+    defer loose_script.deinit();
+    try std.testing.expect(try loose_script.isMatch("\u{10C80}"));
+    try std.testing.expect(!try loose_script.isMatch("A"));
+
+    var caret_negation = try Regex.compile(allocator, "^\\p{^Letter}+$");
+    defer caret_negation.deinit();
+    try std.testing.expect(try caret_negation.isMatch("123"));
+    try std.testing.expect(!try caret_negation.isMatch("abc"));
+
+    var double_negation = try Regex.compile(allocator, "^\\P{^Letter}+$");
+    defer double_negation.deinit();
+    try std.testing.expect(try double_negation.isMatch("abc"));
+    try std.testing.expect(!try double_negation.isMatch("123"));
+}
+
 test "regression: unicode sets reject unescaped reserved punctuators" {
     const allocator = std.testing.allocator;
     const flags = @import("regex").common.CompileFlags{ .unicode_sets = true };

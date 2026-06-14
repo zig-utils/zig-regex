@@ -249,14 +249,20 @@ pub const Lexer = struct {
         // scx/Script_Extensions.
         var lhs: ?[]const u8 = null;
         var name = body;
+        var complement = negated;
         if (std.mem.indexOfScalar(u8, body, '=')) |eq_i| {
             lhs = body[0..eq_i];
             name = body[eq_i + 1 ..];
         }
-        var tok = self.makeToken(if (negated) .escape_P else .escape_p, 0);
+        if (lhs == null and name.len > 0 and name[0] == '^') {
+            complement = !complement;
+            name = name[1..];
+            if (name.len == 0) return RegexError.InvalidEscapeSequence;
+        }
+        var tok = self.makeToken(if (complement) .escape_P else .escape_p, 0);
         if (unicode.resolveProperty(lhs, name)) |spec| {
             tok.prop = spec;
-        } else if (lhs == null and isStringPropertyName(name)) {
+        } else if (lhs == null and !complement and isStringPropertyName(name)) {
             tok.name = name;
         } else {
             return RegexError.InvalidEscapeSequence;
@@ -1600,7 +1606,7 @@ pub const Parser = struct {
 
     /// Parse one `\p{...}`/`\P{...}` property escape as a class item.
     fn propertyClassItem(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
-        const neg = input[i.* + 1] == 'P';
+        var neg = input[i.* + 1] == 'P';
         i.* += 2; // consume \p
         if (i.* >= input.len or input[i.*] != '{') return RegexError.InvalidEscapeSequence;
         i.* += 1;
@@ -1614,6 +1620,11 @@ pub const Parser = struct {
         if (std.mem.indexOfScalar(u8, body, '=')) |eq| {
             lhs = body[0..eq];
             name = body[eq + 1 ..];
+        }
+        if (lhs == null and name.len > 0 and name[0] == '^') {
+            neg = !neg;
+            name = name[1..];
+            if (name.len == 0) return RegexError.InvalidEscapeSequence;
         }
         if (lhs == null) if (try self.stringPropertyItem(name)) |item| {
             // A property of strings can't be complemented (`\P{...}`).
@@ -1862,11 +1873,25 @@ pub const Parser = struct {
         return ast.Node.createClassSet(self.allocator, set, common.Span.init(open, i));
     }
 
+    fn currentClassContainsPropertyEscape(self: *Parser) bool {
+        const input = self.lexer.input;
+        var i = self.current_token.span.start + 1;
+        while (i < input.len and input[i] != ']') : (i += 1) {
+            if (input[i] == '\\' and i + 1 < input.len) {
+                const e = input[i + 1];
+                if (e == 'p' or e == 'P') return true;
+                i += 1;
+            }
+        }
+        return false;
+    }
+
     fn parseCharClass(self: *Parser) !*ast.Node {
         // With the `v` flag, classes use set notation; parse from the raw input
         // (the byte-token stream can't represent code-point operands/operators).
         if (self.unicode_sets) return self.parseClassSetV();
         if (self.unicode) return self.parseUnicodeCharClass();
+        if (self.currentClassContainsPropertyEscape()) return self.parseUnicodeCharClass();
         const start = self.current_token.span.start;
         try self.advance(); // consume [
 
