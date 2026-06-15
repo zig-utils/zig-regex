@@ -148,7 +148,7 @@ test "lookbehind with capture groups" {
 
 test "multiple lookbehinds" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?<=a)(?<=ab)c");
+    var regex = try Regex.compile(allocator, "(?<=b)(?<=ab)c");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("abc"));
