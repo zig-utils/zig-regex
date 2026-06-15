@@ -3,7 +3,7 @@ const Regex = @import("regex").Regex;
 
 test "quantifier: exactly n times {3}" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{3}");
+    var regex = try Regex.compile(allocator, "^a{3}$");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch("aa"));
@@ -13,7 +13,7 @@ test "quantifier: exactly n times {3}" {
 
 test "quantifier: range {2,4}" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{2,4}");
+    var regex = try Regex.compile(allocator, "^a{2,4}$");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch("a"));
@@ -36,7 +36,7 @@ test "quantifier: at least n {2,}" {
 
 test "quantifier: {0,1} equivalent to ?" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{0,1}");
+    var regex = try Regex.compile(allocator, "^a{0,1}$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch(""));
@@ -80,18 +80,18 @@ test "quantifier: complex pattern with {m,n}" {
 
 test "quantifier: multiple bounded quantifiers" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "a{2}b{3}");
+    var regex = try Regex.compile(allocator, "^a{2}b{3}$");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch("ab"));
-    try std.testing.expect(!try regex.isMatch("aabbb"));
+    try std.testing.expect(!try regex.isMatch("aabb"));
     try std.testing.expect(try regex.isMatch("aabbb"));
     try std.testing.expect(!try regex.isMatch("aaabbbb"));
 }
 
 test "quantifier: {m,n} with character class" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[a-z]{3,5}");
+    var regex = try Regex.compile(allocator, "^[a-z]{3,5}$");
     defer regex.deinit();
 
     try std.testing.expect(!try regex.isMatch("ab"));

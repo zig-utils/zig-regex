@@ -2095,7 +2095,7 @@ fn detectBoundedLiteral(allocator: std.mem.Allocator, root: *ast.Node, flags: co
 
     var bl: Regex.BoundedLiteral = .{ .literal = &.{} };
     var lit: std.ArrayList(u8) = .empty;
-    errdefer lit.deinit(allocator);
+    defer lit.deinit(allocator);
     var phase: u8 = 0; // 0 = before literal, 1 = in literal, 2 = after literal
 
     for (leaves.items) |n| {
@@ -2121,7 +2121,6 @@ fn detectBoundedLiteral(allocator: std.mem.Allocator, root: *ast.Node, flags: co
         }
     }
     if (lit.items.len < 2) {
-        lit.deinit(allocator);
         return null;
     }
     bl.literal = try lit.toOwnedSlice(allocator);

@@ -1,5 +1,16 @@
 const std = @import("std");
-const Regex = @import("regex.zig").Regex;
+const builtin = @import("builtin");
+const Regex = @import("regex").Regex;
+
+fn monotonicNs() u64 {
+    const clk: std.c.clockid_t = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => .UPTIME_RAW,
+        else => .MONOTONIC,
+    };
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(clk, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
 
 pub fn benchmark(
     allocator: std.mem.Allocator,
@@ -11,7 +22,7 @@ pub fn benchmark(
     var regex = try Regex.compile(allocator, pattern);
     defer regex.deinit();
 
-    const start = std.time.nanoTimestamp();
+    const start = monotonicNs();
 
     for (0..iterations) |_| {
         const result = try regex.find(input);
@@ -21,12 +32,12 @@ pub fn benchmark(
         }
     }
 
-    const end = std.time.nanoTimestamp();
+    const end = monotonicNs();
     const elapsed_ns = @as(u64, @intCast(end - start));
     const avg_ns = elapsed_ns / iterations;
     const avg_us = avg_ns / 1000;
 
-    std.debug.print("{s}: {d} iterations, avg {d}μs per match\n", .{name, iterations, avg_us});
+    std.debug.print("{s}: {d} iterations, avg {d}μs per match\n", .{ name, iterations, avg_us });
 }
 
 pub fn benchmarkCompile(
@@ -35,17 +46,17 @@ pub fn benchmarkCompile(
     pattern: []const u8,
     iterations: usize,
 ) !void {
-    const start = std.time.nanoTimestamp();
+    const start = monotonicNs();
 
     for (0..iterations) |_| {
         var regex = try Regex.compile(allocator, pattern);
         regex.deinit();
     }
 
-    const end = std.time.nanoTimestamp();
+    const end = monotonicNs();
     const elapsed_ns = @as(u64, @intCast(end - start));
     const avg_ns = elapsed_ns / iterations;
     const avg_us = avg_ns / 1000;
 
-    std.debug.print("{s}: {d} compilations, avg {d}μs per compile\n", .{name, iterations, avg_us});
+    std.debug.print("{s}: {d} compilations, avg {d}μs per compile\n", .{ name, iterations, avg_us });
 }

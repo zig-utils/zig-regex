@@ -292,6 +292,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
 
+    const benchmark_mod = b.createModule(.{
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "regex", .module = mod },
+        },
+    });
+    const benchmarks_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/benchmarks.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+                .{ .name = "benchmark", .module = benchmark_mod },
+            },
+        }),
+    });
+    benchmarks_tests.root_module.link_libc = true;
+    const run_benchmarks_tests = b.addRunArtifact(benchmarks_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -311,6 +333,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_named_captures_tests.step);
     test_step.dependOn(&run_lazy_quantifiers_tests.step);
     test_step.dependOn(&run_fuzz_tests.step);
+    test_step.dependOn(&run_benchmarks_tests.step);
 
     // Regression tests for specific fixes
     const regression_tests = b.addTest(.{
