@@ -239,95 +239,131 @@ test "UTF-8 encoding" {
 /// Unicode property names for \p{Property} matching
 pub const UnicodeProperty = enum {
     // General categories (short & long forms)
-    Letter, L,
-    Cased_Letter, LC,
-    Lowercase_Letter, Ll,
-    Uppercase_Letter, Lu,
-    Titlecase_Letter, Lt,
-    Modifier_Letter, Lm,
-    Other_Letter, Lo,
+    Letter,
+    L,
+    Cased_Letter,
+    LC,
+    Lowercase_Letter,
+    Ll,
+    Uppercase_Letter,
+    Lu,
+    Titlecase_Letter,
+    Lt,
+    Modifier_Letter,
+    Lm,
+    Other_Letter,
+    Lo,
 
-    Mark, M,
-    Nonspacing_Mark, Mn,
-    Spacing_Mark, Mc,
-    Enclosing_Mark, Me,
+    Mark,
+    M,
+    Nonspacing_Mark,
+    Mn,
+    Spacing_Mark,
+    Mc,
+    Enclosing_Mark,
+    Me,
 
-    Number, N,
-    Decimal_Number, Nd,
-    Letter_Number, Nl,
-    Other_Number, No,
+    Number,
+    N,
+    Decimal_Number,
+    Nd,
+    Letter_Number,
+    Nl,
+    Other_Number,
+    No,
 
-    Punctuation, P,
-    Connector_Punctuation, Pc,
-    Dash_Punctuation, Pd,
-    Open_Punctuation, Ps,
-    Close_Punctuation, Pe,
-    Initial_Punctuation, Pi,
-    Final_Punctuation, Pf,
-    Other_Punctuation, Po,
+    Punctuation,
+    P,
+    Connector_Punctuation,
+    Pc,
+    Dash_Punctuation,
+    Pd,
+    Open_Punctuation,
+    Ps,
+    Close_Punctuation,
+    Pe,
+    Initial_Punctuation,
+    Pi,
+    Final_Punctuation,
+    Pf,
+    Other_Punctuation,
+    Po,
 
-    Symbol, S,
-    Math_Symbol, Sm,
-    Currency_Symbol, Sc,
-    Modifier_Symbol, Sk,
-    Other_Symbol, So,
+    Symbol,
+    S,
+    Math_Symbol,
+    Sm,
+    Currency_Symbol,
+    Sc,
+    Modifier_Symbol,
+    Sk,
+    Other_Symbol,
+    So,
 
-    Separator, Z,
-    Space_Separator, Zs,
-    Line_Separator, Zl,
-    Paragraph_Separator, Zp,
+    Separator,
+    Z,
+    Space_Separator,
+    Zs,
+    Line_Separator,
+    Zl,
+    Paragraph_Separator,
+    Zp,
 
-    Other, C,
-    Control, Cc,
-    Format, Cf,
-    Surrogate, Cs,
-    Private_Use, Co,
-    Not_Assigned, Cn,
+    Other,
+    C,
+    Control,
+    Cc,
+    Format,
+    Cf,
+    Surrogate,
+    Cs,
+    Private_Use,
+    Co,
+    Not_Assigned,
+    Cn,
 
     pub fn fromString(s: []const u8) ?UnicodeProperty {
         const map = std.StaticStringMap(UnicodeProperty).initComptime(.{
-            .{ "Letter", .Letter },                       .{ "L", .L },
-            .{ "Cased_Letter", .Cased_Letter },           .{ "LC", .LC },
-            .{ "Lowercase_Letter", .Lowercase_Letter },   .{ "Ll", .Ll },
-            .{ "Uppercase_Letter", .Uppercase_Letter },   .{ "Lu", .Lu },
-            .{ "Titlecase_Letter", .Titlecase_Letter },   .{ "Lt", .Lt },
-            .{ "Modifier_Letter", .Modifier_Letter },     .{ "Lm", .Lm },
-            .{ "Other_Letter", .Other_Letter },           .{ "Lo", .Lo },
-            .{ "Mark", .Mark },                           .{ "M", .M },
-            .{ "Combining_Mark", .Mark },
-            .{ "Nonspacing_Mark", .Nonspacing_Mark },     .{ "Mn", .Mn },
-            .{ "Spacing_Mark", .Spacing_Mark },           .{ "Mc", .Mc },
-            .{ "Enclosing_Mark", .Enclosing_Mark },       .{ "Me", .Me },
-            .{ "Number", .Number },                       .{ "N", .N },
-            .{ "Decimal_Number", .Decimal_Number },       .{ "Nd", .Nd },
-            .{ "digit", .Decimal_Number },
-            .{ "Letter_Number", .Letter_Number },         .{ "Nl", .Nl },
-            .{ "Other_Number", .Other_Number },           .{ "No", .No },
-            .{ "Punctuation", .Punctuation },             .{ "P", .P },
-            .{ "punct", .Punctuation },
-            .{ "Connector_Punctuation", .Connector_Punctuation }, .{ "Pc", .Pc },
-            .{ "Dash_Punctuation", .Dash_Punctuation },   .{ "Pd", .Pd },
-            .{ "Open_Punctuation", .Open_Punctuation },   .{ "Ps", .Ps },
-            .{ "Close_Punctuation", .Close_Punctuation }, .{ "Pe", .Pe },
-            .{ "Initial_Punctuation", .Initial_Punctuation }, .{ "Pi", .Pi },
-            .{ "Final_Punctuation", .Final_Punctuation }, .{ "Pf", .Pf },
-            .{ "Other_Punctuation", .Other_Punctuation }, .{ "Po", .Po },
-            .{ "Symbol", .Symbol },                       .{ "S", .S },
-            .{ "Math_Symbol", .Math_Symbol },             .{ "Sm", .Sm },
-            .{ "Currency_Symbol", .Currency_Symbol },     .{ "Sc", .Sc },
-            .{ "Modifier_Symbol", .Modifier_Symbol },     .{ "Sk", .Sk },
-            .{ "Other_Symbol", .Other_Symbol },           .{ "So", .So },
-            .{ "Separator", .Separator },                 .{ "Z", .Z },
-            .{ "Space_Separator", .Space_Separator },     .{ "Zs", .Zs },
-            .{ "Line_Separator", .Line_Separator },       .{ "Zl", .Zl },
-            .{ "Paragraph_Separator", .Paragraph_Separator }, .{ "Zp", .Zp },
-            .{ "Other", .Other },                         .{ "C", .C },
-            .{ "Control", .Control },                     .{ "Cc", .Cc },
-            .{ "cntrl", .Cc },
-            .{ "Format", .Format },                       .{ "Cf", .Cf },
-            .{ "Surrogate", .Surrogate },                 .{ "Cs", .Cs },
-            .{ "Private_Use", .Private_Use },             .{ "Co", .Co },
-            .{ "Unassigned", .Not_Assigned },             .{ "Cn", .Cn },
+            .{ "Letter", .Letter },                     .{ "L", .L },
+            .{ "Cased_Letter", .Cased_Letter },         .{ "LC", .LC },
+            .{ "Lowercase_Letter", .Lowercase_Letter }, .{ "Ll", .Ll },
+            .{ "Uppercase_Letter", .Uppercase_Letter }, .{ "Lu", .Lu },
+            .{ "Titlecase_Letter", .Titlecase_Letter }, .{ "Lt", .Lt },
+            .{ "Modifier_Letter", .Modifier_Letter },   .{ "Lm", .Lm },
+            .{ "Other_Letter", .Other_Letter },         .{ "Lo", .Lo },
+            .{ "Mark", .Mark },                         .{ "M", .M },
+            .{ "Combining_Mark", .Mark },               .{ "Nonspacing_Mark", .Nonspacing_Mark },
+            .{ "Mn", .Mn },                             .{ "Spacing_Mark", .Spacing_Mark },
+            .{ "Mc", .Mc },                             .{ "Enclosing_Mark", .Enclosing_Mark },
+            .{ "Me", .Me },                             .{ "Number", .Number },
+            .{ "N", .N },                               .{ "Decimal_Number", .Decimal_Number },
+            .{ "Nd", .Nd },                             .{ "digit", .Decimal_Number },
+            .{ "Letter_Number", .Letter_Number },       .{ "Nl", .Nl },
+            .{ "Other_Number", .Other_Number },         .{ "No", .No },
+            .{ "Punctuation", .Punctuation },           .{ "P", .P },
+            .{ "punct", .Punctuation },                 .{ "Connector_Punctuation", .Connector_Punctuation },
+            .{ "Pc", .Pc },                             .{ "Dash_Punctuation", .Dash_Punctuation },
+            .{ "Pd", .Pd },                             .{ "Open_Punctuation", .Open_Punctuation },
+            .{ "Ps", .Ps },                             .{ "Close_Punctuation", .Close_Punctuation },
+            .{ "Pe", .Pe },                             .{ "Initial_Punctuation", .Initial_Punctuation },
+            .{ "Pi", .Pi },                             .{ "Final_Punctuation", .Final_Punctuation },
+            .{ "Pf", .Pf },                             .{ "Other_Punctuation", .Other_Punctuation },
+            .{ "Po", .Po },                             .{ "Symbol", .Symbol },
+            .{ "S", .S },                               .{ "Math_Symbol", .Math_Symbol },
+            .{ "Sm", .Sm },                             .{ "Currency_Symbol", .Currency_Symbol },
+            .{ "Sc", .Sc },                             .{ "Modifier_Symbol", .Modifier_Symbol },
+            .{ "Sk", .Sk },                             .{ "Other_Symbol", .Other_Symbol },
+            .{ "So", .So },                             .{ "Separator", .Separator },
+            .{ "Z", .Z },                               .{ "Space_Separator", .Space_Separator },
+            .{ "Zs", .Zs },                             .{ "Line_Separator", .Line_Separator },
+            .{ "Zl", .Zl },                             .{ "Paragraph_Separator", .Paragraph_Separator },
+            .{ "Zp", .Zp },                             .{ "Other", .Other },
+            .{ "C", .C },                               .{ "Control", .Control },
+            .{ "Cc", .Cc },                             .{ "cntrl", .Cc },
+            .{ "Format", .Format },                     .{ "Cf", .Cf },
+            .{ "Surrogate", .Surrogate },               .{ "Cs", .Cs },
+            .{ "Private_Use", .Private_Use },           .{ "Co", .Co },
+            .{ "Unassigned", .Not_Assigned },           .{ "Cn", .Cn },
         });
         return map.get(s);
     }
@@ -415,14 +451,22 @@ pub const PropSpec = union(enum) {
 /// Resolve a `\p{lhs=rhs}` (or lone `\p{name}`) operand to a PropSpec, matching
 /// the spec's UnicodeMatchProperty / LoneUnicodePropertyNameOrValue. `lhs` is
 /// null for the lone form.
-pub fn resolveProperty(lhs: ?[]const u8, name: []const u8) ?PropSpec {
+pub fn resolveProperty(lhs: ?[]const u8, name: []const u8, strict_aliases: bool) ?PropSpec {
     if (lhs) |l| {
-        if (eqi(l, "gc") or looseEquals(l, "General_Category"))
+        if (eqi(l, "gc") or eqi(l, "General_Category"))
             return if (unicodePropertyFromString(name)) |p| .{ .gc = p } else null;
-        if (eqi(l, "sc") or looseEquals(l, "Script"))
+        if (eqi(l, "sc") or eqi(l, "Script"))
             return if (scriptIdFromString(name)) |id| .{ .script = id } else null;
-        if (eqi(l, "scx") or looseEquals(l, "Script_Extensions"))
+        if (eqi(l, "scx") or eqi(l, "Script_Extensions"))
             return if (scriptIdFromString(name)) |id| .{ .script_extensions = id } else null;
+        if (!strict_aliases) {
+            if (looseEquals(l, "General_Category"))
+                return if (unicodePropertyFromStringLoose(name)) |p| .{ .gc = p } else null;
+            if (looseEquals(l, "Script"))
+                return if (scriptIdFromStringLoose(name)) |id| .{ .script = id } else null;
+            if (looseEquals(l, "Script_Extensions"))
+                return if (scriptIdFromStringLoose(name)) |id| .{ .script_extensions = id } else null;
+        }
         return null;
     }
     // Lone form: a binary property name, a General_Category value, or a script
@@ -431,6 +475,11 @@ pub fn resolveProperty(lhs: ?[]const u8, name: []const u8) ?PropSpec {
     if (binaryPropertyFromString(name)) |bp| return .{ .binary = bp };
     if (unicodePropertyFromString(name)) |p| return .{ .gc = p };
     if (scriptIdFromString(name)) |id| return .{ .script_extensions = id };
+    if (!strict_aliases) {
+        if (binaryPropertyFromStringLoose(name)) |bp| return .{ .binary = bp };
+        if (unicodePropertyFromStringLoose(name)) |p| return .{ .gc = p };
+        if (scriptIdFromStringLoose(name)) |id| return .{ .script_extensions = id };
+    }
     return null;
 }
 
@@ -462,7 +511,11 @@ fn looseEquals(a: []const u8, b: []const u8) bool {
 }
 
 fn unicodePropertyFromString(name: []const u8) ?UnicodeProperty {
-    if (UnicodeProperty.fromString(name)) |p| return p;
+    return UnicodeProperty.fromString(name);
+}
+
+fn unicodePropertyFromStringLoose(name: []const u8) ?UnicodeProperty {
+    if (unicodePropertyFromString(name)) |p| return p;
     inline for (@typeInfo(UnicodeProperty).@"enum".fields) |field| {
         if (looseEquals(name, field.name)) return @field(UnicodeProperty, field.name);
     }
@@ -470,7 +523,11 @@ fn unicodePropertyFromString(name: []const u8) ?UnicodeProperty {
 }
 
 fn binaryPropertyFromString(name: []const u8) ?prop_data.BinaryProp {
-    if (prop_data.binaryFromName(name)) |bp| return bp;
+    return prop_data.binaryFromName(name);
+}
+
+fn binaryPropertyFromStringLoose(name: []const u8) ?prop_data.BinaryProp {
+    if (binaryPropertyFromString(name)) |bp| return bp;
     inline for (@typeInfo(prop_data.BinaryProp).@"enum".fields) |field| {
         if (looseEquals(name, field.name)) return @field(prop_data.BinaryProp, field.name);
     }
@@ -503,6 +560,10 @@ fn canonicalAliasFromLoose(name: []const u8, buf: *[128]u8) ?[]const u8 {
 }
 
 fn scriptIdFromString(name: []const u8) ?u16 {
+    return prop_data.scriptId(name);
+}
+
+fn scriptIdFromStringLoose(name: []const u8) ?u16 {
     if (prop_data.scriptId(name)) |id| return id;
     var canonical_buf: [128]u8 = undefined;
     if (canonicalAliasFromLoose(name, &canonical_buf)) |canonical| {
@@ -773,7 +834,7 @@ test "Unicode property matching" {
 // Edge case tests
 test "unicode: invalid UTF-8 sequences" {
     // Truncated multi-byte sequence
-    const truncated = [_]u8{ 0xC3 }; // Should be 2 bytes but only 1
+    const truncated = [_]u8{0xC3}; // Should be 2 bytes but only 1
     try std.testing.expectError(error.InvalidUtf8, decodeUtf8(&truncated));
 
     // Invalid continuation byte
@@ -837,12 +898,12 @@ test "unicode: round-trip encoding/decoding" {
 
     // Test various codepoints can be encoded and decoded back
     const test_codepoints = [_]Codepoint{
-        0x0000, 0x007F,        // ASCII boundaries
-        0x0080, 0x07FF,        // 2-byte boundaries
-        0x0800, 0xFFFF,        // 3-byte boundaries
-        0x10000, 0x10FFFF,     // 4-byte boundaries
-        'a', 'Z', '0', '9',    // Common ASCII
-        0x00E9, 0x20AC,        // Common non-ASCII
+        0x0000, 0x007F, // ASCII boundaries
+        0x0080, 0x07FF, // 2-byte boundaries
+        0x0800, 0xFFFF, // 3-byte boundaries
+        0x10000, 0x10FFFF, // 4-byte boundaries
+        'a', 'Z', '0', '9', // Common ASCII
+        0x00E9, 0x20AC, // Common non-ASCII
     };
 
     for (test_codepoints) |cp| {

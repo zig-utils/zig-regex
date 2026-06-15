@@ -260,7 +260,7 @@ pub const Lexer = struct {
             if (name.len == 0) return RegexError.InvalidEscapeSequence;
         }
         var tok = self.makeToken(if (complement) .escape_P else .escape_p, 0);
-        if (unicode.resolveProperty(lhs, name)) |spec| {
+        if (unicode.resolveProperty(lhs, name, self.unicode_strict)) |spec| {
             tok.prop = spec;
         } else if (lhs == null and !complement and isStringPropertyName(name)) {
             tok.name = name;
@@ -1631,7 +1631,7 @@ pub const Parser = struct {
             if (neg) return RegexError.UnexpectedCharacter;
             return item;
         };
-        const spec = unicode.resolveProperty(lhs, name) orelse return RegexError.InvalidEscapeSequence;
+        const spec = unicode.resolveProperty(lhs, name, self.unicode or self.unicode_sets) orelse return RegexError.InvalidEscapeSequence;
         return .{ .property = .{ .spec = spec, .negated = neg } };
     }
 

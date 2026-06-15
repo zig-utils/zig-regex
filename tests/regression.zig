@@ -1078,6 +1078,10 @@ test "regression: issue 7 unicode property loose matching negation and script sh
     try std.testing.expect(try loose_script.isMatch("\u{10C80}"));
     try std.testing.expect(!try loose_script.isMatch("A"));
 
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "^\\p{general-category=lowercase-letter}+$", .{ .unicode = true }));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "^\\p{white space}+$", .{ .unicode = true }));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "^[\\p{script extensions=old-hungarian}]+$", .{ .unicode_sets = true }));
+
     var caret_negation = try Regex.compile(allocator, "^\\p{^Letter}+$");
     defer caret_negation.deinit();
     try std.testing.expect(try caret_negation.isMatch("123"));
