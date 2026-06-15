@@ -171,7 +171,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_posix_classes_tests = b.addRunArtifact(posix_classes_tests);
-    _ = run_posix_classes_tests; // Temporarily unused
 
     const backreferences_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -292,7 +291,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
-    _ = run_fuzz_tests; // Temporarily unused
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -302,8 +300,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_case_insensitive_tests.step);
     test_step.dependOn(&run_integration_tests.step);
-    // Temporarily disabled - POSIX parsing needs redesign
-    // test_step.dependOn(&run_posix_classes_tests.step);
+    test_step.dependOn(&run_posix_classes_tests.step);
     test_step.dependOn(&run_backreferences_tests.step);
     test_step.dependOn(&run_iterator_tests.step);
     test_step.dependOn(&run_non_capturing_groups_tests.step);
@@ -313,8 +310,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_multiline_dotall_tests.step);
     test_step.dependOn(&run_named_captures_tests.step);
     test_step.dependOn(&run_lazy_quantifiers_tests.step);
-    // Temporarily disabled - fuzz tests need refinement
-    // test_step.dependOn(&run_fuzz_tests.step);
+    test_step.dependOn(&run_fuzz_tests.step);
 
     // Regression tests for specific fixes
     const regression_tests = b.addTest(.{

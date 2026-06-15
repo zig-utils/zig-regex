@@ -1924,7 +1924,7 @@ pub const Parser = struct {
             }
             // Check for POSIX character class [:name:]
             // We need to look ahead in the raw input, not the tokenized stream
-            const current_pos = self.lexer.pos;
+            const current_pos = self.current_token.span.start;
 
             if (current_pos + 1 < self.lexer.input.len and
                 self.lexer.input[current_pos] == '[' and

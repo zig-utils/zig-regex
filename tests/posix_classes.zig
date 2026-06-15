@@ -17,7 +17,7 @@ test "posix: [:alpha:] matches letters" {
 
 test "posix: [:digit:] matches digits" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "[[:digit:]]+");
+    var regex = try Regex.compile(allocator, "^[[:digit:]]+$");
     defer regex.deinit();
 
     try std.testing.expect(try regex.isMatch("123"));
