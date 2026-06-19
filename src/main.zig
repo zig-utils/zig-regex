@@ -31,6 +31,8 @@ pub fn main(init: std.process.Init) !void {
     var case_insensitive = false;
     var multiline = false;
     var global = false;
+    var line_grep = false;
+    var line_count_only = false;
     var replacement: ?[]const u8 = null;
     var pattern_str: ?[]const u8 = null;
     var input_str: ?[]const u8 = null;
@@ -61,6 +63,11 @@ pub fn main(init: std.process.Init) !void {
                 multiline = true;
             } else if (std.mem.eql(u8, arg, "-g")) {
                 global = true;
+            } else if (std.mem.eql(u8, arg, "-L")) {
+                line_grep = true;
+            } else if (std.mem.eql(u8, arg, "-c")) {
+                line_grep = true;
+                line_count_only = true;
             } else if (std.mem.eql(u8, arg, "-r")) {
                 i += 1;
                 if (i >= args.len) {
@@ -115,6 +122,47 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer re.deinit();
+
+    if (line_count_only) {
+        // Whole-buffer match count: the realistic engine-throughput metric (a grep
+        // counting matches over a file). Uses a Matcher so the lazy DFA is built
+        // once. Pair with -m for line-anchored ^/$ semantics.
+        var m = re.matcher();
+        defer m.deinit();
+        const n = m.count(input) catch |err| {
+            try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try stdout.print("{d}\n", .{n});
+        try stdout.flush();
+        if (n == 0) std.process.exit(1);
+        return;
+    }
+    if (line_grep) {
+        // Line-oriented grep: iterate lines, report those that match. Mirrors the
+        // `rg`/`zg` workload and uses a reused Matcher so the lazy DFA is built
+        // once and amortized across every line.
+        var m = re.matcher();
+        defer m.deinit();
+        var matched_lines: usize = 0;
+        var it = std.mem.splitScalar(u8, input, '\n');
+        while (it.next()) |line| {
+            const hit = m.isMatch(line) catch |err| {
+                try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
+                try stderr.flush();
+                std.process.exit(1);
+            };
+            if (hit) {
+                matched_lines += 1;
+                try stdout.writeAll(line);
+                try stdout.writeAll("\n");
+            }
+        }
+        try stdout.flush();
+        if (matched_lines == 0) std.process.exit(1);
+        return;
+    }
 
     if (replacement) |repl| {
         const result = if (global)
