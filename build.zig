@@ -536,6 +536,20 @@ pub fn build(b: *std.Build) void {
     const findall_bench_step = b.step("bench-findall", "Run findAll throughput benchmark (issue #10)");
     findall_bench_step.dependOn(&findall_bench_run.step);
 
+    const line_count_bench = b.addExecutable(.{
+        .name = "line_count_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/line_count_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    line_count_bench.root_module.link_libc = true;
+    b.installArtifact(line_count_bench);
+
     // Add debug visualization example
     const debug_example = b.addExecutable(.{
         .name = "debug_visualization",
