@@ -564,6 +564,19 @@ pub const Regex = struct {
         return true;
     }
 
+    /// Smallest start position >= `pos` at which an `anchored_start` (leading `^`)
+    /// pattern could begin: position 0, and — only under multiline — each index
+    /// just past a '\n'. Returns null when no further line start exists. This lets
+    /// the general scan loops skip directly between line starts instead of probing
+    /// every byte (a match for `^…` can only begin at a line start).
+    fn nextLineStart(self: *const Regex, input: []const u8, pos: usize) ?usize {
+        if (pos == 0) return 0;
+        if (!self.flags.multiline) return null; // only line start is 0
+        const nl = std.mem.indexOfScalarPos(u8, input, pos - 1, '\n') orelse return null;
+        const s = nl + 1;
+        return if (s <= input.len) s else null;
+    }
+
     /// Next start to try after a failed DFA match at `scan`, where `stop` is the
     /// position the DFA halted at. When the pattern begins with an unbounded
     /// greedy class, the DFA dies exactly at that class's run end, so we can jump
@@ -1775,6 +1788,26 @@ pub const Regex = struct {
                     else => |e| return e,
                 }
             }
+        }
+
+        // Anchored-start patterns (`^…`) can only match at a line start, so probe
+        // those positions instead of scanning every byte. matchAt evaluates the
+        // rest of the pattern (including a trailing `$`) at each.
+        if (self.engine_type == .thompson_nfa and self.opt_info.anchored_start) {
+            var tmp_vm: ?vm.VM = null;
+            defer if (tmp_vm) |*v| v.deinit();
+            const machine = self.obtainVm(reuse_vm, &tmp_vm);
+            while (self.nextLineStart(input, pos)) |s| {
+                if (try machine.matchAt(input, s)) |r| {
+                    var rr = r;
+                    rr.deinit(self.allocator);
+                    n += 1;
+                    pos = if (r.end > s) r.end else s + 1;
+                } else {
+                    pos = s + 1;
+                }
+            }
+            return n;
         }
 
         switch (self.engine_type) {
