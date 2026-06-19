@@ -324,6 +324,13 @@ pub const Optimizer = struct {
                     if (cc.matches(@intCast(b))) t[b] = true;
                 }
             },
+            // `.` — every byte but the line terminator (the death-skip only needs
+            // a non-null table; the bytes matter solely as documentation here).
+            .any => {
+                var b: usize = 0;
+                while (b < 256) : (b += 1) t[b] = true;
+                t['\n'] = false;
+            },
             else => return null,
         }
         return t;
