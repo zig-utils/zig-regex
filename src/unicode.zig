@@ -516,8 +516,15 @@ fn unicodePropertyFromString(name: []const u8) ?UnicodeProperty {
 
 fn unicodePropertyFromStringLoose(name: []const u8) ?UnicodeProperty {
     if (unicodePropertyFromString(name)) |p| return p;
-    inline for (@typeInfo(UnicodeProperty).@"enum".fields) |field| {
-        if (looseEquals(name, field.name)) return @field(UnicodeProperty, field.name);
+    const info = @typeInfo(UnicodeProperty).@"enum";
+    if (@hasField(@TypeOf(info), "field_names")) {
+        inline for (info.field_names) |field_name| {
+            if (looseEquals(name, field_name)) return @field(UnicodeProperty, field_name);
+        }
+    } else {
+        inline for (info.fields) |field| {
+            if (looseEquals(name, field.name)) return @field(UnicodeProperty, field.name);
+        }
     }
     return null;
 }
@@ -528,8 +535,15 @@ fn binaryPropertyFromString(name: []const u8) ?prop_data.BinaryProp {
 
 fn binaryPropertyFromStringLoose(name: []const u8) ?prop_data.BinaryProp {
     if (binaryPropertyFromString(name)) |bp| return bp;
-    inline for (@typeInfo(prop_data.BinaryProp).@"enum".fields) |field| {
-        if (looseEquals(name, field.name)) return @field(prop_data.BinaryProp, field.name);
+    const info = @typeInfo(prop_data.BinaryProp).@"enum";
+    if (@hasField(@TypeOf(info), "field_names")) {
+        inline for (info.field_names) |field_name| {
+            if (looseEquals(name, field_name)) return @field(prop_data.BinaryProp, field_name);
+        }
+    } else {
+        inline for (info.fields) |field| {
+            if (looseEquals(name, field.name)) return @field(prop_data.BinaryProp, field.name);
+        }
     }
     return null;
 }
