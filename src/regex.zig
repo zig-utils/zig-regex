@@ -520,8 +520,13 @@ pub const Regex = struct {
         // DFA — which matches case-sensitively — is correct for `i` too. (The
         // AST-derived byte prefilter is *not* folded, so it's disabled under `i`
         // by `dfaPrefilterActive`.)
+        //
+        // Empty-width assertions (`^` `$` `\A` `\z` `\b` `\B`, incl. multiline)
+        // are now evaluated inside the lazy DFA, so anchored patterns are
+        // eligible. Lazy quantifiers still keep NFA semantics (longest-match
+        // would differ), and lookaround/backref/unicode-property patterns never
+        // reach here (they compile to the backtracking engine).
         return self.engine_type == .thompson_nfa and
-            !self.opt_info.has_assertions and
             !self.opt_info.has_lazy;
     }
 
