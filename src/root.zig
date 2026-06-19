@@ -84,6 +84,7 @@ pub const parser = @import("parser.zig");
 pub const compiler = @import("compiler.zig");
 pub const utf8_class = @import("utf8_class.zig");
 pub const optimizer = @import("optimizer.zig");
+pub const reverse = @import("reverse.zig");
 pub const debug = @import("debug.zig");
 pub const profiling = @import("profiling.zig");
 
