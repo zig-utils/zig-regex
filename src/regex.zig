@@ -1653,7 +1653,10 @@ pub const Regex = struct {
             return matches.toOwnedSlice(allocator);
         }
 
-        while (pos < input.len) {
+        // `<= input.len` so a zero-width match at end of input (e.g. `a*`, a lazy
+        // quantifier, or an optional group on empty input) is found — matching the
+        // Thompson path and find()/isMatch().
+        while (pos <= input.len) {
             switch (self.engine_type) {
                 .thompson_nfa => unreachable, // handled above
                 .backtracking => {
@@ -1844,7 +1847,9 @@ pub const Regex = struct {
             },
             .backtracking => {
                 const engine_mut = @constCast(&self.backtrack_engine.?);
-                while (pos < input.len) {
+                // `<= input.len` so a zero-width match at end of input is counted,
+                // matching the Thompson path and find()/isMatch().
+                while (pos <= input.len) {
                     if (engine_mut.find(input[pos..])) |result| {
                         var mut_result = result;
                         mut_result.deinit(self.allocator);
