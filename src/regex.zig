@@ -587,8 +587,14 @@ pub const Regex = struct {
     /// greedy class, the DFA dies exactly at that class's run end, so we can jump
     /// straight to `stop` (no rescan) — no start within the run can match. Other
     /// patterns advance by one.
+    ///
+    /// This is unsound when the pattern carries assertions: a position-dependent
+    /// constraint (e.g. a trailing `$`) can make a *later* start inside the run
+    /// match where an earlier one failed — `\w+\s+\w+$` on "fn fn fn" matches at
+    /// offset 3 though offset 0 fails. So the skip is restricted to assertion-free
+    /// patterns.
     fn dfaFailSkip(self: *const Regex, scan: usize, stop: usize) usize {
-        if (self.opt_info.first_unbounded_class != null) return @max(stop, scan + 1);
+        if (!self.opt_info.has_assertions and self.opt_info.first_unbounded_class != null) return @max(stop, scan + 1);
         return scan + 1;
     }
 
@@ -598,6 +604,15 @@ pub const Regex = struct {
     fn obtainDfa(self: *const Regex, reuse: ?*dfa.LazyDfa, tmp: *?dfa.LazyDfa) ?*dfa.LazyDfa {
         if (reuse) |d| return d;
         tmp.* = dfa.LazyDfa.init(self.allocator, @constCast(&self.nfa), self.flags) catch return null;
+        return &(tmp.*.?);
+    }
+
+    /// The unanchored search DFA for isMatch: the reused one (from a `Matcher`) or
+    /// a fresh temporary written into `tmp` (the caller deinits `tmp`). Returns
+    /// null on OOM so the caller falls back to the NFA.
+    fn obtainSearchDfa(self: *const Regex, reuse: ?*dfa.LazyDfa, tmp: *?dfa.LazyDfa) ?*dfa.LazyDfa {
+        if (reuse) |d| return d;
+        tmp.* = dfa.LazyDfa.initSearch(self.allocator, @constCast(&self.nfa), self.flags) catch return null;
         return &(tmp.*.?);
     }
 
@@ -716,23 +731,6 @@ pub const Regex = struct {
             try matches.append(allocator, Match{ .slice = input[scan..end], .start = scan, .end = end });
             pos = if (end > scan) end else end + 1;
         }
-    }
-
-    /// isMatch() via the lazy DFA.
-    fn isMatchWithDfa(self: *const Regex, d: *dfa.LazyDfa, input: []const u8) dfa.Error!bool {
-        const pf = self.dfaPrefilterActive();
-        const pref: ?LiteralPrefilter = if (self.opt_info.literal_prefix) |p| LiteralPrefilter.init(input, p) else null;
-        var pos: usize = 0;
-        while (pos <= input.len) {
-            if (pf) {
-                pos = self.skipToCandidate(input, pos, pref);
-                if (pos >= input.len) break;
-            }
-            const sc = try d.longestMatchFrom(input, pos);
-            if (sc.end) |_| return true;
-            pos = self.dfaFailSkip(pos, sc.stop);
-        }
-        return false;
     }
 
     /// Required-literal fast-fail: true when a mandatory literal substring is
@@ -960,11 +958,25 @@ pub const Regex = struct {
         re: *const Regex,
         dfa_cell: ?dfa.LazyDfa = null,
         dfa_failed: bool = false,
+        search_dfa_cell: ?dfa.LazyDfa = null,
+        search_dfa_failed: bool = false,
         vm_cell: ?vm.VM = null,
 
         pub fn deinit(self: *Matcher) void {
             if (self.dfa_cell) |*d| d.deinit();
+            if (self.search_dfa_cell) |*d| d.deinit();
             if (self.vm_cell) |*v| v.deinit();
+        }
+
+        /// The cached unanchored search DFA for isMatch, built on first use.
+        fn searchDfaPtr(self: *Matcher) ?*dfa.LazyDfa {
+            if (self.search_dfa_cell) |*d| return d;
+            if (self.search_dfa_failed or !self.re.dfaEligible()) return null;
+            self.search_dfa_cell = dfa.LazyDfa.initSearch(self.re.allocator, @constCast(&self.re.nfa), self.re.flags) catch {
+                self.search_dfa_failed = true;
+                return null;
+            };
+            return &(self.search_dfa_cell.?);
         }
 
         /// The cached lazy DFA, built on first use; null when the pattern isn't
@@ -992,7 +1004,7 @@ pub const Regex = struct {
         }
 
         pub fn isMatch(self: *Matcher, input: []const u8) !bool {
-            return self.re.isMatchInner(input, self.dfaPtr(), self.vmPtr());
+            return self.re.isMatchInner(input, self.vmPtr(), self.searchDfaPtr());
         }
         pub fn find(self: *Matcher, input: []const u8) !?Match {
             return self.re.findInner(input, self.dfaPtr(), self.vmPtr());
@@ -1016,10 +1028,10 @@ pub const Regex = struct {
         return self.isMatchInner(input, null, null);
     }
 
-    /// `reuse_dfa` lets a `Matcher` pass a cached lazy DFA so per-call DFA
-    /// construction is amortized across calls (the grep hot path); null builds a
-    /// fresh DFA per call (the thread-safe public path).
-    fn isMatchInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) !bool {
+    /// `reuse_dfa`/`reuse_search_dfa` let a `Matcher` pass cached lazy DFAs so
+    /// per-call construction is amortized across calls (the grep hot path); null
+    /// builds a fresh DFA per call (the thread-safe public path).
+    fn isMatchInner(self: *const Regex, input: []const u8, reuse_vm: ?*vm.VM, reuse_search_dfa: ?*dfa.LazyDfa) !bool {
         // Required-literal fast-fail: a mandatory substring that's absent means
         // there can be no match (works for every engine).
         if (self.requiredAbsent(input)) return false;
@@ -1091,15 +1103,15 @@ pub const Regex = struct {
                 return false;
             }
         }
-        // count/isMatch need no captures, so the lazy DFA (faster, with the
-        // death-position skip) handles one-pass patterns too — every one-pass
-        // pattern is DFA-eligible. The plan is reserved for find/findAll captures.
-        // Lazy-DFA path for eligible general patterns.
+        // Existence has no leftmost/longest subtlety, so the unanchored search
+        // DFA settles it in one left-to-right pass (the re-seeded start makes every
+        // position a candidate) — no per-position restart. O(n) even for sparse
+        // matches like `fn\s+\w+|\w+\s+fn`.
         if (self.dfaEligible()) {
             var tmp: ?dfa.LazyDfa = null;
             defer if (tmp) |*t| t.deinit();
-            if (self.obtainDfa(reuse_dfa, &tmp)) |d| {
-                if (self.isMatchWithDfa(d, input)) |b| {
+            if (self.obtainSearchDfa(reuse_search_dfa, &tmp)) |d| {
+                if (d.anyMatch(input)) |b| {
                     return b;
                 } else |err| switch (err) {
                     error.DfaOverflow => {}, // fall back to NFA

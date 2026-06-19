@@ -132,6 +132,26 @@ test "anchored search invariants: count == findAll across patterns/inputs" {
     }
 }
 
+test "death-skip soundness: trailing-dollar match starts inside a leading class run" {
+    // `\w+\s+\w+$` matches "fn fn" at offset 3 of "fn fn fn" (last word at EOL),
+    // even though a match attempt at offset 0 fails. The DFA death-skip must not
+    // jump past offset 3. Regression for the assertion-aware dfaFailSkip.
+    try checkInvariants("\\w+\\s+\\w+$", "fn fn fn", .{ .multiline = true });
+    try checkInvariants("\\w+\\s+\\w+$", "a b c d e", .{ .multiline = true });
+    try checkInvariants("\\d+$", "12 34 56", .{ .multiline = true });
+    try checkInvariants("\\w+@\\w+\\.\\w+$", "x a@b.com", .{ .multiline = true });
+
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "\\w+\\s+\\w+$", .{ .multiline = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("fn fn fn"));
+    var m = try re.find("fn fn fn");
+    defer if (m) |*mm| mm.deinit(allocator);
+    try std.testing.expect(m != null);
+    try std.testing.expectEqualStrings("fn fn", m.?.slice);
+    try std.testing.expectEqual(@as(usize, 1), try re.count("fn fn fn"));
+}
+
 test "anchored search invariants: case-insensitive" {
     const ci_patterns = [_][]const u8{ "^fn", "FN$", "^Pub\\s+Fn$", "^\\w+$" };
     const ci_inputs = [_][]const u8{ "FN\nfn\nFn", "PUB FN\npub fn", "Hello\nWORLD" };

@@ -56,6 +56,8 @@ pub const LazyDfa = struct {
     word_count: usize, // bytes per NFA-state-set bitset
     key_len: usize, // word_count + 1 flag byte
     anchored: bool, // NFA contains an anchor transition (else look-behind flags are inert)
+    unanchored: bool, // search mode: every step re-seeds the start (implicit `.*` prefix)
+    start_closure: []u8, // epsilon closure of the NFA start state (the re-seed set)
 
     // Flat tables indexed by DFA state for cache-friendly stepping:
     //   trans[state * ALPHA + sym]  -> UNCOMPUTED / DEAD / next state
@@ -75,6 +77,18 @@ pub const LazyDfa = struct {
     stack: std.ArrayList(usize),
 
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, flags: common.CompileFlags) !LazyDfa {
+        return initMode(allocator, nfa, flags, false);
+    }
+
+    /// Unanchored search DFA: every step re-seeds the NFA start state, so a single
+    /// left-to-right pass finds whether the pattern matches anywhere (an implicit
+    /// `.*` prefix). Used by isMatch; correct because existence has no
+    /// leftmost/longest subtlety.
+    pub fn initSearch(allocator: std.mem.Allocator, nfa: *compiler.NFA, flags: common.CompileFlags) !LazyDfa {
+        return initMode(allocator, nfa, flags, true);
+    }
+
+    fn initMode(allocator: std.mem.Allocator, nfa: *compiler.NFA, flags: common.CompileFlags, unanchored: bool) !LazyDfa {
         const num_states = nfa.states.items.len;
         const word_count = (num_states + 7) / 8;
         // Look-behind flags only matter when some state has an anchor transition;
@@ -89,7 +103,7 @@ pub const LazyDfa = struct {
             }
             if (anchored) break;
         }
-        return .{
+        var self: LazyDfa = .{
             .allocator = allocator,
             .nfa = nfa,
             .flags = flags,
@@ -97,6 +111,8 @@ pub const LazyDfa = struct {
             .word_count = word_count,
             .key_len = word_count + 1,
             .anchored = anchored,
+            .unanchored = unanchored,
+            .start_closure = try allocator.alloc(u8, word_count),
             .trans = .empty,
             .acc = .empty,
             .keys = .empty,
@@ -107,6 +123,19 @@ pub const LazyDfa = struct {
             .closure_buf = try allocator.alloc(u8, word_count),
             .stack = .empty,
         };
+        // Precompute the start state's epsilon closure (the re-seed set for
+        // unanchored search). Anchor transitions are deferred to per-step masks,
+        // so this is epsilon-only.
+        @memset(self.start_closure, 0);
+        @memset(self.move_buf, 0);
+        bitSet(self.move_buf, nfa.start_state);
+        self.closure(self.move_buf, 0, self.start_closure) catch {
+            // Fall back to just the start state if scratch closure fails (OOM).
+            @memset(self.start_closure, 0);
+            bitSet(self.start_closure, nfa.start_state);
+        };
+        @memset(self.move_buf, 0);
+        return self;
     }
 
     pub fn deinit(self: *LazyDfa) void {
@@ -115,6 +144,7 @@ pub const LazyDfa = struct {
         self.trans.deinit(self.allocator);
         self.acc.deinit(self.allocator);
         self.map.deinit(self.allocator);
+        self.allocator.free(self.start_closure);
         self.allocator.free(self.move_buf);
         self.allocator.free(self.closure_buf);
         self.stack.deinit(self.allocator);
@@ -278,6 +308,14 @@ pub const LazyDfa = struct {
                     }
                 }
             }
+            // Unanchored search re-seeds the start state on every byte so a match
+            // may begin at the next position (an implicit `.*` prefix). The seeded
+            // states inherit the just-consumed byte's look-behind context.
+            if (self.unanchored) {
+                var w: usize = 0;
+                while (w < self.word_count) : (w += 1) self.move_buf[w] |= self.start_closure[w];
+                any_move = true;
+            }
             if (any_move) {
                 var new_flags: u8 = 0; // not at start after consuming a byte
                 if (isWordByte(c)) new_flags |= FLAG_PREV_WORD;
@@ -348,5 +386,32 @@ pub const LazyDfa = struct {
             p += 1;
         }
         return .{ .end = last, .stop = p };
+    }
+
+    /// Whether the pattern matches anywhere in `input`, in a single left-to-right
+    /// pass. Requires an unanchored (search-mode) DFA; the re-seeded start makes
+    /// every position a potential match start, so the first accepting state seen
+    /// proves a match exists. O(n) regardless of match sparsity.
+    pub fn anyMatch(self: *LazyDfa, input: []const u8) Error!bool {
+        std.debug.assert(self.unanchored);
+        var s: i32 = try self.getStart(self.startFlags(input, 0));
+        var trans = self.trans.items;
+        var acc = self.acc.items;
+        var p: usize = 0;
+        while (true) {
+            const sym: usize = if (p < input.len) input[p] else EOF;
+            const row = @as(usize, @intCast(s)) * ALPHA + sym;
+            var t = trans[row];
+            if (t == UNCOMPUTED) {
+                t = try self.computeStep(s, sym);
+                trans = self.trans.items;
+                acc = self.acc.items;
+            }
+            if (acc[@as(usize, @intCast(s)) * ALPHA + sym]) return true;
+            if (sym == EOF) return false;
+            if (t == DEAD) return false; // only reachable in anchored mode
+            s = t;
+            p += 1;
+        }
     }
 };
