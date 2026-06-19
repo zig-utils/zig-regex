@@ -77,6 +77,13 @@ pub const LazyDfa = struct {
     trans: std.ArrayList(i32),
     acc: std.ArrayList(bool),
     acc_state: std.ArrayList(bool),
+    // State acceleration: a state that loops to itself on a large non-accepting
+    // byte set (a `\w+`/`\s+` run) skips that run with one tight membership loop.
+    // Built lazily — only once a state is observed self-looping mid-scan — so
+    // non-self-loop states (e.g. `\w{5}`'s) pay nothing. kind[s]: 0 unknown,
+    // 1 not-accelerable, 2 accelerable (set[s] is the self-loop byte set).
+    accel_kind: std.ArrayList(u8),
+    accel_set: std.ArrayList([256]bool),
     keys: std.ArrayList([]u8),
     map: std.StringHashMapUnmanaged(i32), // key bytes -> dfa index
 
@@ -128,6 +135,8 @@ pub const LazyDfa = struct {
             .trans = .empty,
             .acc = .empty,
             .acc_state = .empty,
+            .accel_kind = .empty,
+            .accel_set = .empty,
             .keys = .empty,
             .map = .{},
             .start_cache = .{ UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED },
@@ -157,6 +166,8 @@ pub const LazyDfa = struct {
         self.trans.deinit(self.allocator);
         self.acc.deinit(self.allocator);
         self.acc_state.deinit(self.allocator);
+        self.accel_kind.deinit(self.allocator);
+        self.accel_set.deinit(self.allocator);
         self.map.deinit(self.allocator);
         self.allocator.free(self.start_closure);
         self.allocator.free(self.move_buf);
@@ -286,6 +297,8 @@ pub const LazyDfa = struct {
         try self.trans.appendNTimes(self.allocator, UNCOMPUTED, ALPHA);
         try self.acc.appendNTimes(self.allocator, false, ALPHA);
         try self.acc_state.append(self.allocator, self.hasAccepting(set));
+        try self.accel_kind.append(self.allocator, 0);
+        try self.accel_set.append(self.allocator, undefined);
         try self.keys.append(self.allocator, owned);
         try self.map.put(self.allocator, owned, idx);
         return idx;
@@ -487,6 +500,28 @@ pub const LazyDfa = struct {
     /// matches never cross a '\n' (each line is scanned over [ls, le) only). For
     /// each line, memchr finds the line end, then the DFA steps until a match
     /// (early exit) — so matching lines cost only their prefix.
+    /// Record state `s`'s self-loop byte set (the bytes that stay in `s` without
+    /// accepting) so the hot loop can skip such runs. Materializes its 256
+    /// transitions once. Marks `s` non-accelerable if too few bytes loop.
+    fn prepAccel(self: *LazyDfa, s: usize) Error!void {
+        var set: [256]bool = undefined;
+        var loops: usize = 0;
+        var c: usize = 0;
+        while (c < 256) : (c += 1) {
+            if (self.trans.items[s * ALPHA + c] == UNCOMPUTED) _ = try self.computeStep(@intCast(s), c);
+            const t = self.trans.items[s * ALPHA + c];
+            const is_self = t >= 0 and t < ACCEPT_BIT and (t & STATE_MASK) == @as(i32, @intCast(s));
+            set[c] = is_self;
+            if (is_self) loops += 1;
+        }
+        if (loops >= 32) {
+            self.accel_set.items[s] = set;
+            self.accel_kind.items[s] = 2;
+        } else {
+            self.accel_kind.items[s] = 1;
+        }
+    }
+
     pub fn countMatchingLines(self: *LazyDfa, input: []const u8) Error!usize {
         std.debug.assert(self.unanchored and !self.anchored);
         const start_s: usize = @intCast(try self.getStart(0));
@@ -502,6 +537,12 @@ pub const LazyDfa = struct {
                 var s = start_s;
                 var p = ls;
                 while (p < le) {
+                    // Accelerated state: skip the whole self-loop run at once.
+                    if (self.accel_kind.items[s] == 2) {
+                        const set = &self.accel_set.items[s];
+                        while (p < le and set[input[p]]) p += 1;
+                        if (p >= le) break;
+                    }
                     const t = trans[s * ALPHA + input[p]];
                     if (t == UNCOMPUTED) {
                         _ = try self.computeStep(@intCast(s), input[p]);
@@ -509,12 +550,19 @@ pub const LazyDfa = struct {
                         continue; // re-read the now-computed cell
                     }
                     // unanchored search never produces DEAD (start is re-seeded).
-                    s = @intCast(t & STATE_MASK);
+                    const next: usize = @intCast(t & STATE_MASK);
                     p += 1;
                     if (t >= ACCEPT_BIT) {
                         count += 1;
                         break;
                     }
+                    // Lazily promote a state the moment it's seen self-looping, so
+                    // non-self-loop states never pay the materialization cost.
+                    if (next == s and self.accel_kind.items[s] == 0) {
+                        try self.prepAccel(s);
+                        trans = self.trans.items;
+                    }
+                    s = next;
                 }
             }
             if (le == input.len) break;
