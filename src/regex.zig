@@ -1727,6 +1727,44 @@ pub const Regex = struct {
         return self.countInner(input, null, null);
     }
 
+    /// Number of newline-delimited lines that contain at least one match — the
+    /// `grep -c` workload. A fixed-string pattern is served by a single
+    /// whole-buffer SIMD literal scan (one match per line, skip to the next
+    /// line), avoiding per-line dispatch; every other pattern falls back to a
+    /// reused Matcher's single-pass isMatch per line.
+    pub fn countMatchingLines(self: *const Regex, input: []const u8) !usize {
+        // Whole-buffer literal fast path: an exact-literal pattern has no anchors,
+        // so a line matches iff it contains the literal. Scan for occurrences and
+        // jump past the rest of each hit line. Skipped under `i` (case folding) and
+        // when the literal itself spans a newline.
+        if (self.opt_info.exact_literal) |lit| {
+            if (!self.flags.case_insensitive and lit.len > 0 and
+                std.mem.indexOfScalar(u8, lit, '\n') == null)
+            {
+                // Build the SIMD prefilter once (it analyzes the buffer to pick a
+                // scan strategy) and reuse it across hits.
+                const pf = LiteralPrefilter.init(input, lit);
+                var count_lines: usize = 0;
+                var pos: usize = 0;
+                while (pf.next(input, pos)) |i| {
+                    count_lines += 1;
+                    const le = std.mem.indexOfScalarPos(u8, input, i, '\n') orelse input.len;
+                    pos = le + 1;
+                    if (pos > input.len) break;
+                }
+                return count_lines;
+            }
+        }
+        var m = self.matcher();
+        defer m.deinit();
+        var count_lines: usize = 0;
+        var it = std.mem.splitScalar(u8, input, '\n');
+        while (it.next()) |line| {
+            if (try m.isMatch(line)) count_lines += 1;
+        }
+        return count_lines;
+    }
+
     fn countInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) !usize {
         var n: usize = 0;
         var pos: usize = 0;

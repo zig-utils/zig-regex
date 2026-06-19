@@ -124,12 +124,9 @@ pub fn main(init: std.process.Init) !void {
     defer re.deinit();
 
     if (line_count_only) {
-        // Whole-buffer match count: the realistic engine-throughput metric (a grep
-        // counting matches over a file). Uses a Matcher so the lazy DFA is built
-        // once. Pair with -m for line-anchored ^/$ semantics.
-        var m = re.matcher();
-        defer m.deinit();
-        const n = m.count(input) catch |err| {
+        // Count matching lines (the `grep -c` workload). Uses the whole-buffer
+        // literal fast path when applicable, else single-pass isMatch per line.
+        const n = re.countMatchingLines(input) catch |err| {
             try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
             try stderr.flush();
             std.process.exit(1);

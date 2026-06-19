@@ -152,6 +152,37 @@ test "death-skip soundness: trailing-dollar match starts inside a leading class 
     try std.testing.expectEqual(@as(usize, 1), try re.count("fn fn fn"));
 }
 
+test "countMatchingLines agrees with per-line reference" {
+    const allocator = std.testing.allocator;
+    // The whole-buffer literal fast path and the general per-line path must both
+    // equal a naive per-line isMatch reference.
+    const cases = [_]struct { pat: []const u8, in: []const u8 }{
+        .{ .pat = "fn", .in = "fn x\nyfn\nno\nfn\n" }, // literal fast path
+        .{ .pat = "fn", .in = "" },
+        .{ .pat = "fn", .in = "nofnhere" },
+        .{ .pat = "fn", .in = "fn\nfn\nfn" }, // no trailing newline
+        .{ .pat = "abc", .in = "xabcy\nab c\nabc" },
+        .{ .pat = "\\w+\\s+\\w+", .in = "a b\nc\nd e f\n" }, // general path
+        .{ .pat = "^\\d+$", .in = "12\nx3\n45\n" },
+        .{ .pat = "\\bfn\\b", .in = "fn\nxfn\nfn x\n" },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pat, .{ .multiline = true });
+        defer re.deinit();
+        const got = try re.countMatchingLines(c.in);
+
+        var expected: usize = 0;
+        var it = std.mem.splitScalar(u8, c.in, '\n');
+        while (it.next()) |line| {
+            if (try re.isMatch(line)) expected += 1;
+        }
+        if (got != expected) {
+            std.debug.print("countMatchingLines mismatch pat=\"{s}\" in=\"{s}\": got={d} expected={d}\n", .{ c.pat, c.in, got, expected });
+            return error.LineCountMismatch;
+        }
+    }
+}
+
 test "anchored search invariants: case-insensitive" {
     const ci_patterns = [_][]const u8{ "^fn", "FN$", "^Pub\\s+Fn$", "^\\w+$" };
     const ci_inputs = [_][]const u8{ "FN\nfn\nFn", "PUB FN\npub fn", "Hello\nWORLD" };
