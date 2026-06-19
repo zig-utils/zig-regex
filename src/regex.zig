@@ -1755,6 +1755,26 @@ pub const Regex = struct {
                 return count_lines;
             }
         }
+        // DFA-eligible patterns: step the unanchored search DFA over each line
+        // directly, skipping the per-line isMatchInner fast-path dispatch. On a
+        // DFA overflow mid-scan, fall through to the general per-line path.
+        if (self.dfaEligible()) {
+            var tmp: ?dfa.LazyDfa = null;
+            defer if (tmp) |*t| t.deinit();
+            if (self.obtainSearchDfa(null, &tmp)) |d| {
+                var count_lines: usize = 0;
+                var it = std.mem.splitScalar(u8, input, '\n');
+                var overflowed = false;
+                while (it.next()) |line| {
+                    const hit = d.anyMatch(line) catch {
+                        overflowed = true;
+                        break;
+                    };
+                    if (hit) count_lines += 1;
+                }
+                if (!overflowed) return count_lines;
+            }
+        }
         var m = self.matcher();
         defer m.deinit();
         var count_lines: usize = 0;
