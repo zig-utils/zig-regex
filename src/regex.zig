@@ -1762,6 +1762,16 @@ pub const Regex = struct {
             var tmp: ?dfa.LazyDfa = null;
             defer if (tmp) |*t| t.deinit();
             if (self.obtainSearchDfa(null, &tmp)) |d| {
+                // Anchor-free patterns can't cross a newline, so one whole-buffer
+                // pass (resetting per line) avoids the per-line call overhead.
+                if (!d.anchored) {
+                    if (d.countMatchingLines(input)) |n| {
+                        return n;
+                    } else |err| switch (err) {
+                        error.DfaOverflow => {}, // fall through
+                        else => |e| return e,
+                    }
+                }
                 var count_lines: usize = 0;
                 var it = std.mem.splitScalar(u8, input, '\n');
                 var overflowed = false;

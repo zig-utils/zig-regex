@@ -31,6 +31,14 @@ pub const Error = error{ DfaOverflow, OutOfMemory };
 const UNCOMPUTED: i32 = -2;
 const DEAD: i32 = -1;
 
+// Transition encoding for the branch-reduced hot loop. A computed transition is
+// non-negative: bits 0..29 hold the target state id, bit 30 is set when the
+// target is an (anchor-free) accepting state. So the common case — a normal,
+// non-accepting transition — is a single `0 <= t < ACCEPT_BIT` test that skips
+// the dead / uncomputed / accept handling entirely.
+const ACCEPT_BIT: i32 = 1 << 30;
+const STATE_MASK: i32 = ACCEPT_BIT - 1;
+
 /// Transition/accept tables are this wide: 256 byte values plus one virtual
 /// end-of-input symbol at index 256.
 const EOF: usize = 256;
@@ -334,9 +342,13 @@ pub const LazyDfa = struct {
             }
         }
 
-        self.trans.items[@as(usize, @intCast(dfa_index)) * ALPHA + sym] = result;
+        // Fold the target's (anchor-free) accept flag into the stored value so the
+        // hot loop needs no separate accept lookup. DEAD stays negative.
+        var stored = result;
+        if (result != DEAD and self.acc_state.items[@intCast(result)]) stored = result | ACCEPT_BIT;
+        self.trans.items[@as(usize, @intCast(dfa_index)) * ALPHA + sym] = stored;
         self.acc.items[@as(usize, @intCast(dfa_index)) * ALPHA + sym] = accept_val;
-        return result;
+        return stored;
     }
 
     /// Look-behind flags for a scan starting at `start` within `input`. Inert
@@ -372,30 +384,49 @@ pub const LazyDfa = struct {
     /// reporting where the scan stopped. Hot loop caches the flat slices and
     /// re-fetches only when a transition is computed (which may grow them).
     pub fn longestMatchFrom(self: *LazyDfa, input: []const u8, start: usize) Error!Scan {
-        const anchored = self.anchored;
         var s: i32 = try self.getStart(self.startFlags(input, start));
-        var trans = self.trans.items;
-        var acc = self.acc.items;
-        var acc_state = self.acc_state.items;
         var last: ?usize = null;
         var p = start;
+
+        if (!self.anchored) {
+            // Branch-reduced hot loop: accept and dead are folded into the stored
+            // transition value, so the common step is a single signed compare.
+            var trans = self.trans.items;
+            if (self.acc_state.items[@intCast(s)]) last = start; // empty/start match
+            while (p < input.len) {
+                const t = trans[@as(usize, @intCast(s)) * ALPHA + input[p]];
+                if (t < 0) {
+                    if (t == UNCOMPUTED) {
+                        _ = try self.computeStep(s, input[p]);
+                        trans = self.trans.items; // re-fetch after possible realloc
+                        continue; // re-read the now-computed cell
+                    }
+                    break; // DEAD
+                }
+                s = t & STATE_MASK;
+                p += 1;
+                if (t >= ACCEPT_BIT) last = p; // arrived in an accepting state
+            }
+            return .{ .end = last, .stop = p };
+        }
+
+        // Anchored: acceptance is byte-dependent (assertions), so consult the
+        // wide accept table and evaluate the EOF column for trailing `$`/`\b`.
+        var trans = self.trans.items;
+        var acc = self.acc.items;
         while (true) {
             const sym: usize = if (p < input.len) input[p] else EOF;
             const row = @as(usize, @intCast(s)) * ALPHA + sym;
             var t = trans[row];
             if (t == UNCOMPUTED) {
                 t = try self.computeStep(s, sym);
-                trans = self.trans.items; // re-fetch after possible realloc
+                trans = self.trans.items;
                 acc = self.acc.items;
-                acc_state = self.acc_state.items;
             }
-            // Anchor-free patterns accept independently of the byte, so read the
-            // compact per-state flag instead of the wide per-(state,byte) table.
-            const accepting = if (anchored) acc[row] else acc_state[@intCast(s)];
-            if (accepting) last = p;
+            if (acc[row]) last = p;
             if (sym == EOF) break;
             if (t == DEAD) break;
-            s = t;
+            s = t & STATE_MASK;
             p += 1;
         }
         return .{ .end = last, .stop = p };
@@ -407,12 +438,31 @@ pub const LazyDfa = struct {
     /// proves a match exists. O(n) regardless of match sparsity.
     pub fn anyMatch(self: *LazyDfa, input: []const u8) Error!bool {
         std.debug.assert(self.unanchored);
-        const anchored = self.anchored;
         var s: i32 = try self.getStart(self.startFlags(input, 0));
+        var p: usize = 0;
+
+        if (!self.anchored) {
+            var trans = self.trans.items;
+            if (self.acc_state.items[@intCast(s)]) return true;
+            while (p < input.len) {
+                const t = trans[@as(usize, @intCast(s)) * ALPHA + input[p]];
+                if (t < 0) {
+                    if (t == UNCOMPUTED) {
+                        _ = try self.computeStep(s, input[p]);
+                        trans = self.trans.items;
+                        continue;
+                    }
+                    return false; // DEAD (rare under re-seeded search)
+                }
+                s = t & STATE_MASK;
+                p += 1;
+                if (t >= ACCEPT_BIT) return true;
+            }
+            return false;
+        }
+
         var trans = self.trans.items;
         var acc = self.acc.items;
-        var acc_state = self.acc_state.items;
-        var p: usize = 0;
         while (true) {
             const sym: usize = if (p < input.len) input[p] else EOF;
             const row = @as(usize, @intCast(s)) * ALPHA + sym;
@@ -421,14 +471,55 @@ pub const LazyDfa = struct {
                 t = try self.computeStep(s, sym);
                 trans = self.trans.items;
                 acc = self.acc.items;
-                acc_state = self.acc_state.items;
             }
-            const accepting = if (anchored) acc[row] else acc_state[@intCast(s)];
-            if (accepting) return true;
+            if (acc[row]) return true;
             if (sym == EOF) return false;
-            if (t == DEAD) return false; // only reachable in anchored mode
-            s = t;
+            if (t == DEAD) return false;
+            s = t & STATE_MASK;
             p += 1;
         }
+    }
+
+    /// Count newline-delimited lines containing a match, in a single pass over
+    /// the buffer — no per-line call/setup overhead. Requires an anchor-free
+    /// unanchored search DFA (the caller checks `!anchored`): the start state is
+    /// the same for every line, the search re-seed means a line never dies, and
+    /// matches never cross a '\n' (each line is scanned over [ls, le) only). For
+    /// each line, memchr finds the line end, then the DFA steps until a match
+    /// (early exit) — so matching lines cost only their prefix.
+    pub fn countMatchingLines(self: *LazyDfa, input: []const u8) Error!usize {
+        std.debug.assert(self.unanchored and !self.anchored);
+        const start_s: usize = @intCast(try self.getStart(0));
+        const start_accepts = self.acc_state.items[start_s]; // pattern matches empty
+        var trans = self.trans.items;
+        var count: usize = 0;
+        var ls: usize = 0;
+        while (true) {
+            const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
+            if (start_accepts) {
+                count += 1;
+            } else {
+                var s = start_s;
+                var p = ls;
+                while (p < le) {
+                    const t = trans[s * ALPHA + input[p]];
+                    if (t == UNCOMPUTED) {
+                        _ = try self.computeStep(@intCast(s), input[p]);
+                        trans = self.trans.items;
+                        continue; // re-read the now-computed cell
+                    }
+                    // unanchored search never produces DEAD (start is re-seeded).
+                    s = @intCast(t & STATE_MASK);
+                    p += 1;
+                    if (t >= ACCEPT_BIT) {
+                        count += 1;
+                        break;
+                    }
+                }
+            }
+            if (le == input.len) break;
+            ls = le + 1;
+        }
+        return count;
     }
 };
