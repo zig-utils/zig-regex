@@ -301,6 +301,26 @@ pub const BacktrackEngine = struct {
 
                 @memcpy(self.captures, saved_captures);
             }
+            if (!right_has_choices and self.needsAnchoredRepeatedAlternationRecovery(concat.left, concat.right)) {
+                var target = self.input.len;
+                while (target >= pos) {
+                    @memcpy(self.captures, clean_captures);
+                    const screened = self.matchNode(concat.right, target) orelse {
+                        if (target == pos) break;
+                        target -= 1;
+                        continue;
+                    };
+                    @memcpy(self.captures, clean_captures);
+                    if (self.matchNodeConstrained(concat.left, pos, target)) {
+                        @memcpy(self.captures, clean_captures);
+                        _ = self.matchNodeConstrained(concat.left, pos, target);
+                        if (self.matchNode(concat.right, target)) |result| return result;
+                    }
+                    _ = screened;
+                    if (target == pos) break;
+                    target -= 1;
+                }
+            }
             @memcpy(self.captures, clean_captures);
             return null;
         } else {
@@ -373,67 +393,17 @@ pub const BacktrackEngine = struct {
                             if (right_end == target_end) return true;
                         }
                     }
+                    if (self.canMatchEmpty(c.right)) {
+                        @memcpy(self.captures, base_captures);
+                        if (self.matchNodeConstrained(c.left, pos, target_end) and
+                            self.matchNodeConstrained(c.right, target_end, target_end)) return true;
+                    }
                     @memcpy(self.captures, base_captures);
                     return false;
                 }
             },
             .star, .plus, .optional, .repeat => {
-                const child = switch (node.node_type) {
-                    .star => node.data.star.child,
-                    .plus => node.data.plus.child,
-                    .optional => node.data.optional.child,
-                    .repeat => node.data.repeat.child,
-                    else => unreachable,
-                };
-                const min: usize = switch (node.node_type) {
-                    .star, .optional => 0,
-                    .plus => 1,
-                    .repeat => node.data.repeat.bounds.min,
-                    else => unreachable,
-                };
-
-                // A required zero-width iteration, such as `(?=(x)){1,1}`,
-                // still runs the child and can update captures. Optional
-                // zero-width iterations are skipped, matching RepeatMatcher's
-                // min=0 empty-iteration failure rule.
-                if (pos == target_end) {
-                    var count: usize = 0;
-                    while (count < min) : (count += 1) {
-                        if (!self.matchNodeConstrained(child, pos, target_end)) return false;
-                    }
-                    return true;
-                }
-
-                // For optional, only one match allowed
-                if (node.node_type == .optional) {
-                    return if (self.matchNode(child, pos)) |end| end == target_end else false;
-                }
-
-                // Try matching child repeatedly until we reach target_end
-                var current = pos;
-                var count: usize = 0;
-                while (current < target_end) {
-                    self.clearCapturesIn(child);
-                    if (self.matchNode(child, current)) |next| {
-                        if (next <= current) return false;
-                        current = next;
-                        count += 1;
-                        if (current == target_end) {
-                            // Validate count constraints
-                            if (node.node_type == .plus and count < 1) return false;
-                            if (node.node_type == .repeat) {
-                                if (count < node.data.repeat.bounds.min) return false;
-                                if (node.data.repeat.bounds.max) |max| {
-                                    if (count > max) return false;
-                                }
-                            }
-                            return true;
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-                return false;
+                return self.matchQuantifierConstrained(node, pos, target_end);
             },
             .alternation => {
                 if (self.matchNodeConstrained(node.data.alternation.left, pos, target_end)) return true;
@@ -449,6 +419,77 @@ pub const BacktrackEngine = struct {
                 return if (self.matchLookbehind(node.data.lookbehind, pos)) |end| end == target_end else false;
             },
         }
+    }
+
+    fn matchQuantifierConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_end: usize) bool {
+        switch (node.node_type) {
+            .star, .plus, .optional, .repeat => {
+                const child = switch (node.node_type) {
+                    .star => node.data.star.child,
+                    .plus => node.data.plus.child,
+                    .optional => node.data.optional.child,
+                    .repeat => node.data.repeat.child,
+                    else => unreachable,
+                };
+                const min: usize = switch (node.node_type) {
+                    .star, .optional => 0,
+                    .plus => 1,
+                    .repeat => node.data.repeat.bounds.min,
+                    else => unreachable,
+                };
+
+                if (node.node_type == .optional) {
+                    if (pos == target_end) return true;
+                    return self.matchNodeConstrained(child, pos, target_end);
+                }
+
+                const max: ?usize = switch (node.node_type) {
+                    .star, .plus => null,
+                    .repeat => node.data.repeat.bounds.max,
+                    else => unreachable,
+                };
+                return self.matchRepeatedChildConstrained(child, pos, target_end, 0, min, max);
+            },
+            else => return false,
+        }
+    }
+
+    fn matchRepeatedChildConstrained(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, count: usize, min: usize, max: ?usize) bool {
+        if (count >= min and pos == target_end) return true;
+        if (pos == target_end) {
+            var n = count;
+            while (n < min) : (n += 1) {
+                if (!self.matchNodeConstrained(child, pos, target_end)) return false;
+            }
+            return true;
+        }
+        if (pos >= target_end) return false;
+        if (max) |m| if (count >= m) return false;
+
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+        defer self.allocator.free(saved);
+        @memcpy(saved, self.captures);
+
+        var ends = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+        defer ends.deinit(self.allocator);
+        self.collectAllMatches(child, pos, &ends) catch return false;
+
+        for (ends.items) |end| {
+            if (end <= pos or end > target_end) continue;
+            @memcpy(self.captures, saved);
+            if (!self.matchNodeConstrained(child, pos, end)) continue;
+            if (self.matchRepeatedChildConstrained(child, end, target_end, count + 1, min, max)) return true;
+        }
+
+        if (self.hasAlternation(child) and self.hasCapturingGroup(child)) {
+            @memcpy(self.captures, saved);
+            if (self.matchNodeConstrained(child, pos, target_end)) {
+                if (self.matchRepeatedChildConstrained(child, target_end, target_end, count + 1, min, max)) return true;
+            }
+        }
+
+        @memcpy(self.captures, saved);
+        return false;
     }
 
     fn hasQuantifiers(self: *BacktrackEngine, node: *ast.Node) bool {
@@ -474,6 +515,49 @@ pub const BacktrackEngine = struct {
             .repeat => self.hasAlternation(node.data.repeat.child),
             .lookahead => self.hasAlternation(node.data.lookahead.child),
             .lookbehind => self.hasAlternation(node.data.lookbehind.child),
+            else => false,
+        };
+    }
+
+    fn hasRepeatedAlternation(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .star => self.hasAlternation(node.data.star.child) or self.hasRepeatedAlternation(node.data.star.child),
+            .plus => self.hasAlternation(node.data.plus.child) or self.hasRepeatedAlternation(node.data.plus.child),
+            .repeat => self.hasAlternation(node.data.repeat.child) or self.hasRepeatedAlternation(node.data.repeat.child),
+            .optional => self.hasRepeatedAlternation(node.data.optional.child),
+            .concat => self.hasRepeatedAlternation(node.data.concat.left) or self.hasRepeatedAlternation(node.data.concat.right),
+            .alternation => self.hasRepeatedAlternation(node.data.alternation.left) or self.hasRepeatedAlternation(node.data.alternation.right),
+            .group => self.hasRepeatedAlternation(node.data.group.child),
+            .lookahead => self.hasRepeatedAlternation(node.data.lookahead.child),
+            .lookbehind => self.hasRepeatedAlternation(node.data.lookbehind.child),
+            else => false,
+        };
+    }
+
+    fn needsAnchoredRepeatedAlternationRecovery(self: *BacktrackEngine, left: *ast.Node, right: *ast.Node) bool {
+        return self.hasRepeatedAlternation(left) and self.hasCapturingGroup(left) and self.isEndAnchorOnly(right);
+    }
+
+    fn hasCapturingGroup(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .group => node.data.group.capture_index != null or self.hasCapturingGroup(node.data.group.child),
+            .concat => self.hasCapturingGroup(node.data.concat.left) or self.hasCapturingGroup(node.data.concat.right),
+            .alternation => self.hasCapturingGroup(node.data.alternation.left) or self.hasCapturingGroup(node.data.alternation.right),
+            .star => self.hasCapturingGroup(node.data.star.child),
+            .plus => self.hasCapturingGroup(node.data.plus.child),
+            .optional => self.hasCapturingGroup(node.data.optional.child),
+            .repeat => self.hasCapturingGroup(node.data.repeat.child),
+            .lookahead => self.hasCapturingGroup(node.data.lookahead.child),
+            .lookbehind => self.hasCapturingGroup(node.data.lookbehind.child),
+            else => false,
+        };
+    }
+
+    fn isEndAnchorOnly(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .anchor => node.data.anchor == .end_line or node.data.anchor == .end_text,
+            .group => self.isEndAnchorOnly(node.data.group.child),
+            .concat => self.canMatchEmpty(node.data.concat.left) and self.isEndAnchorOnly(node.data.concat.right),
             else => false,
         };
     }
@@ -584,6 +668,11 @@ pub const BacktrackEngine = struct {
                 const right_has_choices = self.hasQuantifiers(c.right) or self.hasAlternation(c.right);
 
                 if (left_has_choices or right_has_choices) {
+                    const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return;
+                    defer self.allocator.free(clean_captures);
+                    @memcpy(clean_captures, self.captures);
+                    const before_len = positions.items.len;
+
                     // Collect all possible left-side endings
                     var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
                     defer left_positions.deinit(self.allocator);
@@ -624,6 +713,24 @@ pub const BacktrackEngine = struct {
 
                         @memcpy(self.captures, saved);
                     }
+                    if (positions.items.len == before_len and !right_has_choices and self.needsAnchoredRepeatedAlternationRecovery(c.left, c.right)) {
+                        var target = self.input.len;
+                        while (target >= pos) {
+                            @memcpy(self.captures, clean_captures);
+                            const screened = self.matchNode(c.right, target) orelse {
+                                if (target == pos) break;
+                                target -= 1;
+                                continue;
+                            };
+                            @memcpy(self.captures, clean_captures);
+                            if (self.matchNodeConstrained(c.left, pos, target)) {
+                                try positions.append(self.allocator, screened);
+                            }
+                            if (target == pos) break;
+                            target -= 1;
+                        }
+                    }
+                    @memcpy(self.captures, clean_captures);
                 } else {
                     // No quantifiers in either side, single match
                     if (self.matchNode(node, pos)) |end| {
@@ -658,8 +765,8 @@ pub const BacktrackEngine = struct {
         }
     }
 
-    fn collectGreedyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
-        // Collect all matches from longest to shortest
+    fn collectGreedyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) anyerror!void {
+        // Collect all matches from longest to shortest.
         var all_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
         defer all_positions.deinit(self.allocator);
 
@@ -673,7 +780,7 @@ pub const BacktrackEngine = struct {
             try all_positions.append(self.allocator, current_pos);
         }
 
-        // Return in reverse order (greedy: longest first)
+        // Return in reverse order (greedy: longest first).
         var i: usize = all_positions.items.len;
         while (i > 0) {
             i -= 1;
@@ -681,7 +788,7 @@ pub const BacktrackEngine = struct {
         }
     }
 
-    fn collectLazyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
+    fn collectLazyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) anyerror!void {
         // Collect all matches from shortest to longest
         try positions.append(self.allocator, pos); // zero matches first
 

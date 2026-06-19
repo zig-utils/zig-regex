@@ -1498,6 +1498,28 @@ test "regression: case-insensitive prefilter (folded first bytes) finds both cas
     try std.testing.expect(!try re.isMatch("public function"));
 }
 
+test "regression: capture-heavy alternation under repeated extension group" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "^([a-z]{2,3})(-(u((-at)+|((-([a-z0-9]{3,8}))+))))*$");
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("da-u-attr"));
+    const match = (try re.find("da-u-attr")) orelse return error.TestExpectedMatch;
+    var mut_match = match;
+    defer mut_match.deinit(allocator);
+    try std.testing.expectEqualStrings("da-u-attr", match.slice);
+}
+
+test "regression: test262 language tag extensions with optional privateuse suffix" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "^((([a-z]{2,3}|[a-z]{5,8})(-([a-z]{4}))?(-([a-z]{2}|[0-9]{3}))?(-([a-z0-9]{5,8}|(?:[0-9][a-z0-9]{3})))*(-((u((-([a-z0-9][a-z](-[a-z0-9]{3,8})*))+|((-([a-z0-9]{3,8}))+(-([a-z0-9][a-z](-[a-z0-9]{3,8})*))*)))|(t((-(([a-z]{2,3}|[a-z]{5,8})(-([a-z]{4}))?(-([a-z]{2}|[0-9]{3}))?(-([a-z0-9]{5,8}|(?:[0-9][a-z0-9]{3})))*)(-([a-z][0-9](-[a-z0-9]{3,8})+))*)|(-([a-z][0-9](-[a-z0-9]{3,8})+))+))|(([0-9]|[a-sv-wy-z])(-[a-z0-9]{2,8})+)))*(-(x(-[a-z0-9]{1,8})+))?))$", .{ .case_insensitive = true });
+    defer re.deinit();
+
+    try std.testing.expect(try re.isMatch("da-u-attr"));
+    try std.testing.expect(try re.isMatch("sl-t-sl-1994-biske-rozaj"));
+    try std.testing.expect(try re.isMatch("en-t-en-emodeng"));
+}
+
 // --- literal-alternation two-byte (Teddy-lite) prefilter ---
 //
 // Literal alternations use a vectorized two-byte-prefix filter to find
