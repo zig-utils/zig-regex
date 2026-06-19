@@ -1732,6 +1732,18 @@ pub const Regex = struct {
     /// whole-buffer SIMD literal scan (one match per line, skip to the next
     /// line), avoiding per-line dispatch; every other pattern falls back to a
     /// reused Matcher's single-pass isMatch per line.
+    /// Whether `req` is rare enough in `input` that prefiltering on it beats
+    /// scanning every line. Multi-byte literals are assumed selective; a single
+    /// byte is checked against an occurrence-density threshold (one SIMD pass).
+    fn requiredLiteralSelective(self: *const Regex, input: []const u8, req: []const u8) bool {
+        _ = self;
+        if (input.len == 0) return false;
+        if (req.len >= 2) return true;
+        // Single byte: only worthwhile when it occurs in well under one-in-eight
+        // bytes (so most lines are skipped).
+        return countByte(input, req[0]) < @max(input.len / 8, 1);
+    }
+
     pub fn countMatchingLines(self: *const Regex, input: []const u8) !usize {
         // Whole-buffer literal fast path: an exact-literal pattern has no anchors,
         // so a line matches iff it contains the literal. Scan for occurrences and
@@ -1753,6 +1765,32 @@ pub const Regex = struct {
                     if (pos > input.len) break;
                 }
                 return count_lines;
+            }
+        }
+        // Required-literal prefilter: every match contains `req`, so only lines
+        // containing it can match. memchr `req` over the whole buffer (SIMD) and
+        // run the matcher only on those candidate lines — the rest are skipped
+        // entirely. A big win for rare-literal patterns (`\w+@\w+`, `\d+\.\d+`,
+        // `fn\s+\w+`). Gated on selectivity so common literals don't add overhead.
+        if (!self.flags.case_insensitive) {
+            if (self.opt_info.required_literal) |req| {
+                if (req.len > 0 and std.mem.indexOfScalar(u8, req, '\n') == null and
+                    self.requiredLiteralSelective(input, req))
+                {
+                    var m = self.matcher();
+                    defer m.deinit();
+                    const pf = LiteralPrefilter.init(input, req);
+                    var count_lines: usize = 0;
+                    var pos: usize = 0;
+                    while (pf.next(input, pos)) |hit| {
+                        const le = std.mem.indexOfScalarPos(u8, input, hit, '\n') orelse input.len;
+                        const ls = if (std.mem.lastIndexOfScalar(u8, input[0..hit], '\n')) |nl| nl + 1 else 0;
+                        if (try m.isMatch(input[ls..le])) count_lines += 1;
+                        pos = le + 1;
+                        if (pos > input.len) break;
+                    }
+                    return count_lines;
+                }
             }
         }
         // DFA-eligible patterns: step the unanchored search DFA over each line

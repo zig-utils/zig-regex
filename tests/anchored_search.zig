@@ -165,6 +165,11 @@ test "countMatchingLines agrees with per-line reference" {
         .{ .pat = "\\w+\\s+\\w+", .in = "a b\nc\nd e f\n" }, // general path
         .{ .pat = "^\\d+$", .in = "12\nx3\n45\n" },
         .{ .pat = "\\bfn\\b", .in = "fn\nxfn\nfn x\n" },
+        // Required-literal prefilter paths (rare literal in each match).
+        .{ .pat = "\\w+@\\w+", .in = "a@b\nno at here\nx@y z\n@bad\ngood@\n" },
+        .{ .pat = "\\d+\\.\\d+", .in = "3.14\nfoo.bar\n1.2.3\nno dot\n.5\n" },
+        .{ .pat = "fn\\s+\\w+", .in = "fn main\nxfn y\nfn\nfn  go\n" },
+        .{ .pat = "\\w+:\\w+", .in = "a:b\nno colon\n:x\ny:\nk:v here\n" },
     };
     for (cases) |c| {
         var re = try Regex.compileWithFlags(allocator, c.pat, .{ .multiline = true });
