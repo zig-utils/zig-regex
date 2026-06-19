@@ -256,6 +256,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_anchored_search_tests = b.addRunArtifact(anchored_search_tests);
 
+    const differential_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/differential_fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_differential_fuzz_tests = b.addRunArtifact(differential_fuzz_tests);
+
     const multiline_dotall_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/multiline_dotall.zig"),
@@ -342,6 +354,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_thread_safety_tests.step);
     test_step.dependOn(&run_string_anchors_tests.step);
     test_step.dependOn(&run_anchored_search_tests.step);
+    test_step.dependOn(&run_differential_fuzz_tests.step);
     test_step.dependOn(&run_multiline_dotall_tests.step);
     test_step.dependOn(&run_named_captures_tests.step);
     test_step.dependOn(&run_lazy_quantifiers_tests.step);
