@@ -164,6 +164,11 @@ pub const Optimizer = struct {
                 info.required_literal = try best.toOwnedSlice(self.allocator);
             } else {
                 best.deinit(self.allocator);
+                // A concatenation breaks on alternation, so an all-alternative
+                // pattern (`fn\s+\w+|\w+\s+fn`) yields no run above. But a literal
+                // common to every branch is still required by every match — find
+                // the longest one so the prefilter can use it.
+                info.required_literal = try alternationCommonLiteral(self.allocator, root);
             }
         }
 
@@ -248,6 +253,80 @@ pub const Optimizer = struct {
             // not a guaranteed literal here: break the current run.
             else => try flushMandatory(allocator, cur, best),
         }
+    }
+
+    /// The longest literal substring required by *every* alternation branch (so
+    /// by every match), or null. Returns null unless `root` is (a group wrapping)
+    /// a top-level alternation whose branches share a common mandatory literal.
+    /// Caller owns the returned slice.
+    fn alternationCommonLiteral(allocator: std.mem.Allocator, root: *ast.Node) !?[]u8 {
+        var node = root;
+        while (node.node_type == .group and node.data.group.mod == null and node.data.group.capture_index == null)
+            node = node.data.group.child;
+        if (node.node_type != .alternation) return null;
+
+        var branches = std.ArrayList(*ast.Node).empty;
+        defer branches.deinit(allocator);
+        try flattenAlternation(allocator, node, &branches);
+
+        // Common substring across each branch's longest mandatory run.
+        var common_lit: ?[]u8 = null;
+        defer if (common_lit) |c| allocator.free(c);
+        for (branches.items) |b| {
+            var cur = std.ArrayList(u8).empty;
+            defer cur.deinit(allocator);
+            var run = std.ArrayList(u8).empty;
+            defer run.deinit(allocator);
+            try collectMandatory(allocator, b, &cur, &run);
+            flushMandatory(allocator, &cur, &run) catch {};
+            if (run.items.len == 0) return null; // a branch has no mandatory literal
+            if (common_lit == null) {
+                common_lit = try allocator.dupe(u8, run.items);
+            } else {
+                // `lcs` points into `common_lit`, so dupe before freeing it.
+                const lcs = longestCommonSubstring(common_lit.?, run.items);
+                const next = try allocator.dupe(u8, lcs);
+                allocator.free(common_lit.?);
+                common_lit = next;
+                if (common_lit.?.len == 0) return null;
+            }
+        }
+        if (common_lit) |c| {
+            if (c.len >= 1) {
+                const out = try allocator.dupe(u8, c);
+                return out;
+            }
+        }
+        return null;
+    }
+
+    fn flattenAlternation(allocator: std.mem.Allocator, node: *ast.Node, out: *std.ArrayList(*ast.Node)) !void {
+        if (node.node_type == .alternation) {
+            try flattenAlternation(allocator, node.data.alternation.left, out);
+            try flattenAlternation(allocator, node.data.alternation.right, out);
+        } else {
+            try out.append(allocator, node);
+        }
+    }
+
+    /// Longest common contiguous substring of `a` and `b` (brute force — literals
+    /// here are short). Returns a slice into `a`.
+    fn longestCommonSubstring(a: []const u8, b: []const u8) []const u8 {
+        var best_start: usize = 0;
+        var best_len: usize = 0;
+        var i: usize = 0;
+        while (i < a.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < b.len) : (j += 1) {
+                var k: usize = 0;
+                while (i + k < a.len and j + k < b.len and a[i + k] == b[j + k]) k += 1;
+                if (k > best_len) {
+                    best_len = k;
+                    best_start = i;
+                }
+            }
+        }
+        return a[best_start .. best_start + best_len];
     }
 
     /// Walk the AST recording features that disqualify the lazy DFA: position
