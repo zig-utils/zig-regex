@@ -1795,6 +1795,75 @@ pub const Regex = struct {
         return count_lines;
     }
 
+    /// `countMatchingLines` parallelized across CPU cores. Splits the buffer at
+    /// newline boundaries into one chunk per worker (each chunk is whole lines,
+    /// so per-line semantics hold and the separating newline is consumed between
+    /// chunks — no double counting), runs the single-threaded path per chunk on a
+    /// thread-local DFA (the `Regex` is read only), and sums. Falls back to serial
+    /// for small inputs, a single core, or any spawn/worker error.
+    ///
+    /// NOTE: for the threads not to contend, the `Regex` must have been compiled
+    /// with a fast thread-safe allocator (e.g. `std.heap.smp_allocator`), not a
+    /// debug/locking allocator — otherwise per-thread DFA allocations serialize.
+    pub fn countMatchingLinesParallel(self: *const Regex, input: []const u8) !usize {
+        const MAX_WORKERS = 16;
+        const MIN_PARALLEL = 1 << 20; // 1 MiB
+        const cpu = std.Thread.getCpuCount() catch 1;
+        var workers: usize = @min(@min(cpu, MAX_WORKERS), (input.len / MIN_PARALLEL) + 1);
+        if (workers <= 1) return self.countMatchingLines(input);
+
+        var starts: [MAX_WORKERS]usize = undefined;
+        var ends: [MAX_WORKERS]usize = undefined;
+        starts[0] = 0;
+        var made: usize = 0;
+        var w: usize = 0;
+        while (w < workers) : (w += 1) {
+            if (w == workers - 1) {
+                ends[w] = input.len;
+            } else {
+                const approx = (input.len * (w + 1)) / workers;
+                ends[w] = std.mem.indexOfScalarPos(u8, input, approx, '\n') orelse input.len;
+            }
+            made = w + 1;
+            if (ends[w] >= input.len) break;
+            starts[w + 1] = ends[w] + 1;
+        }
+        workers = made;
+        if (workers <= 1) return self.countMatchingLines(input);
+
+        const Worker = struct {
+            re: *const Regex,
+            chunk: []const u8,
+            result: usize = 0,
+            err: bool = false,
+            fn run(ctx: *@This()) void {
+                ctx.result = ctx.re.countMatchingLines(ctx.chunk) catch {
+                    ctx.err = true;
+                    return;
+                };
+            }
+        };
+        var ctxs: [MAX_WORKERS]Worker = undefined;
+        var threads: [MAX_WORKERS]?std.Thread = undefined;
+        for (&threads) |*thread| thread.* = null;
+        var i: usize = 0;
+        while (i < workers) : (i += 1) ctxs[i] = .{ .re = self, .chunk = input[starts[i]..ends[i]] };
+        i = 1;
+        while (i < workers) : (i += 1) threads[i] = std.Thread.spawn(.{}, Worker.run, .{&ctxs[i]}) catch null;
+        Worker.run(&ctxs[0]);
+        var any_err = ctxs[0].err;
+        i = 1;
+        while (i < workers) : (i += 1) {
+            if (threads[i]) |t| t.join() else Worker.run(&ctxs[i]);
+            any_err = any_err or ctxs[i].err;
+        }
+        if (any_err) return self.countMatchingLines(input);
+        var total: usize = 0;
+        i = 0;
+        while (i < workers) : (i += 1) total += ctxs[i].result;
+        return total;
+    }
+
     fn countInner(self: *const Regex, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) !usize {
         var n: usize = 0;
         var pos: usize = 0;

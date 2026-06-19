@@ -22,7 +22,10 @@ const usage_text =
 ;
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    // Release-grade thread-safe allocator: `init.gpa` is a debug/locking
+    // allocator that would serialize the parallel matcher's per-thread DFA
+    // allocations (and slow single-threaded matching too).
+    const allocator = std.heap.smp_allocator;
     const arena = init.arena.allocator();
     const io = init.io;
 
@@ -99,11 +102,11 @@ pub fn main(init: std.process.Init) !void {
     defer if (stdin_alloc) |buf| allocator.free(buf);
 
     const input: []const u8 = if (input_str) |s| s else blk: {
-        var stdin_read_buf: [4096]u8 = undefined;
+        var stdin_read_buf: [64 * 1024]u8 = undefined;
         var reader = Io.File.stdin().reader(io, &stdin_read_buf);
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(allocator);
-        var chunk: [4096]u8 = undefined;
+        var chunk: [64 * 1024]u8 = undefined;
         while (true) {
             const n = try reader.interface.readSliceShort(&chunk);
             if (n == 0) break;
@@ -126,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
     if (line_count_only) {
         // Count matching lines (the `grep -c` workload). Uses the whole-buffer
         // literal fast path when applicable, else single-pass isMatch per line.
-        const n = re.countMatchingLines(input) catch |err| {
+        const n = re.countMatchingLinesParallel(input) catch |err| {
             try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
             try stderr.flush();
             std.process.exit(1);

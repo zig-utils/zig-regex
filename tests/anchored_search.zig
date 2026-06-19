@@ -183,6 +183,30 @@ test "countMatchingLines agrees with per-line reference" {
     }
 }
 
+test "countMatchingLinesParallel equals serial" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const lines = [_][]const u8{ "fn main", "  pub fn x", "// comment", "word here too", "", "a b c", "nope", "fn fn fn" };
+    var i: usize = 0;
+    while (i < 60000) : (i += 1) {
+        try buf.appendSlice(allocator, lines[i % lines.len]);
+        try buf.append(allocator, '\n');
+    }
+    const input = buf.items;
+    const pats = [_][]const u8{ "fn", "\\w+\\s+\\w+", "fn\\s+\\w+|\\w+\\s+fn", "^fn", "\\bfn\\b", "\\d+" };
+    for (pats) |p| {
+        var re = try Regex.compileWithFlags(allocator, p, .{ .multiline = true });
+        defer re.deinit();
+        const serial = try re.countMatchingLines(input);
+        const parallel = try re.countMatchingLinesParallel(input);
+        if (serial != parallel) {
+            std.debug.print("parallel mismatch pat=\"{s}\": serial={d} parallel={d}\n", .{ p, serial, parallel });
+            return error.ParallelMismatch;
+        }
+    }
+}
+
 test "anchored search invariants: case-insensitive" {
     const ci_patterns = [_][]const u8{ "^fn", "FN$", "^Pub\\s+Fn$", "^\\w+$" };
     const ci_inputs = [_][]const u8{ "FN\nfn\nFn", "PUB FN\npub fn", "Hello\nWORLD" };
