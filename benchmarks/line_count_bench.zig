@@ -103,10 +103,11 @@ pub fn main(init: std.process.Init) !void {
     while (k < iters) : (k += 1) sink +%= try re.countMatchingLines(input);
     const serial_ns = monotonicNs() - t0;
 
-    // Parallel.
+    // Parallel via the library (shared pre-built DFA across threads).
+    _ = parallelCount; // (bench-local chunking kept for reference)
     t0 = monotonicNs();
     k = 0;
-    while (k < iters) : (k += 1) sink +%= parallelCount(&re, input, ncpu);
+    while (k < iters) : (k += 1) sink +%= try re.countMatchingLinesParallel(input);
     const par_ns = monotonicNs() - t0;
 
     const ser_ms = @as(f64, @floatFromInt(serial_ns)) / @as(f64, @floatFromInt(iters)) / 1e6;

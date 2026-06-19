@@ -1831,23 +1831,50 @@ pub const Regex = struct {
         workers = made;
         if (workers <= 1) return self.countMatchingLines(input);
 
+        // Build ONE fully-materialized search DFA up front and share it read-only
+        // across workers, so no thread rebuilds it per chunk (the alternation's
+        // cost). Only for non-literal, DFA-eligible, anchor-free patterns; literal
+        // and anchored chunks take the per-chunk path (literal scan / per-line).
+        var shared_dfa: ?dfa.LazyDfa = null;
+        defer if (shared_dfa) |*d| d.deinit();
+        if (self.opt_info.exact_literal == null and self.dfaEligible()) {
+            shared_dfa = dfa.LazyDfa.initSearch(self.allocator, @constCast(&self.nfa), self.flags) catch null;
+            if (shared_dfa) |*dd| {
+                if (dd.anchored) {
+                    dd.deinit();
+                    shared_dfa = null;
+                } else if (dd.buildFull()) |_| {
+                    // fully built — share read-only
+                } else |_| {
+                    dd.deinit();
+                    shared_dfa = null;
+                }
+            }
+        }
+
         const Worker = struct {
             re: *const Regex,
+            shared: ?*const dfa.LazyDfa,
             chunk: []const u8,
             result: usize = 0,
             err: bool = false,
             fn run(ctx: *@This()) void {
-                ctx.result = ctx.re.countMatchingLines(ctx.chunk) catch {
-                    ctx.err = true;
-                    return;
-                };
+                if (ctx.shared) |d| {
+                    ctx.result = d.countMatchingLinesShared(ctx.chunk);
+                } else {
+                    ctx.result = ctx.re.countMatchingLines(ctx.chunk) catch {
+                        ctx.err = true;
+                        return;
+                    };
+                }
             }
         };
+        const shared_ptr: ?*const dfa.LazyDfa = if (shared_dfa) |*d| d else null;
         var ctxs: [MAX_WORKERS]Worker = undefined;
         var threads: [MAX_WORKERS]?std.Thread = undefined;
         for (&threads) |*thread| thread.* = null;
         var i: usize = 0;
-        while (i < workers) : (i += 1) ctxs[i] = .{ .re = self, .chunk = input[starts[i]..ends[i]] };
+        while (i < workers) : (i += 1) ctxs[i] = .{ .re = self, .shared = shared_ptr, .chunk = input[starts[i]..ends[i]] };
         i = 1;
         while (i < workers) : (i += 1) threads[i] = std.Thread.spawn(.{}, Worker.run, .{&ctxs[i]}) catch null;
         Worker.run(&ctxs[0]);
