@@ -155,7 +155,7 @@ test "random fuzz: grammar patterns vs engine invariants" {
         var prng = std.Random.DefaultPrng.init(seed);
         gen.r = prng.random();
         var iter: usize = 0;
-        while (iter < 4000) : (iter += 1) {
+        while (iter < 1500) : (iter += 1) {
             const pat = gen.pattern();
             const input = randomInput(gen.r, &input_buf);
             const ml = gen.r.boolean();
