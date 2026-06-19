@@ -126,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
     if (line_count_only) {
         // Count matching lines (the `grep -c` workload). Uses the whole-buffer
         // literal fast path when applicable, else single-pass isMatch per line.
-        const n = re.countMatchingLinesParallel(input) catch |err| {
+        const n = re.countMatchingLines(input) catch |err| {
             try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
             try stderr.flush();
             std.process.exit(1);
