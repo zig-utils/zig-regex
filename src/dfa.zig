@@ -62,9 +62,13 @@ pub const LazyDfa = struct {
     // Flat tables indexed by DFA state for cache-friendly stepping:
     //   trans[state * ALPHA + sym]  -> UNCOMPUTED / DEAD / next state
     //   acc[state * ALPHA + sym]    -> accepting at this position (with this sym)?
+    //   acc_state[state]            -> stored set accepts (sym-independent; valid
+    //                                  only for anchor-free patterns, where the
+    //                                  hot loop reads it instead of the wide acc)
     //   keys[state]                 -> owned (NFA set | flag byte) bitset / map key
     trans: std.ArrayList(i32),
     acc: std.ArrayList(bool),
+    acc_state: std.ArrayList(bool),
     keys: std.ArrayList([]u8),
     map: std.StringHashMapUnmanaged(i32), // key bytes -> dfa index
 
@@ -115,6 +119,7 @@ pub const LazyDfa = struct {
             .start_closure = try allocator.alloc(u8, word_count),
             .trans = .empty,
             .acc = .empty,
+            .acc_state = .empty,
             .keys = .empty,
             .map = .{},
             .start_cache = .{ UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED },
@@ -143,6 +148,7 @@ pub const LazyDfa = struct {
         self.keys.deinit(self.allocator);
         self.trans.deinit(self.allocator);
         self.acc.deinit(self.allocator);
+        self.acc_state.deinit(self.allocator);
         self.map.deinit(self.allocator);
         self.allocator.free(self.start_closure);
         self.allocator.free(self.move_buf);
@@ -271,6 +277,7 @@ pub const LazyDfa = struct {
         const idx: i32 = @intCast(self.keys.items.len);
         try self.trans.appendNTimes(self.allocator, UNCOMPUTED, ALPHA);
         try self.acc.appendNTimes(self.allocator, false, ALPHA);
+        try self.acc_state.append(self.allocator, self.hasAccepting(set));
         try self.keys.append(self.allocator, owned);
         try self.map.put(self.allocator, owned, idx);
         return idx;
@@ -365,9 +372,11 @@ pub const LazyDfa = struct {
     /// reporting where the scan stopped. Hot loop caches the flat slices and
     /// re-fetches only when a transition is computed (which may grow them).
     pub fn longestMatchFrom(self: *LazyDfa, input: []const u8, start: usize) Error!Scan {
+        const anchored = self.anchored;
         var s: i32 = try self.getStart(self.startFlags(input, start));
         var trans = self.trans.items;
         var acc = self.acc.items;
+        var acc_state = self.acc_state.items;
         var last: ?usize = null;
         var p = start;
         while (true) {
@@ -378,8 +387,12 @@ pub const LazyDfa = struct {
                 t = try self.computeStep(s, sym);
                 trans = self.trans.items; // re-fetch after possible realloc
                 acc = self.acc.items;
+                acc_state = self.acc_state.items;
             }
-            if (acc[@as(usize, @intCast(s)) * ALPHA + sym]) last = p;
+            // Anchor-free patterns accept independently of the byte, so read the
+            // compact per-state flag instead of the wide per-(state,byte) table.
+            const accepting = if (anchored) acc[row] else acc_state[@intCast(s)];
+            if (accepting) last = p;
             if (sym == EOF) break;
             if (t == DEAD) break;
             s = t;
@@ -394,9 +407,11 @@ pub const LazyDfa = struct {
     /// proves a match exists. O(n) regardless of match sparsity.
     pub fn anyMatch(self: *LazyDfa, input: []const u8) Error!bool {
         std.debug.assert(self.unanchored);
+        const anchored = self.anchored;
         var s: i32 = try self.getStart(self.startFlags(input, 0));
         var trans = self.trans.items;
         var acc = self.acc.items;
+        var acc_state = self.acc_state.items;
         var p: usize = 0;
         while (true) {
             const sym: usize = if (p < input.len) input[p] else EOF;
@@ -406,8 +421,10 @@ pub const LazyDfa = struct {
                 t = try self.computeStep(s, sym);
                 trans = self.trans.items;
                 acc = self.acc.items;
+                acc_state = self.acc_state.items;
             }
-            if (acc[@as(usize, @intCast(s)) * ALPHA + sym]) return true;
+            const accepting = if (anchored) acc[row] else acc_state[@intCast(s)];
+            if (accepting) return true;
             if (sym == EOF) return false;
             if (t == DEAD) return false; // only reachable in anchored mode
             s = t;
