@@ -552,6 +552,18 @@ pub const Regex = struct {
         return s;
     }
 
+    /// Whether the byte-scanning `repeat_atom` fast paths may run for this
+    /// pattern. They handle the unanchored case, leading `^` (anchored_start),
+    /// and `^…$` (both), but NOT a trailing-`$`-only pattern — whose unanchored
+    /// scan would report a match that ignores the `$`. Multiline patterns whose
+    /// assertions span line boundaries are also excluded (the per-run scan can't
+    /// evaluate `^`/`$` per line).
+    fn repeatAtomFastPathOk(self: *const Regex) bool {
+        if (self.flags.multiline and self.opt_info.has_assertions) return false;
+        if (self.opt_info.anchored_end and !self.opt_info.anchored_start) return false;
+        return true;
+    }
+
     /// Next start to try after a failed DFA match at `scan`, where `stop` is the
     /// position the DFA halted at. When the pattern begins with an unbounded
     /// greedy class, the DFA dies exactly at that class's run end, so we can jump
@@ -1004,8 +1016,11 @@ pub const Regex = struct {
             return literalSearch(input, lit, 0) != null;
         }
         // Repeated-atom fast path: a match exists iff some run of `table` bytes
-        // reaches the minimum length.
-        if (self.opt_info.repeat_atom) |ra| if (!(self.flags.multiline and self.opt_info.has_assertions)) {
+        // reaches the minimum length. Only taken when the path can honor any
+        // anchors: a trailing-`$`-only pattern (anchored_end without
+        // anchored_start) has no branch here, so it falls through to the general
+        // engine rather than the anchor-blind unanchored scan below.
+        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
@@ -1028,7 +1043,7 @@ pub const Regex = struct {
         // Repeated Unicode-property atom fast path. Keep `/i` on the general
         // path for now: complemented properties under ignore-case have
         // spec-specific folding semantics.
-        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and !(self.flags.multiline and self.opt_info.has_assertions)) {
+        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and self.repeatAtomFastPathOk()) {
             const max = ura.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
                 const run = unicodeRepeatRunAt(input, ura.property, 0, max);
@@ -1194,7 +1209,7 @@ pub const Regex = struct {
             return null;
         }
         // Repeated-atom fast path: leftmost maximal run of `table` bytes.
-        if (self.opt_info.repeat_atom) |ra| if (!(self.flags.multiline and self.opt_info.has_assertions)) {
+        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
@@ -1223,7 +1238,7 @@ pub const Regex = struct {
             return null;
         };
         // Repeated Unicode-property atom fast path.
-        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and !(self.flags.multiline and self.opt_info.has_assertions)) {
+        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and self.repeatAtomFastPathOk()) {
             const max = ura.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
                 const run = unicodeRepeatRunAt(input, ura.property, 0, max);
@@ -1482,10 +1497,23 @@ pub const Regex = struct {
         }
         // Repeated-atom fast path: each leftmost maximal run of `table` bytes
         // (capped at max) is one non-overlapping match. No NFA, no per-match
-        // capture allocation.
-        if (self.opt_info.repeat_atom) |ra| {
+        // capture allocation. Honors anchors (see repeatAtomFastPathOk); an
+        // anchored pattern yields at most one match.
+        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
+                const run = repeatRunAt(input, table, 0, max);
+                if (run == input.len and repeatBoundsOk(run, ra.min, max))
+                    try matches.append(allocator, Match{ .slice = input[0..run], .start = 0, .end = run });
+                return matches.toOwnedSlice(allocator);
+            }
+            if (self.opt_info.anchored_start) {
+                const run = repeatRunAt(input, table, 0, max);
+                if (repeatBoundsOk(run, ra.min, max))
+                    try matches.append(allocator, Match{ .slice = input[0..run], .start = 0, .end = run });
+                return matches.toOwnedSlice(allocator);
+            }
             while (pos < input.len) {
                 while (pos < input.len and !table[input[pos]]) pos += 1;
                 if (pos >= input.len) break;
@@ -1497,7 +1525,7 @@ pub const Regex = struct {
                 }
             }
             return matches.toOwnedSlice(allocator);
-        }
+        };
         // Literal-alternation fast path: each leftmost source-order literal match.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
@@ -1696,10 +1724,19 @@ pub const Regex = struct {
             }
             return n;
         }
-        // Repeated-atom: count maximal runs of >= min table bytes.
-        if (self.opt_info.repeat_atom) |ra| {
+        // Repeated-atom: count maximal runs of >= min table bytes. Honors anchors
+        // (see repeatAtomFastPathOk); anchored patterns yield at most one match.
+        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
+                const run = repeatRunAt(input, table, 0, max);
+                return if (run == input.len and repeatBoundsOk(run, ra.min, max)) 1 else 0;
+            }
+            if (self.opt_info.anchored_start) {
+                const run = repeatRunAt(input, table, 0, max);
+                return if (repeatBoundsOk(run, ra.min, max)) 1 else 0;
+            }
             while (pos < input.len) {
                 while (pos < input.len and !table[input[pos]]) pos += 1;
                 if (pos >= input.len) break;
@@ -1708,7 +1745,7 @@ pub const Regex = struct {
                 if (run >= ra.min) n += 1;
             }
             return n;
-        }
+        };
         // Literal-alternation: leftmost source-order literal at each candidate.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
