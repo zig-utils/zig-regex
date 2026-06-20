@@ -1789,7 +1789,7 @@ pub const Parser = struct {
         return ast.Node.createClassSet(self.allocator, set, common.Span.init(open, i));
     }
 
-    fn parseUnicodeClassAtom(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
+    fn parseUnicodeClassAtom(self: *Parser, input: []const u8, i: *usize, unicode_strict: bool) RegexError!ast.Node.ClassItem {
         if (i.* < input.len and input[i.*] == '[' and i.* + 1 < input.len and input[i.* + 1] == ':') {
             var end = i.* + 2;
             while (end + 1 < input.len and !(input[end] == ':' and input[end + 1] == ']')) : (end += 1) {}
@@ -1811,7 +1811,7 @@ pub const Parser = struct {
             }
         }
 
-        const cp = (try readClassCp(input, i, true)) orelse return RegexError.InvalidCharacterClass;
+        const cp = (try readClassCp(input, i, unicode_strict)) orelse return RegexError.InvalidCharacterClass;
         return .{ .range = .{ .lo = cp, .hi = cp } };
     }
 
@@ -1833,12 +1833,12 @@ pub const Parser = struct {
         }
 
         while (i < input.len and input[i] != ']') {
-            const item = try self.parseUnicodeClassAtom(input, &i);
+            const item = try self.parseUnicodeClassAtom(input, &i, self.unicode or self.unicode_sets);
             if (i < input.len and input[i] == '-' and i + 1 < input.len and input[i + 1] != ']') {
                 switch (item) {
                     .range => |lo| if (lo.lo == lo.hi) {
                         i += 1;
-                        const hi_item = try self.parseUnicodeClassAtom(input, &i);
+                        const hi_item = try self.parseUnicodeClassAtom(input, &i, self.unicode or self.unicode_sets);
                         switch (hi_item) {
                             .range => |hi| if (hi.lo == hi.hi) {
                                 if (hi.lo < lo.lo) return RegexError.InvalidCharacterClass;
@@ -1886,12 +1886,28 @@ pub const Parser = struct {
         return false;
     }
 
+    fn currentClassNeedsCodepoints(self: *Parser) bool {
+        const input = self.lexer.input;
+        var i = self.current_token.span.start + 1;
+        while (i < input.len) : (i += 1) {
+            if (input[i] == ']') return false;
+            if (input[i] >= 0x80) return true;
+            if (input[i] == '\\' and i + 1 < input.len) {
+                const e = input[i + 1];
+                if (e == 'u' or e == 'x') return true;
+                i += 1;
+            }
+        }
+        return false;
+    }
+
     fn parseCharClass(self: *Parser) !*ast.Node {
         // With the `v` flag, classes use set notation; parse from the raw input
         // (the byte-token stream can't represent code-point operands/operators).
         if (self.unicode_sets) return self.parseClassSetV();
         if (self.unicode) return self.parseUnicodeCharClass();
         if (self.currentClassContainsPropertyEscape()) return self.parseUnicodeCharClass();
+        if (self.currentClassNeedsCodepoints()) return self.parseUnicodeCharClass();
         const start = self.current_token.span.start;
         try self.advance(); // consume [
 
