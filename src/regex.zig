@@ -1899,8 +1899,12 @@ pub const Regex = struct {
                 if (req.len > 0 and std.mem.indexOfScalar(u8, req, '\n') == null and
                     self.requiredLiteralSelective(input, req))
                 {
-                    var m = self.matcher();
-                    defer m.deinit();
+                    // Per-candidate verification reuses one search DFA for the
+                    // whole scan: the passed-in one (a `Matcher`'s, in grep loops)
+                    // or a single throwaway built here — never one per candidate.
+                    var tmp_dfa: ?dfa.LazyDfa = null;
+                    defer if (tmp_dfa) |*t| t.deinit();
+                    const sdfa = reuse_search_dfa orelse (if (self.dfaEligible()) self.obtainSearchDfa(null, &tmp_dfa) else null);
                     // If the bare literal is itself a complete match — no anchors
                     // or zero-width assertions constrain where it may sit — then
                     // every line containing it matches, so the per-candidate
@@ -1908,13 +1912,13 @@ pub const Regex = struct {
                     // the literal). Verify once by matching the literal alone.
                     const lit_sufficient = !self.opt_info.has_assertions and
                         !self.opt_info.anchored_start and !self.opt_info.anchored_end and
-                        (m.isMatch(req) catch false);
+                        (self.isMatchInner(req, null, sdfa) catch false);
                     const pf = LiteralPrefilter.init(input, req);
                     var pos: usize = 0;
                     while (pf.next(input, pos)) |hit| {
                         const le = std.mem.indexOfScalarPos(u8, input, hit, '\n') orelse input.len;
                         const ls = if (std.mem.lastIndexOfScalar(u8, input[0..hit], '\n')) |nl| nl + 1 else 0;
-                        if (lit_sufficient or try m.isMatch(input[ls..le])) try emit(ctx, ls, le);
+                        if (lit_sufficient or try self.isMatchInner(input[ls..le], null, sdfa)) try emit(ctx, ls, le);
                         pos = le + 1;
                         if (pos > input.len) break;
                     }
