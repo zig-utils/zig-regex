@@ -148,25 +148,26 @@ const Worker = struct {
     fn matchFile(self: *Worker, m: *Regex.Matcher, buf: *std.ArrayList(u8), path: []const u8) !void {
         var file = Io.Dir.cwd().openFile(self.io, path, .{ .allow_directory = false }) catch return;
         defer file.close(self.io);
-        const st = file.stat(self.io) catch return;
-        const size: usize = @intCast(st.size);
-        if (size == 0) return;
 
         var mapped: ?MappedFile = null;
         defer if (mapped) |mm| {
             if (mm.len != 0) std.posix.munmap(mm);
         };
-        const data: []const u8 = if (size > MMAP_THRESHOLD) blk: {
+        // Read up to the threshold into the reused buffer with no prior `stat` —
+        // the common case (a small source file) is one read and no extra syscall.
+        // Only if the read fills the buffer might the file be large, in which case
+        // fall back to a `stat`-sized mmap (amortized over the big scan).
+        buf.clearRetainingCapacity();
+        buf.ensureTotalCapacity(self.allocator, MMAP_THRESHOLD) catch return;
+        buf.items.len = MMAP_THRESHOLD;
+        const first = file.readPositionalAll(self.io, buf.items[0..MMAP_THRESHOLD], 0) catch return;
+        const data: []const u8 = if (first < MMAP_THRESHOLD) buf.items[0..first] else blk: {
+            const st = file.stat(self.io) catch return;
+            const size: usize = @intCast(st.size);
             const mm = std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0) catch return;
             std.posix.madvise(mm.ptr, mm.len, std.posix.MADV.SEQUENTIAL) catch {};
             mapped = mm;
             break :blk mm;
-        } else blk: {
-            buf.clearRetainingCapacity();
-            buf.ensureTotalCapacity(self.allocator, size) catch return;
-            buf.items.len = size;
-            const n = file.readPositionalAll(self.io, buf.items[0..size], 0) catch return;
-            break :blk buf.items[0..n];
         };
         if (data.len == 0) return;
         // Binary detection: NUL in the first 1 KiB (binaries carry NUL in their
