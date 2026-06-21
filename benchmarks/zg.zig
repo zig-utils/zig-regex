@@ -169,9 +169,10 @@ const Worker = struct {
             break :blk buf.items[0..n];
         };
         if (data.len == 0) return;
-        // Binary detection: NUL in the first 8 KiB (close enough to ripgrep's
-        // heuristic for the benchmark corpus).
-        const probe = data[0..@min(data.len, 8 * 1024)];
+        // Binary detection: NUL in the first 1 KiB (binaries carry NUL in their
+        // header; a small window avoids re-scanning most of every small text
+        // file, which is then scanned again by the matcher).
+        const probe = data[0..@min(data.len, 1024)];
         if (std.mem.indexOfScalar(u8, probe, 0) != null) return;
 
         if (self.opts.count_only) {
