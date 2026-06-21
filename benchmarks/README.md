@@ -1,5 +1,29 @@
 # Benchmarks
 
+## grep throughput vs ripgrep (issue #10)
+
+`zg` (`benchmarks/zg.zig`, built by `zig build` to `zig-out/bin/zg`) is a minimal
+ripgrep-style grep built on the library — parallel directory walk + per-CPU
+matcher pool — used to reproduce the [issue #10](https://github.com/zig-utils/zig-regex/issues/10)
+benchmarks head to head against `rg`.
+
+```sh
+zig build                                   # builds zig-out/bin/zg
+git clone --depth 1 https://github.com/ziglang/zig /tmp/zig_corpus
+find /tmp/zig_corpus -name '*.zig' -exec cat {} + > /tmp/cat_zig.txt
+
+./benchmarks/rgbench.sh  /tmp/cat_zig.txt   # single large file (pure engine throughput)
+./benchmarks/rgbench.sh  /tmp/zig_corpus    # multi-file corpus (I/O + walker bound)
+./benchmarks/countbench.sh /tmp/cat_zig.txt # same patterns, -c count mode
+./benchmarks/ucpu.sh     /tmp/cat_zig.txt   # user-CPU variant (load-independent)
+```
+
+The harnesses need `hyperfine`, `python3`, and `rg` (path set in the scripts). The
+single-large-file numbers are the honest engine comparison — both tools are
+single-threaded on one file. zig-regex wins or matches `rg` on every pattern in
+the issue's set there; the multi-file corpus is ~parity and I/O/walker-bound (a
+pure-I/O probe is ~1.05× rg).
+
 ## findAll throughput vs the Rust `regex` crate
 
 Mirrors the methodology from [issue #10](https://github.com/zig-utils/zig-regex/issues/10):
