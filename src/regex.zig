@@ -1891,42 +1891,33 @@ pub const Regex = struct {
                 }
             }
         }
-        // DFA-eligible patterns: step the unanchored search DFA over each line
-        // directly, skipping the per-line isMatchInner fast-path dispatch. On a
-        // DFA overflow mid-scan, fall through to the general per-line path.
+        // DFA-eligible patterns: step the search DFA over each line in a single
+        // whole-buffer pass, skipping the per-line isMatchInner fast-path
+        // dispatch. Anchor-free patterns use the plain line DFA; assertion-bearing
+        // patterns (`^…$`, `…$`, `\b…`) use the fused anchored variant (each line
+        // matched as standalone text) rather than dispatching `anyMatch` per line.
+        // `resume_from` lets a rare mid-scan DFA overflow hand off to the general
+        // matcher *from the unfinished line* — lines already emitted aren't redone.
+        var resume_from: usize = 0;
         if (self.dfaEligible()) {
             var tmp: ?dfa.LazyDfa = null;
             defer if (tmp) |*t| t.deinit();
             if (self.obtainSearchDfa(null, &tmp)) |d| {
-                // Anchor-free patterns can't cross a newline, so one whole-buffer
-                // pass (resetting per line) avoids the per-line call overhead.
-                if (!d.anchored) {
-                    if (d.forMatchingLines(input, ctx, emit)) |_| {
-                        return;
-                    } else |err| switch (err) {
-                        error.DfaOverflow => {}, // fall through
-                        else => |e| return e,
-                    }
-                }
-                var ls: usize = 0;
-                var overflowed = false;
-                while (true) {
-                    const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
-                    const hit = d.anyMatch(input[ls..le]) catch {
-                        overflowed = true;
-                        break;
-                    };
-                    if (hit) try emit(ctx, ls, le);
-                    if (le == input.len) break;
-                    ls = le + 1;
-                }
-                if (!overflowed) return;
+                const scan_res = if (!d.anchored)
+                    d.forMatchingLines(input, ctx, emit)
+                else
+                    d.forMatchingLinesAnchored(input, ctx, emit);
+                if (scan_res) |maybe_resume| {
+                    if (maybe_resume) |r| {
+                        resume_from = r; // overflowed; continue below from line `r`
+                    } else return;
+                } else |err| return err;
             }
         }
         var m = self.matcher();
         defer m.deinit();
-        var ls: usize = 0;
-        while (true) {
+        var ls: usize = resume_from;
+        while (ls <= input.len) {
             const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
             if (try m.isMatch(input[ls..le])) try emit(ctx, ls, le);
             if (le == input.len) break;

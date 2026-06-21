@@ -524,69 +524,153 @@ pub const LazyDfa = struct {
 
     pub fn countMatchingLines(self: *LazyDfa, input: []const u8) Error!usize {
         var count: usize = 0;
-        try self.forMatchingLines(input, &count, struct {
+        const resume_at = try self.forMatchingLines(input, &count, struct {
             fn f(c: *usize, ls: usize, le: usize) Error!void {
                 _ = ls;
                 _ = le;
                 c.* += 1;
             }
         }.f);
+        // Standalone count is atomic: a mid-scan overflow can't be resumed here,
+        // so surface it (the partial count is discarded by the caller).
+        if (resume_at != null) return Error.DfaOverflow;
         return count;
+    }
+
+    /// Match a single line `[ls, le)` against an anchor-free unanchored search
+    /// DFA. Inlined into the fused line loop; returns whether the line matched.
+    inline fn lineMatchesUnanchored(
+        self: *LazyDfa,
+        input: []const u8,
+        ls: usize,
+        le: usize,
+        start_s: usize,
+        start_accepts: bool,
+    ) Error!bool {
+        if (start_accepts) return true;
+        var trans = self.trans.items;
+        var s = start_s;
+        var p = ls;
+        while (p < le) {
+            // Accelerated state: skip the whole self-loop run at once.
+            if (self.accel_kind.items[s] == 2) {
+                const set = &self.accel_set.items[s];
+                while (p < le and set[input[p]]) p += 1;
+                if (p >= le) break;
+            }
+            const t = trans[s * ALPHA + input[p]];
+            if (t == UNCOMPUTED) {
+                _ = try self.computeStep(@intCast(s), input[p]);
+                trans = self.trans.items;
+                continue; // re-read the now-computed cell
+            }
+            // unanchored search never produces DEAD (start is re-seeded).
+            const next: usize = @intCast(t & STATE_MASK);
+            p += 1;
+            if (t >= ACCEPT_BIT) return true;
+            // Lazily promote a state the moment it's seen self-looping, so
+            // non-self-loop states never pay the materialization cost.
+            if (next == s and self.accel_kind.items[s] == 0) {
+                try self.prepAccel(s);
+                trans = self.trans.items;
+            }
+            s = next;
+        }
+        return false;
     }
 
     /// Like `countMatchingLines`, but invokes `emit(ctx, line_start, line_end)`
     /// for every matching line instead of counting — the shared engine behind
     /// both the `-c` count path and the print path. `[line_start, line_end)`
-    /// excludes the trailing newline.
+    /// excludes the trailing newline. Returns `null` on a complete pass, or the
+    /// start offset of the line at which the DFA overflowed (that line and all
+    /// after it are *not* reported) so the caller can resume with the general
+    /// matcher without double-reporting the lines already emitted.
     pub fn forMatchingLines(
         self: *LazyDfa,
         input: []const u8,
         ctx: anytype,
         comptime emit: anytype,
-    ) !void {
+    ) !?usize {
         std.debug.assert(self.unanchored and !self.anchored);
-        const start_s: usize = @intCast(try self.getStart(0));
+        const start_i = self.getStart(0) catch |e| switch (e) {
+            error.DfaOverflow => return @as(?usize, 0),
+            else => return e,
+        };
+        const start_s: usize = @intCast(start_i);
         const start_accepts = self.acc_state.items[start_s]; // pattern matches empty
-        var trans = self.trans.items;
         var ls: usize = 0;
         while (true) {
             const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
-            if (start_accepts) {
-                try emit(ctx, ls, le);
-            } else {
-                var s = start_s;
-                var p = ls;
-                while (p < le) {
-                    // Accelerated state: skip the whole self-loop run at once.
-                    if (self.accel_kind.items[s] == 2) {
-                        const set = &self.accel_set.items[s];
-                        while (p < le and set[input[p]]) p += 1;
-                        if (p >= le) break;
-                    }
-                    const t = trans[s * ALPHA + input[p]];
-                    if (t == UNCOMPUTED) {
-                        _ = try self.computeStep(@intCast(s), input[p]);
-                        trans = self.trans.items;
-                        continue; // re-read the now-computed cell
-                    }
-                    // unanchored search never produces DEAD (start is re-seeded).
-                    const next: usize = @intCast(t & STATE_MASK);
-                    p += 1;
-                    if (t >= ACCEPT_BIT) {
-                        try emit(ctx, ls, le);
-                        break;
-                    }
-                    // Lazily promote a state the moment it's seen self-looping, so
-                    // non-self-loop states never pay the materialization cost.
-                    if (next == s and self.accel_kind.items[s] == 0) {
-                        try self.prepAccel(s);
-                        trans = self.trans.items;
-                    }
-                    s = next;
-                }
-            }
+            const matched = self.lineMatchesUnanchored(input, ls, le, start_s, start_accepts) catch |e| switch (e) {
+                error.DfaOverflow => return @as(?usize, ls),
+                else => return e,
+            };
+            if (matched) try emit(ctx, ls, le);
             if (le == input.len) break;
             ls = le + 1;
         }
+        return null;
+    }
+
+    /// Match a single line `[ls, le)` against an assertion-bearing (anchored)
+    /// DFA, treating the line as standalone text. Inlined into the fused loop.
+    inline fn lineMatchesAnchored(
+        self: *LazyDfa,
+        input: []const u8,
+        ls: usize,
+        le: usize,
+        start_s: i32,
+    ) Error!bool {
+        var trans = self.trans.items;
+        var acc = self.acc.items;
+        var s: i32 = start_s;
+        var p = ls;
+        while (true) {
+            const sym: usize = if (p < le) input[p] else EOF;
+            const row = @as(usize, @intCast(s)) * ALPHA + sym;
+            var t = trans[row];
+            if (t == UNCOMPUTED) {
+                t = try self.computeStep(s, sym);
+                trans = self.trans.items;
+                acc = self.acc.items;
+            }
+            if (acc[row]) return true;
+            if (sym == EOF or t == DEAD) return false;
+            s = t & STATE_MASK;
+            p += 1;
+        }
+    }
+
+    /// `forMatchingLines` for an assertion-bearing (anchored) DFA. Each line is
+    /// matched as its own standalone text — so `^`/`$` bind to the line edges and
+    /// the start flags are constant (`FLAG_START`) for every line — in one fused
+    /// pass over the buffer, avoiding the per-line `anyMatch` call/setup overhead.
+    /// `emit(ctx, line_start, line_end)` fires for each matching line; ranges
+    /// exclude the trailing newline. Overflow handling mirrors `forMatchingLines`.
+    pub fn forMatchingLinesAnchored(
+        self: *LazyDfa,
+        input: []const u8,
+        ctx: anytype,
+        comptime emit: anytype,
+    ) !?usize {
+        std.debug.assert(self.anchored);
+        // Every line begins a fresh text, so the start state never varies.
+        const start_s = self.getStart(self.startFlags(input, 0)) catch |e| switch (e) {
+            error.DfaOverflow => return @as(?usize, 0),
+            else => return e,
+        };
+        var ls: usize = 0;
+        while (true) {
+            const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
+            const matched = self.lineMatchesAnchored(input, ls, le, start_s) catch |e| switch (e) {
+                error.DfaOverflow => return @as(?usize, ls),
+                else => return e,
+            };
+            if (matched) try emit(ctx, ls, le);
+            if (le == input.len) break;
+            ls = le + 1;
+        }
+        return null;
     }
 };
