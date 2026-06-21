@@ -245,6 +245,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Seed the queue with the root paths (file vs directory decides the prefix).
     var any_dir = false;
+    var file_seeds: usize = 0;
     for (paths.items) |p| {
         if (Io.Dir.cwd().openDir(io, p, .{ .iterate = true })) |d| {
             var dd = d;
@@ -253,14 +254,20 @@ pub fn main(init: std.process.Init) !void {
             any_dir = true;
         } else |_| {
             queue.push(try allocator.dupe(u8, p), false);
+            file_seeds += 1;
         }
     }
     // Match ripgrep: prefix `path:` only when more than one file is searched or
     // a directory was traversed; a single explicit file prints bare lines.
     const show_path = any_dir or paths.items.len > 1;
 
+    // A directory seed can fan out to thousands of files, so use the whole pool;
+    // but a fixed set of plain files needs at most one worker each — spawning the
+    // full pool would leave idle workers spin-waiting and stealing CPU from the
+    // few that have work (notably the single-large-file case).
     const cpu = std.Thread.getCpuCount() catch 1;
-    const nthreads = @max(@min(cpu, 16), 1);
+    const pool = @max(@min(cpu, 16), 1);
+    const nthreads = if (any_dir) pool else @max(@min(pool, file_seeds), 1);
 
     const workers = try arena.alloc(Worker, nthreads);
     for (workers) |*w| w.* = .{
