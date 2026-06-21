@@ -1878,12 +1878,20 @@ pub const Regex = struct {
                 {
                     var m = self.matcher();
                     defer m.deinit();
+                    // If the bare literal is itself a complete match — no anchors
+                    // or zero-width assertions constrain where it may sit — then
+                    // every line containing it matches, so the per-candidate
+                    // isMatch is redundant (e.g. `fn|fn\s`, whose `fn` branch is
+                    // the literal). Verify once by matching the literal alone.
+                    const lit_sufficient = !self.opt_info.has_assertions and
+                        !self.opt_info.anchored_start and !self.opt_info.anchored_end and
+                        (m.isMatch(req) catch false);
                     const pf = LiteralPrefilter.init(input, req);
                     var pos: usize = 0;
                     while (pf.next(input, pos)) |hit| {
                         const le = std.mem.indexOfScalarPos(u8, input, hit, '\n') orelse input.len;
                         const ls = if (std.mem.lastIndexOfScalar(u8, input[0..hit], '\n')) |nl| nl + 1 else 0;
-                        if (try m.isMatch(input[ls..le])) try emit(ctx, ls, le);
+                        if (lit_sufficient or try m.isMatch(input[ls..le])) try emit(ctx, ls, le);
                         pos = le + 1;
                         if (pos > input.len) break;
                     }

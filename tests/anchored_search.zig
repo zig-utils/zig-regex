@@ -202,6 +202,13 @@ test "forMatchingLines yields the same lines countMatchingLines counts" {
         .{ .pat = "[A-Z]+", .in = "Foo\nbar\nBAZ qux\n" },
         .{ .pat = "fn\\s+\\w+", .in = "fn main\nxfn y\nfn\nfn  go\n" },
         .{ .pat = "\\w+@\\w+", .in = "a@b\nno at here\nx@y z\n@bad\ngood@\n" },
+        // Required-literal "sufficient" optimization: `fn` alone is a complete
+        // match of `fn|fn\s`, so every line containing `fn` matches.
+        .{ .pat = "fn|fn\\s", .in = "fn\nxfny\nno\na fn b\nFN\n" },
+        // ...but assertions/anchors must keep the per-candidate check honest:
+        .{ .pat = "fn\\s", .in = "fn x\nfnx\nfn\n  fn y\n" }, // literal not sufficient
+        .{ .pat = "\\bfn\\b", .in = "fn\nxfn\nfn x\nxfnx\n" }, // word boundary
+        .{ .pat = "fn$", .in = "fn\nfnx\nx fn\nfn \n" }, // trailing anchor
     };
     const Collector = struct {
         lines: *std.ArrayList([]const u8),

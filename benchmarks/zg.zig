@@ -203,9 +203,11 @@ pub fn main(init: std.process.Init) !void {
     // a directory was traversed; a single explicit file prints bare lines.
     const show_path = walked_dir or files.items.len > 1;
 
-    // Process files in parallel across CPUs.
+    // Process files in parallel across CPUs — but never spawn more workers than
+    // there are files (a single large file is matched by one worker; no point
+    // paying for 15 idle thread spawns).
     const cpu = std.Thread.getCpuCount() catch 1;
-    const nthreads = @min(@max(cpu, 1), 16);
+    const nthreads = @max(@min(@min(cpu, 16), files.items.len), 1);
     var next_index = std.atomic.Value(usize).init(0);
 
     const workers = try arena.alloc(Worker, nthreads);

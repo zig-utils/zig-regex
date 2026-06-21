@@ -522,6 +522,31 @@ pub const LazyDfa = struct {
         }
     }
 
+    /// `prepAccel` for an assertion-bearing (anchored) DFA, where acceptance is
+    /// byte-dependent and lives in `acc` rather than folded into the transition.
+    /// A byte is skippable only if it self-loops AND does not accept at that
+    /// position — so skipping the run can't miss a match (e.g. the `.` run in
+    /// `.+$`, which only accepts at EOF).
+    fn prepAccelAnchored(self: *LazyDfa, s: usize) Error!void {
+        var set: [256]bool = undefined;
+        var loops: usize = 0;
+        var c: usize = 0;
+        while (c < 256) : (c += 1) {
+            const row = s * ALPHA + c;
+            if (self.trans.items[row] == UNCOMPUTED) _ = try self.computeStep(@intCast(s), c);
+            const t = self.trans.items[row];
+            const is_self = t >= 0 and (t & STATE_MASK) == @as(i32, @intCast(s)) and !self.acc.items[row];
+            set[c] = is_self;
+            if (is_self) loops += 1;
+        }
+        if (loops >= 32) {
+            self.accel_set.items[s] = set;
+            self.accel_kind.items[s] = 2;
+        } else {
+            self.accel_kind.items[s] = 1;
+        }
+    }
+
     pub fn countMatchingLines(self: *LazyDfa, input: []const u8) Error!usize {
         var count: usize = 0;
         const resume_at = try self.forMatchingLines(input, &count, struct {
@@ -627,6 +652,11 @@ pub const LazyDfa = struct {
         var s: i32 = start_s;
         var p = ls;
         while (true) {
+            // Accelerated state: skip the whole non-accepting self-loop run.
+            if (self.accel_kind.items[@intCast(s)] == 2) {
+                const set = &self.accel_set.items[@intCast(s)];
+                while (p < le and set[input[p]]) p += 1;
+            }
             const sym: usize = if (p < le) input[p] else EOF;
             const row = @as(usize, @intCast(s)) * ALPHA + sym;
             var t = trans[row];
@@ -637,7 +667,14 @@ pub const LazyDfa = struct {
             }
             if (acc[row]) return true;
             if (sym == EOF or t == DEAD) return false;
-            s = t & STATE_MASK;
+            const next = t & STATE_MASK;
+            // Lazily promote the first time a state is seen self-looping.
+            if (next == s and self.accel_kind.items[@intCast(s)] == 0) {
+                try self.prepAccelAnchored(@intCast(s));
+                trans = self.trans.items;
+                acc = self.acc.items;
+            }
+            s = next;
             p += 1;
         }
     }
