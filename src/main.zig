@@ -140,27 +140,29 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (line_grep) {
-        // Line-oriented grep: iterate lines, report those that match. Mirrors the
-        // `rg`/`zg` workload and uses a reused Matcher so the lazy DFA is built
-        // once and amortized across every line.
-        var m = re.matcher();
-        defer m.deinit();
-        var matched_lines: usize = 0;
-        var it = std.mem.splitScalar(u8, input, '\n');
-        while (it.next()) |line| {
-            const hit = m.isMatch(line) catch |err| {
-                try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
-                try stderr.flush();
-                std.process.exit(1);
-            };
-            if (hit) {
-                matched_lines += 1;
-                try stdout.writeAll(line);
-                try stdout.writeAll("\n");
+        // Line-oriented grep: report the lines that match. Drives the engine's
+        // whole-buffer matching-line scan (the same path `zg` uses), which reuses
+        // the SIMD literal / required-literal prefilters and single-pass line DFA
+        // instead of dispatching isMatch per line — non-matching lines are skipped
+        // via memchr rather than stepped.
+        const Sink = struct {
+            w: @TypeOf(stdout),
+            input: []const u8,
+            n: usize = 0,
+            fn emit(self: *@This(), ls: usize, le: usize) anyerror!void {
+                self.n += 1;
+                try self.w.writeAll(self.input[ls..le]);
+                try self.w.writeAll("\n");
             }
-        }
+        };
+        var sink = Sink{ .w = stdout, .input = input };
+        re.forMatchingLines(input, &sink, Sink.emit) catch |err| {
+            try stderr.print("error: match failed: {s}\n", .{@errorName(err)});
+            try stderr.flush();
+            std.process.exit(1);
+        };
         try stdout.flush();
-        if (matched_lines == 0) std.process.exit(1);
+        if (sink.n == 0) std.process.exit(1);
         return;
     }
 
