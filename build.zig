@@ -536,6 +536,21 @@ pub fn build(b: *std.Build) void {
     const findall_bench_step = b.step("bench-findall", "Run findAll throughput benchmark (issue #10)");
     findall_bench_step.dependOn(&findall_bench_run.step);
 
+    // `zg` — ripgrep-style grep used to reproduce the issue #10 benchmarks
+    // (multi-file corpus and single large file) head to head against `rg`.
+    const zg = b.addExecutable(.{
+        .name = "zg",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/zg.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(zg);
+
     const line_count_bench = b.addExecutable(.{
         .name = "line_count_bench",
         .root_module = b.createModule(.{
