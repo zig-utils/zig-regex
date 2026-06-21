@@ -445,66 +445,117 @@ pub const Regex = struct {
     /// Stateful case-insensitive substring scanner. Keeps a SIMD cursor for each
     /// case of the first byte so it never rescans for an absent case (which would
     /// make repeated searches O(n²)). Yields non-overlapping match starts.
+    /// Single-pass SIMD scan for the next byte equal to `lo` or `hi` at/after
+    /// `from` (the two ASCII cases of a literal's first byte). One vector pass
+    /// over the buffer instead of two separate memchr scans — the case-folded
+    /// analogue of `memchr2`.
+    fn indexOfCasePos(haystack: []const u8, from: usize, lo: u8, hi: u8) ?usize {
+        if (lo == hi) return std.mem.indexOfScalarPos(u8, haystack, from, lo);
+        var i = from;
+        const V = @Vector(32, u8);
+        const vlo: V = @splat(lo);
+        const vhi: V = @splat(hi);
+        while (i + 32 <= haystack.len) : (i += 32) {
+            const chunk: V = haystack[i..][0..32].*;
+            const m = (chunk == vlo) | (chunk == vhi);
+            const bits: u32 = @bitCast(m);
+            if (bits != 0) return i + @ctz(bits);
+        }
+        while (i < haystack.len) : (i += 1) {
+            const c = haystack[i];
+            if (c == lo or c == hi) return i;
+        }
+        return null;
+    }
+
     const CiLiteralScanner = struct {
         input: []const u8,
         lit: []const u8,
         last: usize, // last viable start index
-        lo: u8,
-        hi: u8,
-        c_lo: ?usize,
-        c_hi: ?usize,
+        lo0: u8,
+        hi0: u8,
+        loL: u8,
+        hiL: u8,
+        pos: usize,
         done: bool,
 
         fn init(input: []const u8, lit: []const u8, from: usize) CiLiteralScanner {
-            if (lit.len > input.len) {
-                return .{ .input = input, .lit = lit, .last = 0, .lo = 0, .hi = 0, .c_lo = null, .c_hi = null, .done = true };
+            if (lit.len == 0 or lit.len > input.len) {
+                return .{ .input = input, .lit = lit, .last = 0, .lo0 = 0, .hi0 = 0, .loL = 0, .hiL = 0, .pos = 0, .done = true };
             }
-            const lo = std.ascii.toLower(lit[0]);
-            const hi = std.ascii.toUpper(lit[0]);
+            const last_byte = lit[lit.len - 1];
             return .{
                 .input = input,
                 .lit = lit,
                 .last = input.len - lit.len,
-                .lo = lo,
-                .hi = hi,
-                .c_lo = std.mem.indexOfScalarPos(u8, input, from, lo),
-                .c_hi = if (lo != hi) std.mem.indexOfScalarPos(u8, input, from, hi) else null,
+                .lo0 = std.ascii.toLower(lit[0]),
+                .hi0 = std.ascii.toUpper(lit[0]),
+                .loL = std.ascii.toLower(last_byte),
+                .hiL = std.ascii.toUpper(last_byte),
+                .pos = from,
                 .done = false,
             };
         }
 
-        fn advanceCursorsAt(self: *CiLiteralScanner, p: usize) void {
-            if (self.c_lo) |x| {
-                if (x <= p) self.c_lo = std.mem.indexOfScalarPos(u8, self.input, p + 1, self.lo);
-            }
-            if (self.c_hi) |x| {
-                if (x <= p) self.c_hi = std.mem.indexOfScalarPos(u8, self.input, p + 1, self.hi);
-            }
-        }
-
         fn next(self: *CiLiteralScanner) ?usize {
-            while (!self.done) {
-                const p = blk: {
-                    if (self.c_lo) |a| {
-                        if (self.c_hi) |b| break :blk @min(a, b);
-                        break :blk a;
-                    }
-                    break :blk self.c_hi orelse {
+            const len = self.lit.len;
+            if (len == 1) {
+                // Single byte: a plain case-folded memchr2.
+                while (!self.done) {
+                    const p = indexOfCasePos(self.input, self.pos, self.lo0, self.hi0) orelse {
                         self.done = true;
                         return null;
                     };
-                };
-                if (p > self.last) {
-                    self.done = true;
-                    return null;
-                }
-                const matched = std.ascii.eqlIgnoreCase(self.input[p .. p + self.lit.len], self.lit);
-                if (matched) {
-                    // Non-overlapping: skip both cursors past the matched region.
-                    self.advanceCursorsAt(p + self.lit.len - 1);
+                    if (p > self.last) {
+                        self.done = true;
+                        return null;
+                    }
+                    self.pos = p + 1;
                     return p;
                 }
-                self.advanceCursorsAt(p);
+                return null;
+            }
+            // Multi-byte: a single SIMD pass requires both the first and last
+            // literal byte (case-folded) to line up `len-1` apart before any
+            // verification — the case-insensitive analogue of ripgrep's
+            // first/last-byte memmem, which collapses common-first-byte false
+            // positives (e.g. the many `f`s when scanning for `fn`).
+            const input = self.input;
+            const V = @Vector(32, u8);
+            const v_lo0: V = @splat(self.lo0);
+            const v_hi0: V = @splat(self.hi0);
+            const v_loL: V = @splat(self.loL);
+            const v_hiL: V = @splat(self.hiL);
+            const lastoff = len - 1;
+            while (!self.done) {
+                var i = self.pos;
+                while (i + 32 + lastoff <= input.len) : (i += 32) {
+                    const first: V = input[i..][0..32].*;
+                    const lastv: V = input[i + lastoff ..][0..32].*;
+                    const mf = (first == v_lo0) | (first == v_hi0);
+                    const ml = (lastv == v_loL) | (lastv == v_hiL);
+                    var bits: u32 = @bitCast(mf & ml);
+                    while (bits != 0) {
+                        const j = i + @ctz(bits);
+                        if (j <= self.last and std.ascii.eqlIgnoreCase(input[j .. j + len], self.lit)) {
+                            self.pos = j + len; // non-overlapping
+                            return j;
+                        }
+                        bits &= bits - 1;
+                    }
+                }
+                // Scalar tail.
+                while (i <= self.last) : (i += 1) {
+                    const c0 = input[i];
+                    if ((c0 == self.lo0 or c0 == self.hi0) and
+                        std.ascii.eqlIgnoreCase(input[i .. i + len], self.lit))
+                    {
+                        self.pos = i + len;
+                        return i;
+                    }
+                }
+                self.done = true;
+                return null;
             }
             return null;
         }
@@ -1794,6 +1845,23 @@ pub const Regex = struct {
                     try emit(ctx, ls, le);
                     pos = le + 1;
                     if (pos > input.len) break;
+                }
+                return;
+            }
+            // Case-insensitive exact literal: a line matches iff it contains the
+            // literal under ASCII case folding. The two-cursor memchr scanner
+            // (both cases of the first byte) skips non-candidate bytes instead of
+            // stepping the DFA over every byte — a big win for `grep -i word`.
+            if (self.flags.case_insensitive and lit.len > 0 and
+                std.mem.indexOfScalar(u8, lit, '\n') == null)
+            {
+                var sc = CiLiteralScanner.init(input, lit, 0);
+                while (sc.next()) |i| {
+                    const le = std.mem.indexOfScalarPos(u8, input, i, '\n') orelse input.len;
+                    const ls = if (std.mem.lastIndexOfScalar(u8, input[0..i], '\n')) |nl| nl + 1 else 0;
+                    try emit(ctx, ls, le);
+                    if (le + 1 > input.len) break;
+                    sc = CiLiteralScanner.init(input, lit, le + 1);
                 }
                 return;
             }
