@@ -280,11 +280,17 @@ pub fn main(init: std.process.Init) !void {
         .show_path = show_path,
     };
 
-    var threads = try arena.alloc(?std.Thread, nthreads);
-    for (workers, 0..) |*w, t| threads[t] = std.Thread.spawn(.{}, Worker.run, .{w}) catch null;
-    // Any worker that failed to spawn runs inline.
-    for (workers, 0..) |*w, t| if (threads[t] == null) w.run();
-    for (threads) |maybe_t| if (maybe_t) |th| th.join();
+    if (nthreads == 1) {
+        // Single worker (e.g. one file): run inline — no thread-spawn overhead,
+        // which is a meaningful fraction of wall time for fast patterns.
+        workers[0].run();
+    } else {
+        var threads = try arena.alloc(?std.Thread, nthreads);
+        for (workers, 0..) |*w, t| threads[t] = std.Thread.spawn(.{}, Worker.run, .{w}) catch null;
+        // Any worker that failed to spawn runs inline.
+        for (workers, 0..) |*w, t| if (threads[t] == null) w.run();
+        for (threads) |maybe_t| if (maybe_t) |th| th.join();
+    }
 
     // Emit results.
     var stdout_buf: [256 * 1024]u8 = undefined;
