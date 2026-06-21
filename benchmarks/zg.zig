@@ -7,8 +7,11 @@
 //!   -i  case-insensitive
 //!   -m  multiline (^/$ match line boundaries) — default for line grep anyway
 //!
-//! Walks directories recursively (skipping dotfiles/dotdirs like `.git`, and
-//! binary files containing NUL), then matches files in parallel across CPUs.
+//! Directory traversal and matching share one per-CPU worker pool: the work
+//! queue holds tagged items (a directory to expand or a file to search), so the
+//! walk runs in parallel and overlaps matching, like ripgrep's parallel walker.
+//! Dotfiles/dotdirs (`.git`, …) and binary files (NUL in the first 8 KiB) are
+//! skipped.
 const std = @import("std");
 const Io = std.Io;
 const regex = @import("regex");
@@ -20,7 +23,60 @@ const Options = struct {
     multiline: bool = false,
 };
 
-const FileList = std.ArrayList([]const u8);
+const Item = struct { path: []const u8, is_dir: bool };
+
+/// A small spinlock — Zig 0.16's blocking Mutex/Condition live on the Io async
+/// model, which doesn't compose with raw `std.Thread`, so a tiny atomic lock is
+/// the simplest portable primitive here. Critical sections are O(1).
+const SpinLock = struct {
+    state: std.atomic.Value(u32) = .init(0),
+    fn lock(self: *SpinLock) void {
+        while (self.state.swap(1, .acquire) != 0) std.atomic.spinLoopHint();
+    }
+    fn unlock(self: *SpinLock) void {
+        self.state.store(0, .release);
+    }
+};
+
+/// MPMC queue of work items with a pending counter for distributed termination:
+/// `pending` tracks items enqueued but not yet fully processed (expanding a
+/// directory enqueues its children *before* that directory is marked complete),
+/// so when it reaches zero no further work can appear and the queue closes.
+const WorkQueue = struct {
+    lock: SpinLock = .{},
+    items: std.ArrayList(Item) = .empty,
+    head: usize = 0,
+    pending: std.atomic.Value(usize) = .init(0),
+    done: std.atomic.Value(bool) = .init(false),
+    allocator: std.mem.Allocator,
+
+    fn push(self: *WorkQueue, path: []const u8, is_dir: bool) void {
+        _ = self.pending.fetchAdd(1, .monotonic);
+        self.lock.lock();
+        self.items.append(self.allocator, .{ .path = path, .is_dir = is_dir }) catch {};
+        self.lock.unlock();
+    }
+
+    fn pop(self: *WorkQueue) ?Item {
+        while (true) {
+            self.lock.lock();
+            if (self.head < self.items.items.len) {
+                const it = self.items.items[self.head];
+                self.head += 1;
+                self.lock.unlock();
+                return it;
+            }
+            self.lock.unlock();
+            if (self.done.load(.acquire)) return null;
+            std.Thread.yield() catch std.atomic.spinLoopHint();
+        }
+    }
+
+    /// Mark one popped item finished; closes the queue when the last one drains.
+    fn complete(self: *WorkQueue) void {
+        if (self.pending.fetchSub(1, .acq_rel) == 1) self.done.store(true, .release);
+    }
+};
 
 const LineSink = struct {
     out: *std.ArrayList(u8),
@@ -44,11 +100,12 @@ const LineSink = struct {
     }
 };
 
+const MappedFile = []align(std.heap.page_size_min) const u8;
+
 const Worker = struct {
     re: *const Regex,
     opts: Options,
-    files: []const []const u8,
-    next_index: *std.atomic.Value(usize),
+    queue: *WorkQueue,
     out: std.ArrayList(u8),
     total_count: usize = 0,
     allocator: std.mem.Allocator,
@@ -56,24 +113,69 @@ const Worker = struct {
     show_path: bool,
 
     fn run(self: *Worker) void {
-        while (true) {
-            const idx = self.next_index.fetchAdd(1, .monotonic);
-            if (idx >= self.files.len) break;
-            self.processFile(self.files[idx]) catch {};
+        // One Matcher per worker: its lazy search DFA is built once and reused
+        // across every file this worker handles, instead of rebuilt per file.
+        var m = self.re.matcher();
+        defer m.deinit();
+        // Reused read buffer for small files (avoids per-file mmap/munmap).
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        while (self.queue.pop()) |item| {
+            if (item.is_dir) self.expandDir(item.path) else self.matchFile(&m, &buf, item.path) catch {};
+            self.queue.complete();
         }
     }
 
-    fn processFile(self: *Worker, path: []const u8) !void {
-        const data = mapFile(self.io, path) catch return;
-        defer unmapFile(data);
+    fn expandDir(self: *Worker, path: []const u8) void {
+        var dir = Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
+        var it = dir.iterate();
+        while (it.next(self.io) catch null) |entry| {
+            if (entry.name.len > 0 and entry.name[0] == '.') continue; // skip hidden
+            const child = std.fs.path.join(self.allocator, &.{ path, entry.name }) catch continue;
+            switch (entry.kind) {
+                .directory => self.queue.push(child, true),
+                .file => self.queue.push(child, false),
+                else => {},
+            }
+        }
+    }
+
+    // Files at/below this size are read into the reused buffer; larger files are
+    // memory-mapped (mmap setup amortizes over a big sequential scan).
+    const MMAP_THRESHOLD = 256 * 1024;
+
+    fn matchFile(self: *Worker, m: *Regex.Matcher, buf: *std.ArrayList(u8), path: []const u8) !void {
+        var file = Io.Dir.cwd().openFile(self.io, path, .{ .allow_directory = false }) catch return;
+        defer file.close(self.io);
+        const st = file.stat(self.io) catch return;
+        const size: usize = @intCast(st.size);
+        if (size == 0) return;
+
+        var mapped: ?MappedFile = null;
+        defer if (mapped) |mm| {
+            if (mm.len != 0) std.posix.munmap(mm);
+        };
+        const data: []const u8 = if (size > MMAP_THRESHOLD) blk: {
+            const mm = std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0) catch return;
+            std.posix.madvise(mm.ptr, mm.len, std.posix.MADV.SEQUENTIAL) catch {};
+            mapped = mm;
+            break :blk mm;
+        } else blk: {
+            buf.clearRetainingCapacity();
+            buf.ensureTotalCapacity(self.allocator, size) catch return;
+            buf.items.len = size;
+            const n = file.readPositionalAll(self.io, buf.items[0..size], 0) catch return;
+            break :blk buf.items[0..n];
+        };
         if (data.len == 0) return;
-        // Binary detection: NUL in the first 8 KiB (matches ripgrep's heuristic
-        // closely enough for the benchmark corpus).
+        // Binary detection: NUL in the first 8 KiB (close enough to ripgrep's
+        // heuristic for the benchmark corpus).
         const probe = data[0..@min(data.len, 8 * 1024)];
         if (std.mem.indexOfScalar(u8, probe, 0) != null) return;
 
         if (self.opts.count_only) {
-            const n = try self.re.countMatchingLines(data);
+            const n = try m.countMatchingLines(data);
             if (n > 0) {
                 self.total_count += n;
                 try self.out.print(self.allocator, "{s}:{d}\n", .{ path, n });
@@ -81,9 +183,9 @@ const Worker = struct {
             return;
         }
 
-        // Drive the engine's whole-buffer matching-line scan (shares the literal
-        // and required-literal prefilters with the count path), emitting each
-        // matching line directly into the per-thread output buffer.
+        // The engine's whole-buffer matching-line scan shares the literal and
+        // required-literal prefilters with the count path and emits each matching
+        // line directly into the per-thread output buffer.
         var sink = LineSink{
             .out = &self.out,
             .allocator = self.allocator,
@@ -91,67 +193,10 @@ const Worker = struct {
             .path = path,
             .show_path = self.show_path,
         };
-        try self.re.forMatchingLines(data, &sink, LineSink.emit);
+        try m.forMatchingLines(data, &sink, LineSink.emit);
         self.total_count += sink.count;
     }
 };
-
-const MappedFile = []align(std.heap.page_size_min) const u8;
-
-fn mapFile(io: Io, path: []const u8) !MappedFile {
-    var file = try Io.Dir.cwd().openFile(io, path, .{ .allow_directory = false });
-    defer file.close(io);
-    const st = try file.stat(io);
-    const size: usize = @intCast(st.size);
-    if (size == 0) return &[_]u8{};
-    const mem = try std.posix.mmap(
-        null,
-        size,
-        .{ .READ = true },
-        .{ .TYPE = .PRIVATE },
-        file.handle,
-        0,
-    );
-    std.posix.madvise(mem.ptr, mem.len, std.posix.MADV.SEQUENTIAL) catch {};
-    return mem;
-}
-
-fn unmapFile(data: MappedFile) void {
-    if (data.len == 0) return;
-    std.posix.munmap(data);
-}
-
-fn collectFiles(
-    allocator: std.mem.Allocator,
-    io: Io,
-    root: []const u8,
-    files: *FileList,
-    walked_dir: *bool,
-) !void {
-    // A single path that is a file: add directly.
-    var dir = Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch {
-        // Not a directory — assume a regular file.
-        try files.append(allocator, try allocator.dupe(u8, root));
-        return;
-    };
-    walked_dir.* = true;
-    defer dir.close(io);
-
-    var walker = try dir.walkSelectively(allocator);
-    defer walker.deinit();
-    while (try walker.next(io)) |entry| {
-        // Skip hidden files/dirs (don't descend into them).
-        if (entry.basename.len > 0 and entry.basename[0] == '.') continue;
-        switch (entry.kind) {
-            .directory => try walker.enter(io, entry),
-            .file => {
-                const joined = try std.fs.path.join(allocator, &.{ root, entry.path });
-                try files.append(allocator, joined);
-            },
-            else => {},
-        }
-    }
-}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -162,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
 
     var opts = Options{};
     var pattern: ?[]const u8 = null;
-    var paths: FileList = .empty;
+    var paths: std.ArrayList([]const u8) = .empty;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -188,6 +233,7 @@ pub fn main(init: std.process.Init) !void {
         try stderr_w.interface.flush();
         std.process.exit(2);
     };
+    if (paths.items.len == 0) try paths.append(arena, ".");
 
     var re = try Regex.compileWithFlags(allocator, pat, .{
         .case_insensitive = opts.case_insensitive,
@@ -195,27 +241,32 @@ pub fn main(init: std.process.Init) !void {
     });
     defer re.deinit();
 
-    // Gather the full file list (single-threaded directory walk).
-    var files: FileList = .empty;
-    var walked_dir = false;
-    for (paths.items) |p| try collectFiles(arena, io, p, &files, &walked_dir);
+    var queue = WorkQueue{ .allocator = allocator };
+
+    // Seed the queue with the root paths (file vs directory decides the prefix).
+    var any_dir = false;
+    for (paths.items) |p| {
+        if (Io.Dir.cwd().openDir(io, p, .{ .iterate = true })) |d| {
+            var dd = d;
+            dd.close(io);
+            queue.push(try allocator.dupe(u8, p), true);
+            any_dir = true;
+        } else |_| {
+            queue.push(try allocator.dupe(u8, p), false);
+        }
+    }
     // Match ripgrep: prefix `path:` only when more than one file is searched or
     // a directory was traversed; a single explicit file prints bare lines.
-    const show_path = walked_dir or files.items.len > 1;
+    const show_path = any_dir or paths.items.len > 1;
 
-    // Process files in parallel across CPUs — but never spawn more workers than
-    // there are files (a single large file is matched by one worker; no point
-    // paying for 15 idle thread spawns).
     const cpu = std.Thread.getCpuCount() catch 1;
-    const nthreads = @max(@min(@min(cpu, 16), files.items.len), 1);
-    var next_index = std.atomic.Value(usize).init(0);
+    const nthreads = @max(@min(cpu, 16), 1);
 
     const workers = try arena.alloc(Worker, nthreads);
     for (workers) |*w| w.* = .{
         .re = &re,
         .opts = opts,
-        .files = files.items,
-        .next_index = &next_index,
+        .queue = &queue,
         .out = .empty,
         .allocator = allocator,
         .io = io,
@@ -223,10 +274,9 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var threads = try arena.alloc(?std.Thread, nthreads);
-    for (workers, 0..) |*w, t| threads[t] = std.Thread.spawn(.{}, Worker.run, .{w}) catch blk: {
-        w.run();
-        break :blk null;
-    };
+    for (workers, 0..) |*w, t| threads[t] = std.Thread.spawn(.{}, Worker.run, .{w}) catch null;
+    // Any worker that failed to spawn runs inline.
+    for (workers, 0..) |*w, t| if (threads[t] == null) w.run();
     for (threads) |maybe_t| if (maybe_t) |th| th.join();
 
     // Emit results.

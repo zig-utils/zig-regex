@@ -1066,6 +1066,20 @@ pub const Regex = struct {
         pub fn count(self: *Matcher, input: []const u8) !usize {
             return self.re.countInner(input, self.dfaPtr(), self.vmPtr());
         }
+        /// `countMatchingLines` reusing this matcher's cached search DFA — use in
+        /// grep loops over many inputs so the lazy DFA is built once, not per call.
+        pub fn countMatchingLines(self: *Matcher, input: []const u8) !usize {
+            return self.re.countMatchingLinesInner(input, self.searchDfaPtr());
+        }
+        /// `forMatchingLines` reusing this matcher's cached search DFA.
+        pub fn forMatchingLines(
+            self: *Matcher,
+            input: []const u8,
+            ctx: anytype,
+            comptime emit: fn (@TypeOf(ctx), usize, usize) anyerror!void,
+        ) !void {
+            return self.re.scanMatchingLines(input, self.searchDfaPtr(), ctx, emit);
+        }
     };
 
     /// Create a reusable `Matcher` (see its docs) — use it for hot loops that
@@ -1796,8 +1810,12 @@ pub const Regex = struct {
     }
 
     pub fn countMatchingLines(self: *const Regex, input: []const u8) !usize {
+        return self.countMatchingLinesInner(input, null);
+    }
+
+    fn countMatchingLinesInner(self: *const Regex, input: []const u8, reuse_search_dfa: ?*dfa.LazyDfa) !usize {
         var n: usize = 0;
-        try self.scanMatchingLines(input, &n, struct {
+        try self.scanMatchingLines(input, reuse_search_dfa, &n, struct {
             fn f(c: *usize, ls: usize, le: usize) dfa.Error!void {
                 _ = ls;
                 _ = le;
@@ -1818,12 +1836,17 @@ pub const Regex = struct {
         ctx: anytype,
         comptime emit: fn (@TypeOf(ctx), usize, usize) anyerror!void,
     ) !void {
-        return self.scanMatchingLines(input, ctx, emit);
+        return self.scanMatchingLines(input, null, ctx, emit);
     }
 
+    /// `reuse_search_dfa` (from a `Matcher`) lets the per-line DFA scan reuse a
+    /// search DFA across many inputs — essential for grep over many files, where
+    /// building a fresh lazy DFA per file otherwise dominates (each `processFile`
+    /// would re-pay the construction). Null builds a throwaway DFA per call.
     fn scanMatchingLines(
         self: *const Regex,
         input: []const u8,
+        reuse_search_dfa: ?*dfa.LazyDfa,
         ctx: anytype,
         comptime emit: anytype,
     ) !void {
@@ -1910,7 +1933,7 @@ pub const Regex = struct {
         if (self.dfaEligible()) {
             var tmp: ?dfa.LazyDfa = null;
             defer if (tmp) |*t| t.deinit();
-            if (self.obtainSearchDfa(null, &tmp)) |d| {
+            if (self.obtainSearchDfa(reuse_search_dfa, &tmp)) |d| {
                 const scan_res = if (!d.anchored)
                     d.forMatchingLines(input, ctx, emit)
                 else
