@@ -188,6 +188,52 @@ test "countMatchingLines agrees with per-line reference" {
     }
 }
 
+test "forMatchingLines yields the same lines countMatchingLines counts" {
+    const allocator = std.testing.allocator;
+    // forMatchingLines must visit exactly the matching lines (in order) that a
+    // naive per-line reference selects, across every fast path: literal,
+    // required-literal prefilter, unanchored DFA, and the anchored per-line DFA.
+    const cases = [_]struct { pat: []const u8, in: []const u8 }{
+        .{ .pat = "fn", .in = "fn x\nyfn\nno\nfn\n" },
+        .{ .pat = "fn", .in = "fn\nfn\nfn" },
+        .{ .pat = "\\w+\\s+\\w+", .in = "a b\nc\nd e f\n" },
+        .{ .pat = "^\\w+\\s+\\w+$", .in = "a b\nc d e\nx\nfoo bar\n" },
+        .{ .pat = ".+$", .in = "abc\n\nxyz\n" },
+        .{ .pat = "[A-Z]+", .in = "Foo\nbar\nBAZ qux\n" },
+        .{ .pat = "fn\\s+\\w+", .in = "fn main\nxfn y\nfn\nfn  go\n" },
+        .{ .pat = "\\w+@\\w+", .in = "a@b\nno at here\nx@y z\n@bad\ngood@\n" },
+    };
+    const Collector = struct {
+        lines: *std.ArrayList([]const u8),
+        alloc: std.mem.Allocator,
+        data: []const u8,
+        fn emit(self: *@This(), ls: usize, le: usize) anyerror!void {
+            try self.lines.append(self.alloc, self.data[ls..le]);
+        }
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pat, .{ .multiline = true });
+        defer re.deinit();
+
+        var got: std.ArrayList([]const u8) = .empty;
+        defer got.deinit(allocator);
+        var collector = Collector{ .lines = &got, .alloc = allocator, .data = c.in };
+        try re.forMatchingLines(c.in, &collector, Collector.emit);
+
+        var expected: std.ArrayList([]const u8) = .empty;
+        defer expected.deinit(allocator);
+        var it = std.mem.splitScalar(u8, c.in, '\n');
+        while (it.next()) |line| {
+            if (try re.isMatch(line)) try expected.append(allocator, line);
+        }
+
+        try std.testing.expectEqual(expected.items.len, got.items.len);
+        for (expected.items, got.items) |e, g| try std.testing.expectEqualStrings(e, g);
+        // And the count must agree with countMatchingLines.
+        try std.testing.expectEqual(try re.countMatchingLines(c.in), got.items.len);
+    }
+}
+
 test "countMatchingLinesParallel equals serial" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayList(u8) = .empty;

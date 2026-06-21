@@ -523,16 +523,36 @@ pub const LazyDfa = struct {
     }
 
     pub fn countMatchingLines(self: *LazyDfa, input: []const u8) Error!usize {
+        var count: usize = 0;
+        try self.forMatchingLines(input, &count, struct {
+            fn f(c: *usize, ls: usize, le: usize) Error!void {
+                _ = ls;
+                _ = le;
+                c.* += 1;
+            }
+        }.f);
+        return count;
+    }
+
+    /// Like `countMatchingLines`, but invokes `emit(ctx, line_start, line_end)`
+    /// for every matching line instead of counting — the shared engine behind
+    /// both the `-c` count path and the print path. `[line_start, line_end)`
+    /// excludes the trailing newline.
+    pub fn forMatchingLines(
+        self: *LazyDfa,
+        input: []const u8,
+        ctx: anytype,
+        comptime emit: anytype,
+    ) !void {
         std.debug.assert(self.unanchored and !self.anchored);
         const start_s: usize = @intCast(try self.getStart(0));
         const start_accepts = self.acc_state.items[start_s]; // pattern matches empty
         var trans = self.trans.items;
-        var count: usize = 0;
         var ls: usize = 0;
         while (true) {
             const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
             if (start_accepts) {
-                count += 1;
+                try emit(ctx, ls, le);
             } else {
                 var s = start_s;
                 var p = ls;
@@ -553,7 +573,7 @@ pub const LazyDfa = struct {
                     const next: usize = @intCast(t & STATE_MASK);
                     p += 1;
                     if (t >= ACCEPT_BIT) {
-                        count += 1;
+                        try emit(ctx, ls, le);
                         break;
                     }
                     // Lazily promote a state the moment it's seen self-looping, so
@@ -568,6 +588,5 @@ pub const LazyDfa = struct {
             if (le == input.len) break;
             ls = le + 1;
         }
-        return count;
     }
 };

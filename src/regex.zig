@@ -1745,6 +1745,37 @@ pub const Regex = struct {
     }
 
     pub fn countMatchingLines(self: *const Regex, input: []const u8) !usize {
+        var n: usize = 0;
+        try self.scanMatchingLines(input, &n, struct {
+            fn f(c: *usize, ls: usize, le: usize) dfa.Error!void {
+                _ = ls;
+                _ = le;
+                c.* += 1;
+            }
+        }.f);
+        return n;
+    }
+
+    /// Invoke `emit(ctx, line_start, line_end)` for every line of `input` that
+    /// matches — the print-path companion to `countMatchingLines`, sharing all
+    /// of its fast paths (whole-buffer literal/required-literal prefilters and
+    /// the single-pass line DFA). `[line_start, line_end)` excludes the trailing
+    /// newline. Lines are reported in order.
+    pub fn forMatchingLines(
+        self: *const Regex,
+        input: []const u8,
+        ctx: anytype,
+        comptime emit: fn (@TypeOf(ctx), usize, usize) anyerror!void,
+    ) !void {
+        return self.scanMatchingLines(input, ctx, emit);
+    }
+
+    fn scanMatchingLines(
+        self: *const Regex,
+        input: []const u8,
+        ctx: anytype,
+        comptime emit: anytype,
+    ) !void {
         // Whole-buffer literal fast path: an exact-literal pattern has no anchors,
         // so a line matches iff it contains the literal. Scan for occurrences and
         // jump past the rest of each hit line. Skipped under `i` (case folding) and
@@ -1756,15 +1787,15 @@ pub const Regex = struct {
                 // Build the SIMD prefilter once (it analyzes the buffer to pick a
                 // scan strategy) and reuse it across hits.
                 const pf = LiteralPrefilter.init(input, lit);
-                var count_lines: usize = 0;
                 var pos: usize = 0;
                 while (pf.next(input, pos)) |i| {
-                    count_lines += 1;
                     const le = std.mem.indexOfScalarPos(u8, input, i, '\n') orelse input.len;
+                    const ls = if (std.mem.lastIndexOfScalar(u8, input[0..i], '\n')) |nl| nl + 1 else 0;
+                    try emit(ctx, ls, le);
                     pos = le + 1;
                     if (pos > input.len) break;
                 }
-                return count_lines;
+                return;
             }
         }
         // Required-literal prefilter: every match contains `req`, so only lines
@@ -1780,16 +1811,15 @@ pub const Regex = struct {
                     var m = self.matcher();
                     defer m.deinit();
                     const pf = LiteralPrefilter.init(input, req);
-                    var count_lines: usize = 0;
                     var pos: usize = 0;
                     while (pf.next(input, pos)) |hit| {
                         const le = std.mem.indexOfScalarPos(u8, input, hit, '\n') orelse input.len;
                         const ls = if (std.mem.lastIndexOfScalar(u8, input[0..hit], '\n')) |nl| nl + 1 else 0;
-                        if (try m.isMatch(input[ls..le])) count_lines += 1;
+                        if (try m.isMatch(input[ls..le])) try emit(ctx, ls, le);
                         pos = le + 1;
                         if (pos > input.len) break;
                     }
-                    return count_lines;
+                    return;
                 }
             }
         }
@@ -1803,34 +1833,37 @@ pub const Regex = struct {
                 // Anchor-free patterns can't cross a newline, so one whole-buffer
                 // pass (resetting per line) avoids the per-line call overhead.
                 if (!d.anchored) {
-                    if (d.countMatchingLines(input)) |n| {
-                        return n;
+                    if (d.forMatchingLines(input, ctx, emit)) |_| {
+                        return;
                     } else |err| switch (err) {
                         error.DfaOverflow => {}, // fall through
                         else => |e| return e,
                     }
                 }
-                var count_lines: usize = 0;
-                var it = std.mem.splitScalar(u8, input, '\n');
+                var ls: usize = 0;
                 var overflowed = false;
-                while (it.next()) |line| {
-                    const hit = d.anyMatch(line) catch {
+                while (true) {
+                    const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
+                    const hit = d.anyMatch(input[ls..le]) catch {
                         overflowed = true;
                         break;
                     };
-                    if (hit) count_lines += 1;
+                    if (hit) try emit(ctx, ls, le);
+                    if (le == input.len) break;
+                    ls = le + 1;
                 }
-                if (!overflowed) return count_lines;
+                if (!overflowed) return;
             }
         }
         var m = self.matcher();
         defer m.deinit();
-        var count_lines: usize = 0;
-        var it = std.mem.splitScalar(u8, input, '\n');
-        while (it.next()) |line| {
-            if (try m.isMatch(line)) count_lines += 1;
+        var ls: usize = 0;
+        while (true) {
+            const le = std.mem.indexOfScalarPos(u8, input, ls, '\n') orelse input.len;
+            if (try m.isMatch(input[ls..le])) try emit(ctx, ls, le);
+            if (le == input.len) break;
+            ls = le + 1;
         }
-        return count_lines;
     }
 
     /// `countMatchingLines` parallelized across CPU cores. Splits the buffer at
