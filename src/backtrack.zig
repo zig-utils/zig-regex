@@ -88,9 +88,16 @@ pub const BacktrackEngine = struct {
 
         const codepoint_search = containsCodepointAtom(self.ast_root);
         var pos: usize = @min(start, input.len);
+        // One ReDoS step budget for the whole search, NOT per start position.
+        // Resetting it each position let total backtracking reach
+        // O(input.len * max_steps): on a large input that never matches, every
+        // one of millions of start positions could burn the full per-position
+        // budget, an effective (Zig-level, uninterruptible) infinite loop. With a
+        // single budget, once it is spent matchNode fail-fasts at every remaining
+        // position, so the search terminates.
+        self.step_count = 0;
         while (pos <= input.len) {
             self.resetCaptures();
-            self.step_count = 0; // Reset step counter per starting position
             if (self.matchNode(self.ast_root, pos)) |end_pos| {
                 if (end_pos > pos or (end_pos == pos and self.canMatchEmpty(self.ast_root))) {
                     // Found a match
