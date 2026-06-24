@@ -86,6 +86,11 @@ pub const Lexer = struct {
     in_class: bool = false,
     /// ECMAScript `u`/`v` mode forbids Annex B identity/octal escape fallbacks.
     unicode_strict: bool = false,
+    /// Whether the pattern contains at least one named capture group `(?<name>…)`
+    /// — the `[+NamedCaptureGroups]` grammar parameter (pre-scanned by the
+    /// parser). When set (or in `u`/`v` mode) `\k` must be a `\k<name>` named
+    /// backreference; otherwise a lone `\k` is the identity escape (Annex B).
+    has_named_groups: bool = false,
 
     pub fn init(input: []const u8) Lexer {
         return .{
@@ -165,8 +170,11 @@ pub const Lexer = struct {
                 return tok;
             },
             'k' => {
-                // ECMAScript named backreference: \k<name>
-                if (self.peek() == '<') {
+                // ECMAScript named backreference `\k<name>` — recognized only with
+                // `[+NamedCaptureGroups]` or in `u`/`v` mode; otherwise a lone `\k`
+                // is the identity escape (literal `k`) under Annex B.
+                if (self.has_named_groups or self.unicode_strict) {
+                    if (self.peek() != '<') return RegexError.InvalidEscapeSequence;
                     _ = self.advance();
                     const name_start = self.pos;
                     while (self.peek()) |p| {
@@ -182,7 +190,6 @@ pub const Lexer = struct {
                     }
                     return RegexError.UnexpectedEndOfPattern;
                 }
-                if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
                 return self.makeToken(.literal, 'k');
             },
             'f' => self.makeToken(.escape_char, 0x0C), // form feed
@@ -449,12 +456,43 @@ pub const Parser = struct {
     /// Current `U` state: when set, quantifier greediness is swapped (so `a+`
     /// is lazy and `a+?` is greedy) for the duration of the scope.
     swap_greedy: bool = false,
+    /// ECMAScript-conformance mode (the engine is hosting a JS RegExp). Disables
+    /// the PCRE/Perl extensions ECMAScript does not have: standalone inline
+    /// modifiers `(?ims)` (only the scoped `(?ims:…)` / `(?ims-i:…)` colon form
+    /// is valid), and modifier flags spelled with unicode escapes `(?i:…)`.
+    ecmascript: bool = false,
 
     /// Maximum nesting depth to prevent stack overflow from patterns like (((((...
     pub const MAX_NESTING_DEPTH: usize = 512;
 
+    /// Pre-scan for `(?<name>…)` (the `[+NamedCaptureGroups]` decision), skipping
+    /// `\`-escapes, character classes, and the `(?<=`/`(?<!` lookbehinds.
+    fn scanForNamedGroups(pattern: []const u8) bool {
+        var i: usize = 0;
+        var in_class = false;
+        while (i < pattern.len) : (i += 1) {
+            const c = pattern[i];
+            if (c == '\\') {
+                i += 1; // skip the escaped character
+                continue;
+            }
+            if (in_class) {
+                if (c == ']') in_class = false;
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+            } else if (c == '(' and i + 2 < pattern.len and pattern[i + 1] == '?' and pattern[i + 2] == '<') {
+                const after = if (i + 3 < pattern.len) pattern[i + 3] else 0;
+                if (after != '=' and after != '!') return true; // not a lookbehind
+            }
+        }
+        return false;
+    }
+
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !Parser {
         var lexer = Lexer.init(pattern);
+        lexer.has_named_groups = scanForNamedGroups(pattern);
         const first_token = try lexer.next();
         return .{
             .lexer = lexer,
@@ -494,6 +532,10 @@ pub const Parser = struct {
             };
         }
         if (self.unicode or self.unicode_sets) try self.validateUnicodeBackrefs(root);
+        // A `\k<name>` named backreference must resolve to a defined group when
+        // the pattern has named groups or is in `u`/`v` mode.
+        if (self.lexer.has_named_groups or self.unicode or self.unicode_sets)
+            try self.validateNamedBackrefs(root);
         try self.validateDuplicateGroupNames(root);
 
         return ast.AST.init(self.allocator, root, self.capture_count);
@@ -545,6 +587,66 @@ pub const Parser = struct {
             .star, .plus, .optional => |quant| try self.validateDuplicateGroupNamesBranch(quant.child, names),
             .repeat => |repeat| try self.validateDuplicateGroupNamesBranch(repeat.child, names),
             .lookahead, .lookbehind => |assertion| try self.validateDuplicateGroupNamesBranch(assertion.child, names),
+            else => {},
+        }
+    }
+
+    /// Collect every defined capture-group name from the AST into `names`.
+    fn collectGroupNames(
+        self: *Parser,
+        node: *ast.Node,
+        names: *std.StringHashMapUnmanaged(void),
+    ) std.mem.Allocator.Error!void {
+        switch (node.data) {
+            .group => |group| {
+                if (group.name) |name| try names.put(self.allocator, name, {});
+                try self.collectGroupNames(group.child, names);
+            },
+            .concat => |concat| {
+                try self.collectGroupNames(concat.left, names);
+                try self.collectGroupNames(concat.right, names);
+            },
+            .alternation => |alt| {
+                try self.collectGroupNames(alt.left, names);
+                try self.collectGroupNames(alt.right, names);
+            },
+            .star, .plus, .optional => |quant| try self.collectGroupNames(quant.child, names),
+            .repeat => |repeat| try self.collectGroupNames(repeat.child, names),
+            .lookahead, .lookbehind => |assertion| try self.collectGroupNames(assertion.child, names),
+            else => {},
+        }
+    }
+
+    fn validateNamedBackrefs(self: *Parser, root: *ast.Node) !void {
+        var names: std.StringHashMapUnmanaged(void) = .empty;
+        defer names.deinit(self.allocator);
+        try self.collectGroupNames(root, &names);
+        try self.checkNamedBackrefs(root, &names);
+    }
+
+    fn checkNamedBackrefs(
+        self: *Parser,
+        node: *ast.Node,
+        names: *const std.StringHashMapUnmanaged(void),
+    ) RegexError!void {
+        switch (node.data) {
+            .concat => |concat| {
+                try self.checkNamedBackrefs(concat.left, names);
+                try self.checkNamedBackrefs(concat.right, names);
+            },
+            .alternation => |alt| {
+                try self.checkNamedBackrefs(alt.left, names);
+                try self.checkNamedBackrefs(alt.right, names);
+            },
+            .star, .plus, .optional => |quant| try self.checkNamedBackrefs(quant.child, names),
+            .repeat => |repeat| try self.checkNamedBackrefs(repeat.child, names),
+            .group => |group| try self.checkNamedBackrefs(group.child, names),
+            .lookahead, .lookbehind => |assertion| try self.checkNamedBackrefs(assertion.child, names),
+            .backref => |backref| {
+                if (backref.name) |nm| {
+                    if (!names.contains(nm)) return RegexError.InvalidBackreference;
+                }
+            },
             else => {},
         }
     }
@@ -654,11 +756,12 @@ pub const Parser = struct {
 
     fn checkQuantifierTarget(self: *Parser, node: *ast.Node) RegexError!void {
         if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
-        if (self.unicode or self.unicode_sets) {
-            switch (node.node_type) {
-                .lookahead, .lookbehind => return RegexError.InvalidQuantifier,
-                else => {},
-            }
+        // Lookbehind is never a QuantifiableAssertion in any mode; lookahead is
+        // only quantifiable in Annex B (non-unicode) web-compat mode.
+        switch (node.node_type) {
+            .lookbehind => return RegexError.InvalidQuantifier,
+            .lookahead => if (self.unicode or self.unicode_sets) return RegexError.InvalidQuantifier,
+            else => {},
         }
     }
 
@@ -976,6 +1079,12 @@ pub const Parser = struct {
                                     break;
                                 }
                                 if (self.current_token.token_type != .literal) return RegexError.UnexpectedCharacter;
+                                // ECMAScript: a modifier flag must be a literal
+                                // source character, not a `\u…` escape that
+                                // resolves to "i"/"m"/"s".
+                                if (self.ecmascript and self.current_token.span.start < self.lexer.input.len and
+                                    self.lexer.input[self.current_token.span.start] == '\\')
+                                    return RegexError.UnexpectedCharacter;
                                 const v = self.current_token.value;
                                 if (v == ':') {
                                     // Stop here WITHOUT consuming `:` — the parse-
@@ -1019,6 +1128,14 @@ pub const Parser = struct {
                             self.setParseFlags(new_extended, new_swap_greedy);
 
                             if (standalone) {
+                                // ECMAScript has no standalone `(?ims)` directive —
+                                // only the scoped `(?ims:…)` / `(?ims-i:…)` colon
+                                // form. A modifier group without a colon body is a
+                                // syntax error.
+                                if (self.ecmascript) {
+                                    self.setParseFlags(saved_extended, saved_swap_greedy);
+                                    return RegexError.UnexpectedCharacter;
+                                }
                                 // `(?...)` directive: close its paren, then wrap the
                                 // remainder of the current alternative. Parse-time
                                 // flags apply to that remainder, then are restored

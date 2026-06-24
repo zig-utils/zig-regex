@@ -64,6 +64,9 @@ pub const CompileFlags = packed struct {
     unicode: bool = false,
     /// The `v` (unicodeSets) flag: character classes use set notation.
     unicode_sets: bool = false,
+    /// ECMAScript-conformance mode: disable PCRE/Perl extensions ECMAScript lacks
+    /// (standalone inline modifiers `(?ims)`, unicode-escaped modifier flags).
+    ecmascript: bool = false,
 };
 
 pub fn isEcmaLineTerminator(cp: unicode.Codepoint) bool {

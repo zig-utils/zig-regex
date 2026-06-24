@@ -107,6 +107,7 @@ pub const Regex = struct {
         var p = try parser.Parser.init(allocator, pattern);
         p.unicode_sets = flags.unicode_sets;
         p.unicode = flags.unicode;
+        p.ecmascript = flags.ecmascript;
         // The `x`, `u`, and `v` flags affect lexing from the first token, so
         // enable them on the lexer and re-lex the already-fetched first token.
         if (flags.extended or flags.unicode or flags.unicode_sets) {
