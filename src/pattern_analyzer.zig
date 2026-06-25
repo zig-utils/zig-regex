@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const common = @import("common.zig");
+const unicode = @import("unicode.zig");
 const RegexError = @import("errors.zig").RegexError;
 
 /// Security risk level for a pattern
@@ -289,7 +290,7 @@ pub const PatternAnalyzer = struct {
     /// (no catastrophic backtracking).
     fn leadingLiteral(self: *PatternAnalyzer, node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .class_set, .anchor => true,
+            .literal, .char_class, .class_set, .unicode_property, .anchor => true,
             .group => self.leadingLiteral(node.data.group.child),
             .concat => self.leadingLiteral(node.data.concat.left),
             else => false,
@@ -406,7 +407,7 @@ pub const PatternAnalyzer = struct {
 
     fn hasFixedStart(node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .class_set, .anchor => true,
+            .literal, .char_class, .class_set, .unicode_property, .anchor => true,
             .group => hasFixedStart(node.data.group.child),
             .concat => hasFixedStart(node.data.concat.left),
             // An alternation begins at a fixed atom iff every branch does
@@ -419,7 +420,7 @@ pub const PatternAnalyzer = struct {
 
     fn hasFixedEnd(node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .class_set, .anchor => true,
+            .literal, .char_class, .class_set, .unicode_property, .anchor => true,
             .group => hasFixedEnd(node.data.group.child),
             .concat => hasFixedEnd(node.data.concat.right),
             else => false,
@@ -439,7 +440,7 @@ pub const PatternAnalyzer = struct {
         if (!isQuantifierNode(node)) return null;
         const child = getQuantifierChild(node);
         return switch (child.node_type) {
-            .literal, .char_class, .class_set => child,
+            .literal, .char_class, .class_set, .unicode_property => child,
             else => null,
         };
     }
@@ -449,7 +450,7 @@ pub const PatternAnalyzer = struct {
     /// start with a delimiter byte, so iterations can't overlap.
     fn startsDisjointFromAtom(node: *ast.Node, delimiter: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .class_set, .any => atomsDisjoint(node, delimiter),
+            .literal, .char_class, .class_set, .unicode_property, .any => atomsDisjoint(node, delimiter),
             .group => startsDisjointFromAtom(node.data.group.child, delimiter),
             .concat => startsDisjointFromAtom(node.data.concat.left, delimiter),
             .alternation => startsDisjointFromAtom(node.data.alternation.left, delimiter) and
@@ -477,9 +478,21 @@ pub const PatternAnalyzer = struct {
             .literal => node.data.literal == byte,
             .char_class => node.data.char_class.matches(byte),
             .class_set => node.data.class_set.matches(byte, false),
+            .unicode_property => unicodePropMatchesByte(node, byte),
             .any => true,
             else => false,
         };
+    }
+
+    /// Whether a `\p{…}` atom can match (or begin a UTF-8 sequence that matches)
+    /// `byte`. Exact for ASCII (the byte *is* the code point); conservative for
+    /// non-ASCII, since any UTF-8 lead byte might begin a matching code point —
+    /// so disjointness is only ever claimed against ASCII delimiters (the common
+    /// case: whitespace, quotes, punctuation), never falsely.
+    fn unicodePropMatchesByte(node: *ast.Node, byte: u8) bool {
+        if (byte >= 0x80) return true;
+        const up = node.data.unicode_property;
+        return unicode.matchesSpec(byte, up.spec) != up.negated;
     }
 
     fn startsDisjoint(left: *ast.Node, right: *ast.Node) bool {
@@ -496,6 +509,7 @@ pub const PatternAnalyzer = struct {
             .literal => node.data.literal == byte,
             .char_class => node.data.char_class.matches(byte),
             .class_set => node.data.class_set.matches(byte, false),
+            .unicode_property => unicodePropMatchesByte(node, byte),
             .any => true,
             .group => canStartWith(node.data.group.child, byte),
             .concat => canStartWith(node.data.concat.left, byte),
@@ -775,6 +789,39 @@ test "analyzer: class-set delimited quantifier prefix is not critical" {
         defer result.deinit(allocator);
         try std.testing.expect(result.risk_level != .critical);
         try analyzeAndValidate(allocator, tree.root, .high);
+    }
+}
+
+test "analyzer: unicode-property delimited quantifier is not critical" {
+    // `\p{…}` parses to `.unicode_property`, another atom the safety heuristics
+    // used to ignore — so delimited repeats over Unicode properties were wrongly
+    // rejected. These are genuinely safe (each iteration begins at a fixed atom
+    // disjoint from the body), so they must compile.
+    const allocator = std.testing.allocator;
+    const parser = @import("parser.zig");
+
+    const safe = [_][]const u8{
+        "([ \\t]+\\p{L}+)*", // whitespace-delimited property run
+        "(\\p{Lu}\\p{Ll}*)*", // each iteration starts at an uppercase letter
+    };
+    for (safe) |pattern| {
+        var p = try parser.Parser.init(allocator, pattern);
+        var tree = try p.parse();
+        defer tree.deinit();
+        var result = try analyzePattern(allocator, tree.root);
+        defer result.deinit(allocator);
+        try std.testing.expect(result.risk_level != .critical);
+        try analyzeAndValidate(allocator, tree.root, .high);
+    }
+
+    // ...but genuinely catastrophic property nesting stays critical.
+    for ([_][]const u8{ "(\\p{L}*)*", "(\\p{L}+|\\p{N}+)*" }) |pattern| {
+        var p = try parser.Parser.init(allocator, pattern);
+        var tree = try p.parse();
+        defer tree.deinit();
+        var result = try analyzePattern(allocator, tree.root);
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(RiskLevel.critical, result.risk_level);
     }
 }
 
