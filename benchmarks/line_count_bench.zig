@@ -47,7 +47,7 @@ fn parallelCount(re: *const Regex, input: []const u8, workers: usize) usize {
         starts[w + 1] = ends[w] + 1;
     }
     var ctxs: [32]Worker = undefined;
-    var threads: [32]?std.Thread = .{null} ** 32;
+    var threads: [32]?std.Thread = @splat(null);
     var i: usize = 0;
     while (i < made) : (i += 1) ctxs[i] = .{ .re = re, .chunk = input[starts[i]..ends[i]] };
     i = 1;
