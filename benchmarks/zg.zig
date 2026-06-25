@@ -6,16 +6,47 @@
 //!   -c  count matching lines per file (like `rg -c`)
 //!   -i  case-insensitive
 //!   -m  multiline (^/$ match line boundaries) — default for line grep anyway
+//!   env ZG_THREADS=N  pin the worker count (like ripgrep's `-j`)
 //!
-//! Directory traversal and matching share one per-CPU worker pool: the work
-//! queue holds tagged items (a directory to expand or a file to search), so the
-//! walk runs in parallel and overlaps matching, like ripgrep's parallel walker.
-//! Dotfiles/dotdirs (`.git`, …) and binary files (NUL in the first 8 KiB) are
+//! The walk is ripgrep-shaped: a pool of workers pulls *directories* off a shared
+//! queue; each worker reads its directory's entries in batches, matches the
+//! contained files inline (opened `openat`-relative to the dir, read with raw
+//! `std.posix` to skip the threaded-`Io` per-call bookkeeping), and pushes only
+//! subdirectories back on the queue. So the queue lock is touched ~once per
+//! directory rather than once per file, and the steady state allocates nothing
+//! per file. Each worker reuses one `Regex.Matcher` (its lazy DFA built once).
+//! The pool defaults to the performance-core count (see `defaultWorkerCount`).
+//! Dotfiles/dotdirs (`.git`, …) and binary files (NUL in the first 1 KiB) are
 //! skipped.
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const regex = @import("regex");
 const Regex = regex.Regex;
+
+/// Number of *performance* CPUs the OS exposes, or null if it doesn't.
+/// On heterogeneous-core machines (Apple Silicon's P+E cores) an I/O-bound
+/// parallel walk peaks around the performance-core count — the slower efficiency
+/// cores become the critical path and add queue contention past that point, so
+/// using every logical core is actually slower than using the fast ones. On a
+/// homogeneous machine `hw.perflevel0.logicalcpu` equals the total, so this is a
+/// no-op there.
+fn performanceCoreCount() ?usize {
+    if (builtin.os.tag != .macos) return null;
+    var n: c_int = 0;
+    var len: usize = @sizeOf(c_int);
+    if (std.c.sysctlbyname("hw.perflevel0.logicalcpu", &n, &len, null, 0) != 0) return null;
+    if (n <= 0) return null;
+    return @intCast(n);
+}
+
+/// Default worker count for a directory walk: the performance cores when the OS
+/// distinguishes them, else all logical cores, capped to a sane maximum.
+fn defaultWorkerCount() usize {
+    const logical = std.Thread.getCpuCount() catch 1;
+    const cores = performanceCoreCount() orelse logical;
+    return @max(@min(cores, 16), 1);
+}
 
 const Options = struct {
     count_only: bool = false,
@@ -58,6 +89,11 @@ const WorkQueue = struct {
     }
 
     fn pop(self: *WorkQueue) ?Item {
+        // Idle backoff: spin on the CPU (no syscall) for a while before yielding,
+        // so workers that briefly out-run the producer don't storm `sched_yield`.
+        // With directory-granular work items the queue rarely empties mid-walk, so
+        // this path is hot only at the very start and the very end of a run.
+        var spins: u32 = 0;
         while (true) {
             self.lock.lock();
             if (self.head < self.items.items.len) {
@@ -68,7 +104,8 @@ const WorkQueue = struct {
             }
             self.lock.unlock();
             if (self.done.load(.acquire)) return null;
-            std.Thread.yield() catch std.atomic.spinLoopHint();
+            spins +%= 1;
+            if (spins & 63 == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
     }
 
@@ -117,27 +154,62 @@ const Worker = struct {
         // across every file this worker handles, instead of rebuilt per file.
         var m = self.re.matcher();
         defer m.deinit();
-        // Reused read buffer for small files (avoids per-file mmap/munmap).
+        // Reused buffers, one set per worker: `buf` holds a small file's bytes,
+        // `pathbuf` builds the `dir/name` display path. Neither is freed between
+        // files, so the steady-state walk allocates nothing per file.
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
+        var pathbuf: std.ArrayList(u8) = .empty;
+        defer pathbuf.deinit(self.allocator);
         while (self.queue.pop()) |item| {
-            if (item.is_dir) self.expandDir(item.path) else self.matchFile(&m, &buf, item.path) catch {};
+            if (item.is_dir)
+                self.processDir(&m, &buf, &pathbuf, item.path)
+            else
+                self.matchSeedFile(&m, &buf, item.path) catch {};
             self.queue.complete();
         }
     }
 
-    fn expandDir(self: *Worker, path: []const u8) void {
-        var dir = Io.Dir.cwd().openDir(self.io, path, .{ .iterate = true }) catch return;
+    /// Expand one directory: each contained file is opened (via `openat` relative
+    /// to this dir's handle) and matched *inline on this thread* — only
+    /// subdirectories go back on the shared queue. This is ripgrep's parallel
+    /// walker shape: parallelism granularity is the directory, so the queue (and
+    /// its lock) is touched ~once per directory instead of once per file, and the
+    /// thousands of per-file path joins / queue ops disappear.
+    // Directory iteration buffers. `Io.Dir.Iterator` reads one entry per `Io`
+    // vtable call (22k dispatches + cancellation bookkeeping over the whole
+    // tree) through a 2 KiB dirent buffer. The lower-level `Reader` instead
+    // returns a whole batch of entries per call out of a larger buffer, so the
+    // per-entry dispatch and most `getdirentries` syscalls disappear.
+    const DIR_BUF = 32 * 1024;
+    const DIR_ENTRIES = 256;
+
+    fn processDir(self: *Worker, m: *Regex.Matcher, buf: *std.ArrayList(u8), pathbuf: *std.ArrayList(u8), dir_path: []const u8) void {
+        defer self.allocator.free(dir_path);
+        var dir = Io.Dir.cwd().openDir(self.io, dir_path, .{ .iterate = true }) catch return;
         defer dir.close(self.io);
-        var it = dir.iterate();
-        while (it.next(self.io) catch null) |entry| {
-            if (entry.name.len > 0 and entry.name[0] == '.') continue; // skip hidden
-            const child = std.fs.path.join(self.allocator, &.{ path, entry.name }) catch continue;
-            switch (entry.kind) {
-                .directory => self.queue.push(child, true),
-                .file => self.queue.push(child, false),
-                else => {},
+        var dirbuf: [DIR_BUF]u8 align(@alignOf(usize)) = undefined;
+        var entries: [DIR_ENTRIES]Io.Dir.Entry = undefined;
+        var reader = Io.Dir.Reader.init(dir, &dirbuf);
+        while (true) {
+            const n = reader.read(self.io, &entries) catch break;
+            // Every `Entry.name` in this batch references `dirbuf` and stays valid
+            // until the next `read`, so the whole batch is processed here first.
+            for (entries[0..n]) |entry| {
+                if (entry.name.len > 0 and entry.name[0] == '.') continue; // skip hidden
+                switch (entry.kind) {
+                    // Only subdirectories are queued; their paths must outlive
+                    // this frame, so they are heap-allocated (≈one per directory,
+                    // freed when that directory is later expanded).
+                    .directory => {
+                        const child = std.fs.path.join(self.allocator, &.{ dir_path, entry.name }) catch continue;
+                        self.queue.push(child, true);
+                    },
+                    .file => self.matchFileAt(m, buf, pathbuf, dir, dir_path, entry.name) catch {},
+                    else => {},
+                }
             }
+            if (n == 0 or reader.state == .finished) break;
         }
     }
 
@@ -145,31 +217,78 @@ const Worker = struct {
     // memory-mapped (mmap setup amortizes over a big sequential scan).
     const MMAP_THRESHOLD = 256 * 1024;
 
-    fn matchFile(self: *Worker, m: *Regex.Matcher, buf: *std.ArrayList(u8), path: []const u8) !void {
-        var file = Io.Dir.cwd().openFile(self.io, path, .{ .allow_directory = false }) catch return;
-        defer file.close(self.io);
+    /// Read a file's bytes into `buf` (small files) or an mmap (large files).
+    /// Returns the data slice, or null on any I/O error. Uses raw `std.posix`
+    /// syscalls rather than the `Io` interface: the threaded `Io` wraps every
+    /// read/open in iovec marshalling + per-call cancellation bookkeeping +
+    /// vtable dispatch, which over a 20k-file walk is pure overhead on the hot
+    /// path. A single `read` covers a small file in one syscall — a short read
+    /// from a regular file is EOF, so there is no second "confirm EOF" read.
+    fn readFileData(self: *Worker, fd: std.posix.fd_t, buf: *std.ArrayList(u8), mapped: *?MappedFile) !?[]const u8 {
+        buf.clearRetainingCapacity();
+        buf.ensureTotalCapacity(self.allocator, MMAP_THRESHOLD) catch return null;
+        buf.items.len = MMAP_THRESHOLD;
+        const first = std.posix.read(fd, buf.items[0..MMAP_THRESHOLD]) catch return null;
+        if (first < MMAP_THRESHOLD) return buf.items[0..first];
+        // Buffer filled — the file may be larger, so fall back to a stat-sized
+        // mmap (amortized over the big sequential scan). This `fstat` runs only
+        // for the rare file at/over the threshold, not on the small-file hot path.
+        var st: std.c.Stat = undefined;
+        if (std.c.fstat(fd, &st) != 0) return null;
+        const size: usize = @intCast(st.size);
+        if (size <= MMAP_THRESHOLD) return buf.items[0..first];
+        const mm = std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0) catch return null;
+        std.posix.madvise(mm.ptr, mm.len, std.posix.MADV.SEQUENTIAL) catch {};
+        mapped.* = mm;
+        return mm;
+    }
 
+    const O_RDONLY: std.posix.O = .{ .ACCMODE = .RDONLY };
+
+    /// Match a single file discovered during the walk. Opened with `openat`
+    /// relative to its parent dir's fd, so the kernel resolves only the leaf name
+    /// rather than re-walking the whole path from the cwd on every one of the
+    /// ~20k files.
+    fn matchFileAt(self: *Worker, m: *Regex.Matcher, buf: *std.ArrayList(u8), pathbuf: *std.ArrayList(u8), dir: Io.Dir, dir_path: []const u8, name: []const u8) !void {
+        const fd = std.posix.openat(dir.handle, name, O_RDONLY, 0) catch return;
+        defer _ = std.c.close(fd);
         var mapped: ?MappedFile = null;
         defer if (mapped) |mm| {
             if (mm.len != 0) std.posix.munmap(mm);
         };
-        // Read up to the threshold into the reused buffer with no prior `stat` —
-        // the common case (a small source file) is one read and no extra syscall.
-        // Only if the read fills the buffer might the file be large, in which case
-        // fall back to a `stat`-sized mmap (amortized over the big scan).
-        buf.clearRetainingCapacity();
-        buf.ensureTotalCapacity(self.allocator, MMAP_THRESHOLD) catch return;
-        buf.items.len = MMAP_THRESHOLD;
-        const first = file.readPositionalAll(self.io, buf.items[0..MMAP_THRESHOLD], 0) catch return;
-        const data: []const u8 = if (first < MMAP_THRESHOLD) buf.items[0..first] else blk: {
-            const st = file.stat(self.io) catch return;
-            const size: usize = @intCast(st.size);
-            const mm = std.posix.mmap(null, size, .{ .READ = true }, .{ .TYPE = .PRIVATE }, file.handle, 0) catch return;
-            std.posix.madvise(mm.ptr, mm.len, std.posix.MADV.SEQUENTIAL) catch {};
-            mapped = mm;
-            break :blk mm;
-        };
+        const data = (try self.readFileData(fd, buf, &mapped)) orelse return;
         if (data.len == 0) return;
+        const path = if (self.show_path) try buildPath(pathbuf, self.allocator, dir_path, name) else name;
+        try self.matchData(m, data, path);
+    }
+
+    /// Match an explicit file argument (e.g. the single-large-file benchmark),
+    /// opened from the cwd by its given path.
+    fn matchSeedFile(self: *Worker, m: *Regex.Matcher, buf: *std.ArrayList(u8), path: []const u8) !void {
+        const fd = std.posix.openat(std.posix.AT.FDCWD, path, O_RDONLY, 0) catch return;
+        defer _ = std.c.close(fd);
+        var mapped: ?MappedFile = null;
+        defer if (mapped) |mm| {
+            if (mm.len != 0) std.posix.munmap(mm);
+        };
+        const data = (try self.readFileData(fd, buf, &mapped)) orelse return;
+        if (data.len == 0) return;
+        try self.matchData(m, data, path);
+    }
+
+    /// Build `dir_path/name` into the reused per-worker path buffer.
+    fn buildPath(pathbuf: *std.ArrayList(u8), allocator: std.mem.Allocator, dir_path: []const u8, name: []const u8) ![]const u8 {
+        pathbuf.clearRetainingCapacity();
+        try pathbuf.ensureUnusedCapacity(allocator, dir_path.len + 1 + name.len);
+        pathbuf.appendSliceAssumeCapacity(dir_path);
+        pathbuf.appendAssumeCapacity('/');
+        pathbuf.appendSliceAssumeCapacity(name);
+        return pathbuf.items;
+    }
+
+    /// Binary-skip + run the matcher over one file's bytes. Shared by the walked
+    /// and the explicit-file paths.
+    fn matchData(self: *Worker, m: *Regex.Matcher, data: []const u8, path: []const u8) !void {
         // Binary detection: NUL in the first 1 KiB (binaries carry NUL in their
         // header; a small window avoids re-scanning most of every small text
         // file, which is then scanned again by the matcher).
@@ -267,8 +386,12 @@ pub fn main(init: std.process.Init) !void {
     // but a fixed set of plain files needs at most one worker each — spawning the
     // full pool would leave idle workers spin-waiting and stealing CPU from the
     // few that have work (notably the single-large-file case).
-    const cpu = std.Thread.getCpuCount() catch 1;
-    const pool = @max(@min(cpu, 16), 1);
+    // `ZG_THREADS` pins the worker count (for benchmarking, like ripgrep's `-j`);
+    // otherwise default to the performance cores (see `defaultWorkerCount`).
+    const pool: usize = if (std.c.getenv("ZG_THREADS")) |s|
+        @max(std.fmt.parseInt(usize, std.mem.span(s), 10) catch defaultWorkerCount(), 1)
+    else
+        defaultWorkerCount();
     const nthreads = if (any_dir) pool else @max(@min(pool, file_seeds), 1);
 
     const workers = try arena.alloc(Worker, nthreads);
