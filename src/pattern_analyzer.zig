@@ -289,7 +289,7 @@ pub const PatternAnalyzer = struct {
     /// (no catastrophic backtracking).
     fn leadingLiteral(self: *PatternAnalyzer, node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .anchor => true,
+            .literal, .char_class, .class_set, .anchor => true,
             .group => self.leadingLiteral(node.data.group.child),
             .concat => self.leadingLiteral(node.data.concat.left),
             else => false,
@@ -373,7 +373,13 @@ pub const PatternAnalyzer = struct {
                     (hasFixedStart(alt.left) or isSafeToQuantify(alt.left)) and
                     (hasFixedStart(alt.right) or isSafeToQuantify(alt.right));
             },
-            // Groups, assertions, etc. are not safe
+            // A group is transparent for backtracking analysis — it's exactly as
+            // safe to quantify as its body (e.g. `(?:[A-Za-z_]|x)+`). Without this
+            // the analyser conservatively rejected any quantified group whose body
+            // wasn't a bare atom, producing false CRITICALs on real grammars
+            // (the XML attribute matcher in the regression suite).
+            .group => isSafeToQuantify(node.data.group.child),
+            // Assertions, etc. are not safe
             else => false,
         };
     }
@@ -400,16 +406,20 @@ pub const PatternAnalyzer = struct {
 
     fn hasFixedStart(node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .anchor => true,
+            .literal, .char_class, .class_set, .anchor => true,
             .group => hasFixedStart(node.data.group.child),
             .concat => hasFixedStart(node.data.concat.left),
+            // An alternation begins at a fixed atom iff every branch does
+            // (e.g. `[A-Za-z_]|"` — each branch starts with a literal/class).
+            .alternation => hasFixedStart(node.data.alternation.left) and
+                hasFixedStart(node.data.alternation.right),
             else => false,
         };
     }
 
     fn hasFixedEnd(node: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal, .char_class, .anchor => true,
+            .literal, .char_class, .class_set, .anchor => true,
             .group => hasFixedEnd(node.data.group.child),
             .concat => hasFixedEnd(node.data.concat.right),
             else => false,
@@ -417,39 +427,59 @@ pub const PatternAnalyzer = struct {
     }
 
     fn hasDelimitedQuantifierPrefix(left: *ast.Node, right: *ast.Node) bool {
-        const delimiter = quantifiedCharClass(left) orelse return false;
-        return startsDisjointFromClass(right, delimiter);
+        const delimiter = quantifiedAtom(left) orelse return false;
+        return startsDisjointFromAtom(right, delimiter);
     }
 
-    fn quantifiedCharClass(node: *ast.Node) ?common.CharClass {
+    /// The single fixed atom (`literal` / `char_class` / `class_set`) repeated by
+    /// `node` when `node` is a quantifier over such an atom (e.g. the `[ \t]` of
+    /// `[ \t]+`), else null. This is the delimiter whose disjointness from the
+    /// rest of the body makes a repeated group safe.
+    fn quantifiedAtom(node: *ast.Node) ?*ast.Node {
         if (!isQuantifierNode(node)) return null;
         const child = getQuantifierChild(node);
         return switch (child.node_type) {
-            .char_class => child.data.char_class,
+            .literal, .char_class, .class_set => child,
             else => null,
         };
     }
 
-    fn startsDisjointFromClass(node: *ast.Node, delimiter: common.CharClass) bool {
+    /// Whether every byte that `node` can begin with is rejected by the atom
+    /// `delimiter` — i.e. the body that follows a `delimiter+` prefix can never
+    /// start with a delimiter byte, so iterations can't overlap.
+    fn startsDisjointFromAtom(node: *ast.Node, delimiter: *ast.Node) bool {
         return switch (node.node_type) {
-            .literal => !delimiter.matches(node.data.literal),
-            .char_class => charClassesDisjoint(delimiter, node.data.char_class),
-            .group => startsDisjointFromClass(node.data.group.child, delimiter),
-            .concat => startsDisjointFromClass(node.data.concat.left, delimiter),
-            .alternation => startsDisjointFromClass(node.data.alternation.left, delimiter) and
-                startsDisjointFromClass(node.data.alternation.right, delimiter),
-            .star, .plus, .optional, .repeat => startsDisjointFromClass(getQuantifierChild(node), delimiter),
+            .literal, .char_class, .class_set, .any => atomsDisjoint(node, delimiter),
+            .group => startsDisjointFromAtom(node.data.group.child, delimiter),
+            .concat => startsDisjointFromAtom(node.data.concat.left, delimiter),
+            .alternation => startsDisjointFromAtom(node.data.alternation.left, delimiter) and
+                startsDisjointFromAtom(node.data.alternation.right, delimiter),
+            .star, .plus, .optional, .repeat => startsDisjointFromAtom(getQuantifierChild(node), delimiter),
             else => false,
         };
     }
 
-    fn charClassesDisjoint(a: common.CharClass, b: common.CharClass) bool {
+    /// Whether two fixed atoms share no byte (handles `literal`, `char_class`,
+    /// `class_set`, and `.` — `.` is treated as matching everything, so it
+    /// overlaps any atom).
+    fn atomsDisjoint(a: *ast.Node, b: *ast.Node) bool {
         var c: u16 = 0;
         while (c <= 255) : (c += 1) {
             const byte: u8 = @intCast(c);
-            if (a.matches(byte) and b.matches(byte)) return false;
+            if (atomMatchesByte(a, byte) and atomMatchesByte(b, byte)) return false;
         }
         return true;
+    }
+
+    /// Whether a single fixed atom node matches `byte`.
+    fn atomMatchesByte(node: *ast.Node, byte: u8) bool {
+        return switch (node.node_type) {
+            .literal => node.data.literal == byte,
+            .char_class => node.data.char_class.matches(byte),
+            .class_set => node.data.class_set.matches(byte, false),
+            .any => true,
+            else => false,
+        };
     }
 
     fn startsDisjoint(left: *ast.Node, right: *ast.Node) bool {
@@ -465,6 +495,7 @@ pub const PatternAnalyzer = struct {
         return switch (node.node_type) {
             .literal => node.data.literal == byte,
             .char_class => node.data.char_class.matches(byte),
+            .class_set => node.data.class_set.matches(byte, false),
             .any => true,
             .group => canStartWith(node.data.group.child, byte),
             .concat => canStartWith(node.data.concat.left, byte),
@@ -720,3 +751,4 @@ test "analyzer: full URL pattern" {
     // Should not be critical
     try std.testing.expect(result.risk_level != .critical);
 }
+
