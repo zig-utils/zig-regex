@@ -3,9 +3,16 @@
 ## grep throughput vs ripgrep (issue #10)
 
 `zg` (`benchmarks/zg.zig`, built by `zig build` to `zig-out/bin/zg`) is a minimal
-ripgrep-style grep built on the library — parallel directory walk + per-CPU
-matcher pool — used to reproduce the [issue #10](https://github.com/zig-utils/zig-regex/issues/10)
-benchmarks head to head against `rg`.
+ripgrep-style grep built on the library, used to reproduce the
+[issue #10](https://github.com/zig-utils/zig-regex/issues/10) benchmarks head to
+head against `rg`. Its walker is ripgrep-shaped: a worker pool pulls *directories*
+off a shared queue, reads each directory's entries in batches, and matches the
+contained files inline (`openat`-relative, read with raw `std.posix`, one reused
+`Regex.matcher()` per thread), pushing only subdirectories back on the queue — so
+the queue lock is touched ~once per directory, not per file. The pool defaults to
+the performance-core count (an I/O-bound walk peaks there on P+E machines; all
+logical cores oversubscribe and add contention). `ZG_THREADS=N` pins it, like
+`rg -j`.
 
 ```sh
 zig build                                   # builds zig-out/bin/zg
@@ -20,9 +27,13 @@ find /tmp/zig_corpus -name '*.zig' -exec cat {} + > /tmp/cat_zig.txt
 
 The harnesses need `hyperfine`, `python3`, and `rg` (path set in the scripts). The
 single-large-file numbers are the honest engine comparison — both tools are
-single-threaded on one file. zig-regex wins or matches `rg` on every pattern in
-the issue's set there; the multi-file corpus is ~parity and I/O/walker-bound (a
-pure-I/O probe is ~1.05× rg).
+single-threaded on one file. `zg` beats `rg` on every pattern in the issue's set,
+both single-file and on the multi-file corpus (vs ripgrep 15.1.0 on the
+`ziglang/zig` tree, ~0.6–0.9× its wall time). Single-threaded it does 0.54–0.90×
+the CPU work of `rg` per `/usr/bin/time` — the cleanest read, immune to scheduler
+noise. On heterogeneous-core machines, run a few passes (or compare
+`/usr/bin/time` user+sys): the parallel wall time is noisy because work lands on
+fast vs slow cores differently each run.
 
 ## findAll throughput vs the Rust `regex` crate
 
