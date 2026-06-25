@@ -752,3 +752,29 @@ test "analyzer: full URL pattern" {
     try std.testing.expect(result.risk_level != .critical);
 }
 
+test "analyzer: class-set delimited quantifier prefix is not critical" {
+    // Bracket classes parse to `.class_set`, which the safety heuristics used to
+    // ignore — so a delimited repeated group whose delimiter is a class set
+    // (`([ \t]+...)*`, the XML attribute matcher) was wrongly rejected as
+    // PatternTooComplex even though the whitespace delimiter is disjoint from the
+    // body and the iterations therefore can't overlap.
+    const allocator = std.testing.allocator;
+    const parser = @import("parser.zig");
+
+    const patterns = [_][]const u8{
+        // leading class-set delimiter (`[ \t\n\r]+`) disjoint from the body
+        "([ \\n\\t\\r]+([A-Za-z_:]|[^\\x00-\\x7F])([A-Za-z0-9_:.-]|[^\\x00-\\x7F])*)*",
+        // disjoint alternation of class-set / quoted-string branches
+        "([A-Za-z_:]+|\"[^\"]*\"|'[^']*')*",
+    };
+    for (patterns) |pattern| {
+        var p = try parser.Parser.init(allocator, pattern);
+        var tree = try p.parse();
+        defer tree.deinit();
+        var result = try analyzePattern(allocator, tree.root);
+        defer result.deinit(allocator);
+        try std.testing.expect(result.risk_level != .critical);
+        try analyzeAndValidate(allocator, tree.root, .high);
+    }
+}
+
