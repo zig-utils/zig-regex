@@ -1514,7 +1514,22 @@ pub const Parser = struct {
                         i.* += 1; // consume }
                         return cp;
                     }
-                    return classHex(input, i, 4) orelse return RegexError.InvalidEscapeSequence;
+                    const cp = classHex(input, i, 4) orelse return RegexError.InvalidEscapeSequence;
+                    // In Unicode mode a `\uLEAD\uTRAIL` surrogate pair combines
+                    // into one astral code point (UTF16Decode) — e.g. the class
+                    // `[𝌆]` is the single code point U+1D306.
+                    if (unicode_strict and cp >= 0xD800 and cp <= 0xDBFF and
+                        i.* + 1 < input.len and input[i.*] == '\\' and input[i.* + 1] == 'u')
+                    {
+                        const save = i.*;
+                        i.* += 2;
+                        if (classHex(input, i, 4)) |lo| {
+                            if (lo >= 0xDC00 and lo <= 0xDFFF)
+                                return @intCast(0x10000 + ((@as(u32, cp) - 0xD800) << 10) + (@as(u32, lo) - 0xDC00));
+                        }
+                        i.* = save; // the next `\u` is not a trail — keep the lead as-is
+                    }
+                    return cp;
                 },
                 else => {
                     // Identity escape of a syntax character.
