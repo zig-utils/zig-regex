@@ -882,6 +882,24 @@ pub const Parser = struct {
         switch (token.token_type) {
             .literal => {
                 try self.advance();
+                // In Unicode mode a multi-byte UTF-8 code point is a SINGLE atom:
+                // group its lead + continuation byte literals so a following
+                // quantifier binds to the whole code point (`𝌆{2}` repeats the
+                // code point, not just its last byte). The matcher is byte-based,
+                // so the grouped concat matches the same bytes — only quantifier
+                // binding changes.
+                if ((self.unicode or self.unicode_sets) and token.value >= 0xC0) {
+                    var node = try ast.Node.createLiteral(self.allocator, token.value, span);
+                    errdefer node.destroy(self.allocator);
+                    while (self.current_token.token_type == .literal and
+                        self.current_token.value >= 0x80 and self.current_token.value < 0xC0)
+                    {
+                        const cont = try ast.Node.createLiteral(self.allocator, self.current_token.value, self.current_token.span);
+                        try self.advance();
+                        node = try ast.Node.createConcat(self.allocator, node, cont, span);
+                    }
+                    return node;
+                }
                 return ast.Node.createLiteral(self.allocator, token.value, span);
             },
             .dot => {
