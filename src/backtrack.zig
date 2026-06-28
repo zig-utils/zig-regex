@@ -484,12 +484,14 @@ pub const BacktrackEngine = struct {
         for (ends.items) |end| {
             if (end <= pos or end > target_end) continue;
             @memcpy(self.captures, saved);
+            self.clearCapturesIn(child);
             if (!self.matchNodeConstrained(child, pos, end)) continue;
             if (self.matchRepeatedChildConstrained(child, end, target_end, count + 1, min, max)) return true;
         }
 
         if (self.hasAlternation(child) and self.hasCapturingGroup(child)) {
             @memcpy(self.captures, saved);
+            self.clearCapturesIn(child);
             if (self.matchNodeConstrained(child, pos, target_end)) {
                 if (self.matchRepeatedChildConstrained(child, target_end, target_end, count + 1, min, max)) return true;
             }

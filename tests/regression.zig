@@ -787,6 +787,31 @@ test "regression: duplicate named captures backtrack alternatives before named b
         return error.TestExpectedMatch;
     }
     try std.testing.expect((try repeated.find("abab")) == null);
+
+    var trailing_empty = try Regex.compile(allocator, "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$");
+    defer trailing_empty.deinit();
+    if (try trailing_empty.find("xz")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("xz", match.slice);
+        try std.testing.expect(!match.captures_present[0]);
+        try std.testing.expect(!match.captures_present[1]);
+        try std.testing.expect(trailing_empty.getNamedCapture(&match, "a") == null);
+    } else {
+        return error.TestExpectedMatch;
+    }
+    if (try trailing_empty.find("yz")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("yz", match.slice);
+        try std.testing.expect(!match.captures_present[0]);
+        try std.testing.expect(!match.captures_present[1]);
+        try std.testing.expect(trailing_empty.getNamedCapture(&match, "a") == null);
+    } else {
+        return error.TestExpectedMatch;
+    }
+    try std.testing.expect((try trailing_empty.find("xzx")) == null);
+    try std.testing.expect((try trailing_empty.find("yzy")) == null);
 }
 
 test "regression: lookbehind evaluates captures in reverse direction" {
