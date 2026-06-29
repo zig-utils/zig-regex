@@ -200,13 +200,27 @@ pub const Lexer = struct {
                 if (self.unicode_strict) if (self.peek()) |following| {
                     if (std.ascii.isDigit(following)) return RegexError.InvalidEscapeSequence;
                 };
-                return self.makeToken(.escape_char, 0x00);
+                var value: u8 = 0;
+                if (!self.unicode_strict) {
+                    var consumed: usize = 1;
+                    while (consumed < 3) : (consumed += 1) {
+                        const d = self.peek() orelse break;
+                        if (d < '0' or d > '7') break;
+                        _ = self.advance();
+                        value = value * 8 + (d - '0');
+                    }
+                }
+                return self.emitCodepoint(value);
             },
             'x' => try self.parseHexEscape(), // \xHH → one byte
             'c' => blk: {
                 // \cX control escape: the control letter's code mod 32.
                 const x = self.peek() orelse break :blk RegexError.InvalidEscapeSequence;
                 if (std.ascii.isAlphabetic(x)) {
+                    _ = self.advance();
+                    break :blk self.makeToken(.escape_char, x % 32);
+                }
+                if (self.in_class and !self.unicode_strict and (std.ascii.isDigit(x) or x == '_')) {
                     _ = self.advance();
                     break :blk self.makeToken(.escape_char, x % 32);
                 }
@@ -444,6 +458,7 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     current_token: Token,
     capture_count: usize,
+    total_capture_count: usize,
     nesting_depth: usize,
     /// The `v` flag: parse character classes with set notation.
     unicode_sets: bool = false,
@@ -493,6 +508,42 @@ pub const Parser = struct {
         return false;
     }
 
+    fn countCaptures(pattern: []const u8) usize {
+        var count: usize = 0;
+        var i: usize = 0;
+        var in_class = false;
+        while (i < pattern.len) : (i += 1) {
+            const c = pattern[i];
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
+            if (in_class) {
+                if (c == ']') in_class = false;
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+                continue;
+            }
+            if (c != '(') continue;
+
+            if (i + 1 >= pattern.len or pattern[i + 1] != '?') {
+                count += 1;
+                continue;
+            }
+            if (i + 2 >= pattern.len) continue;
+            const marker = pattern[i + 2];
+            if (marker == '<') {
+                const after = if (i + 3 < pattern.len) pattern[i + 3] else 0;
+                if (after != '=' and after != '!') count += 1;
+            } else if (marker == 'P' and i + 3 < pattern.len and pattern[i + 3] == '<') {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !Parser {
         var lexer = Lexer.init(pattern);
         lexer.has_named_groups = scanForNamedGroups(pattern);
@@ -502,6 +553,7 @@ pub const Parser = struct {
             .allocator = allocator,
             .current_token = first_token,
             .capture_count = 0,
+            .total_capture_count = countCaptures(pattern),
             .nesting_depth = 0,
         };
     }
@@ -768,6 +820,18 @@ pub const Parser = struct {
         }
     }
 
+    fn validBoundedQuantifierAhead(self: *Parser) bool {
+        var i = self.current_token.span.start + 1;
+        const input = self.lexer.input;
+        if (i >= input.len or !std.ascii.isDigit(input[i])) return false;
+        while (i < input.len and std.ascii.isDigit(input[i])) : (i += 1) {}
+        if (i < input.len and input[i] == ',') {
+            i += 1;
+            while (i < input.len and std.ascii.isDigit(input[i])) : (i += 1) {}
+        }
+        return i < input.len and input[i] == '}';
+    }
+
     /// Parse repetition operators (*, +, ?, {m,n})
     fn parseRepeat(self: *Parser) !*ast.Node {
         var node = try self.parsePrimary();
@@ -801,6 +865,10 @@ pub const Parser = struct {
                     node = try ast.Node.createOptional(self.allocator, node, greedy, span);
                 },
                 .lbrace => {
+                    if (!self.validBoundedQuantifierAhead()) {
+                        if (self.unicode or self.unicode_sets) return RegexError.InvalidQuantifier;
+                        break;
+                    }
                     try self.checkQuantifierTarget(node);
                     try self.advance(); // consume {
 
@@ -875,6 +943,48 @@ pub const Parser = struct {
         }
 
         return node;
+    }
+
+    fn literalSequenceFromBytes(self: *Parser, bytes: []const u8, span: common.Span) RegexError!*ast.Node {
+        if (bytes.len == 0) return ast.Node.createEmpty(self.allocator, span);
+        var node = try ast.Node.createLiteral(self.allocator, bytes[0], span);
+        errdefer node.destroy(self.allocator);
+        for (bytes[1..]) |b| {
+            const next = try ast.Node.createLiteral(self.allocator, b, span);
+            node = try ast.Node.createConcat(self.allocator, node, next, span);
+        }
+        return node;
+    }
+
+    fn decimalEscapeFallbackBytes(self: *Parser, token: Token, out: *[8]u8) []const u8 {
+        const digits = self.lexer.input[token.span.start + 1 .. token.span.end];
+        if (digits.len == 0) return out[0..0];
+        if (digits[0] == '8' or digits[0] == '9') {
+            out[0] = digits[0];
+            if (digits.len > 1) {
+                @memcpy(out[1 .. 1 + digits[1..].len], digits[1..]);
+                return out[0 .. 1 + digits[1..].len];
+            }
+            return out[0..1];
+        }
+
+        var value: u8 = digits[0] - '0';
+        var used: usize = 1;
+        if (digits.len > 1 and digits[1] >= '0' and digits[1] <= '7') {
+            value = value * 8 + (digits[1] - '0');
+            used = 2;
+            if (digits[0] <= '3' and digits.len > 2 and digits[2] >= '0' and digits[2] <= '7') {
+                value = value * 8 + (digits[2] - '0');
+                used = 3;
+            }
+        }
+        const encoded_len = std.unicode.utf8Encode(value, out[0..4]) catch 1;
+        if (encoded_len == 1 and value >= 0x80) out[0] = value;
+        if (digits.len > used) {
+            @memcpy(out[encoded_len .. encoded_len + digits[used..].len], digits[used..]);
+            return out[0 .. encoded_len + digits[used..].len];
+        }
+        return out[0..encoded_len];
     }
 
     /// Parse primary expressions (literals, groups, character classes)
@@ -997,6 +1107,10 @@ pub const Parser = struct {
                 const name = if (token.name) |n| try self.normalizeGroupName(n) else null;
                 errdefer if (name) |n| self.allocator.free(n);
                 const index = token.index; // 1-based capture group index; 0 for named-only references
+                if (name == null and index > self.total_capture_count and !(self.unicode or self.unicode_sets)) {
+                    var bytes: [8]u8 = undefined;
+                    return self.literalSequenceFromBytes(self.decimalEscapeFallbackBytes(token, &bytes), span);
+                }
                 return ast.Node.createBackreference(self.allocator, index, name, span);
             },
             .escape_p, .escape_P => {
@@ -1233,6 +1347,16 @@ pub const Parser = struct {
             },
             .lbracket => {
                 return try self.parseCharClass();
+            },
+            .rbracket, .rbrace => {
+                if (self.unicode or self.unicode_sets) return RegexError.UnexpectedCharacter;
+                try self.advance();
+                return ast.Node.createLiteral(self.allocator, if (token.token_type == .rbracket) ']' else '}', span);
+            },
+            .lbrace => {
+                if (self.unicode or self.unicode_sets) return RegexError.UnexpectedCharacter;
+                try self.advance();
+                return ast.Node.createLiteral(self.allocator, '{', span);
             },
             else => {
                 return RegexError.UnexpectedCharacter;
@@ -1516,7 +1640,7 @@ pub const Parser = struct {
                     return 0x08;
                 },
                 'c' => {
-                    if (i.* + 2 < input.len and std.ascii.isAlphabetic(input[i.* + 2])) {
+                    if (i.* + 2 < input.len and (std.ascii.isAlphabetic(input[i.* + 2]) or (!unicode_strict and (std.ascii.isDigit(input[i.* + 2]) or input[i.* + 2] == '_')))) {
                         const x = input[i.* + 2];
                         i.* += 3;
                         return x % 32;
@@ -2181,6 +2305,7 @@ pub const Parser = struct {
                         // Not a valid char, backtrack and treat '-' as literal
                         self.lexer.pos = saved_pos;
                         try ranges.append(self.allocator, common.CharRange.init(first_char, first_char));
+                        try ranges.append(self.allocator, common.CharRange.init('-', '-'));
                         continue;
                     };
                     try self.advance();

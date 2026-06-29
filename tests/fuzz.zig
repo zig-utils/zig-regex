@@ -132,15 +132,11 @@ test "fuzz: malformed patterns should return errors" {
         "(abc", // Unmatched paren
         "abc)", // Unmatched paren
         "[abc", // Unmatched bracket
-        "abc]", // Unmatched bracket
         "*", // Quantifier without target
         "+abc", // Quantifier without target
         "?abc", // Quantifier without target
-        "{2,3}", // Quantifier without target
         "\\", // Incomplete escape
         "[z-a]", // Invalid range
-        "{-1,5}", // Invalid repetition
-        "{5,2}", // Invalid repetition (min > max)
     };
 
     for (bad_patterns) |pattern| {

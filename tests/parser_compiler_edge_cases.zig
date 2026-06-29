@@ -194,6 +194,99 @@ test "parser: unicode character class rejects invalid escapes and class ranges" 
     try std.testing.expect(try control.isMatch("\x01"));
 }
 
+test "parser: annex b decimal escapes fall back to legacy octal or identity" {
+    const allocator = std.testing.allocator;
+
+    var single = try Regex.compile(allocator, "\\7");
+    defer single.deinit();
+    try std.testing.expect(try single.isMatch("\x07"));
+
+    var bounded = try Regex.compile(allocator, "\\400");
+    defer bounded.deinit();
+    if (try bounded.find("\x200")) |match| {
+        var owned = match;
+        defer owned.deinit(allocator);
+        try std.testing.expectEqualStrings("\x200", match.slice);
+    } else return error.TestExpectedMatch;
+
+    var three_digits = try Regex.compile(allocator, "\\0111");
+    defer three_digits.deinit();
+    if (try three_digits.find("\x091")) |match| {
+        var owned = match;
+        defer owned.deinit(allocator);
+        try std.testing.expectEqualStrings("\x091", match.slice);
+    } else return error.TestExpectedMatch;
+
+    var high = try Regex.compile(allocator, "\\300");
+    defer high.deinit();
+    if (try high.find("\u{c0}")) |match| {
+        var owned = match;
+        defer owned.deinit(allocator);
+        try std.testing.expectEqualStrings("\u{c0}", match.slice);
+    } else return error.TestExpectedMatch;
+
+    var identity = try Regex.compile(allocator, "7\\89");
+    defer identity.deinit();
+    try std.testing.expect(try identity.isMatch("789"));
+
+    var backref = try Regex.compile(allocator, "(.)\\1");
+    defer backref.deinit();
+    try std.testing.expect(try backref.isMatch("aa"));
+    try std.testing.expect(!try backref.isMatch("a\x01"));
+}
+
+test "parser: annex b character class escapes and shorthand ranges" {
+    const allocator = std.testing.allocator;
+
+    var outside = try Regex.compile(allocator, "\\c0");
+    defer outside.deinit();
+    try std.testing.expect(!try outside.isMatch("\x10"));
+
+    var control_digit = try Regex.compile(allocator, "[\\c0]");
+    defer control_digit.deinit();
+    try std.testing.expect(try control_digit.isMatch("\x10"));
+
+    var control_underscore = try Regex.compile(allocator, "[\\c_]");
+    defer control_underscore.deinit();
+    try std.testing.expect(try control_underscore.isMatch("\x1f"));
+
+    var range_left_shorthand = try Regex.compile(allocator, "[\\d-a]+");
+    defer range_left_shorthand.deinit();
+    if (try range_left_shorthand.find(":a0123456789-:")) |match| {
+        var owned = match;
+        defer owned.deinit(allocator);
+        try std.testing.expectEqualStrings("a0123456789-", match.slice);
+    } else return error.TestExpectedMatch;
+
+    var range_right_shorthand = try Regex.compile(allocator, "[%-\\d]+");
+    defer range_right_shorthand.deinit();
+    if (try range_right_shorthand.find("&%0123456789-&")) |match| {
+        var owned = match;
+        defer owned.deinit(allocator);
+        try std.testing.expectEqualStrings("%0123456789-", match.slice);
+    } else return error.TestExpectedMatch;
+}
+
+test "parser: annex b extended pattern characters are literals" {
+    const allocator = std.testing.allocator;
+
+    var bracket = try Regex.compile(allocator, "]");
+    defer bracket.deinit();
+    try std.testing.expect(try bracket.isMatch(" ]{}"));
+
+    var left_brace = try Regex.compile(allocator, "{");
+    defer left_brace.deinit();
+    try std.testing.expect(try left_brace.isMatch(" ]{}"));
+
+    var right_brace = try Regex.compile(allocator, "}");
+    defer right_brace.deinit();
+    try std.testing.expect(try right_brace.isMatch(" ]{}"));
+
+    var braced_literal = try Regex.compile(allocator, "x{o}x");
+    defer braced_literal.deinit();
+    try std.testing.expect(try braced_literal.isMatch("x{o}x"));
+}
+
 // --- Complex pattern compilation ---
 
 test "compiler: alternation with quantifiers" {
