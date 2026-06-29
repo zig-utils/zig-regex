@@ -241,6 +241,12 @@ test "parser: annex b character class escapes and shorthand ranges" {
     var outside = try Regex.compile(allocator, "\\c0");
     defer outside.deinit();
     try std.testing.expect(!try outside.isMatch("\x10"));
+    try std.testing.expect(try outside.isMatch("\\c0"));
+
+    var invalid_control = try Regex.compile(allocator, "\\c\u{0410}");
+    defer invalid_control.deinit();
+    try std.testing.expect(!try invalid_control.isMatch("c\u{0410}"));
+    try std.testing.expect(try invalid_control.isMatch("\\c\u{0410}"));
 
     var control_digit = try Regex.compile(allocator, "[\\c0]");
     defer control_digit.deinit();
@@ -249,6 +255,25 @@ test "parser: annex b character class escapes and shorthand ranges" {
     var control_underscore = try Regex.compile(allocator, "[\\c_]");
     defer control_underscore.deinit();
     try std.testing.expect(try control_underscore.isMatch("\x1f"));
+
+    var invalid_control_class = try Regex.compile(allocator, "[\\c!]");
+    defer invalid_control_class.deinit();
+    try std.testing.expect(try invalid_control_class.isMatch("\\"));
+    try std.testing.expect(try invalid_control_class.isMatch("c"));
+    try std.testing.expect(try invalid_control_class.isMatch("!"));
+    try std.testing.expect(!try invalid_control_class.isMatch("\x03"));
+
+    var caret_literal = try Regex.compile(allocator, "[0-9A-Za-z_\\$(|)\\[\\]\\/\\\\^]");
+    defer caret_literal.deinit();
+    try std.testing.expect(try caret_literal.isMatch("^"));
+
+    var decimal_range = try Regex.compile(allocator, "[\\d][\\12-\\14]{1,}[^\\d]");
+    defer decimal_range.deinit();
+    if (try decimal_range.find("line1\n\n\n\n\nline2")) |match| {
+        var owned = match;
+        defer owned.deinit(allocator);
+        try std.testing.expectEqualStrings("1\n\n\n\n\nl", match.slice);
+    } else return error.TestExpectedMatch;
 
     var range_left_shorthand = try Regex.compile(allocator, "[\\d-a]+");
     defer range_left_shorthand.deinit();

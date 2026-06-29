@@ -137,6 +137,16 @@ pub const Lexer = struct {
         };
     }
 
+    fn literalWithPending(self: *Lexer, first: u8, rest: []const u8) Token {
+        self.pending_len = 0;
+        self.pending_pos = 0;
+        for (rest) |b| {
+            self.pending[self.pending_len] = b;
+            self.pending_len += 1;
+        }
+        return self.makeToken(.literal, first);
+    }
+
     fn parseEscape(self: *Lexer) !Token {
         // We've already consumed the backslash
         const c = self.advance() orelse return RegexError.UnexpectedEndOfPattern;
@@ -215,7 +225,10 @@ pub const Lexer = struct {
             'x' => try self.parseHexEscape(), // \xHH → one byte
             'c' => blk: {
                 // \cX control escape: the control letter's code mod 32.
-                const x = self.peek() orelse break :blk RegexError.InvalidEscapeSequence;
+                const x = self.peek() orelse {
+                    if (self.unicode_strict) break :blk RegexError.InvalidEscapeSequence;
+                    break :blk self.literalWithPending('\\', "c");
+                };
                 if (std.ascii.isAlphabetic(x)) {
                     _ = self.advance();
                     break :blk self.makeToken(.escape_char, x % 32);
@@ -225,7 +238,7 @@ pub const Lexer = struct {
                     break :blk self.makeToken(.escape_char, x % 32);
                 }
                 if (self.unicode_strict) break :blk RegexError.InvalidEscapeSequence;
-                break :blk self.makeToken(.literal, 'c'); // not a control letter: literal 'c'
+                break :blk self.literalWithPending('\\', "c"); // Annex B: invalid \c is literal "\c"
             },
             'u' => try self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
             'p' => self.parsePropertyEscape(false),
@@ -1533,10 +1546,17 @@ pub const Parser = struct {
             .lbrace => '{',
             .rbrace => '}',
             .dollar => '$',
+            .caret => '^',
             .lbracket => '[', // Allow [ as literal (for non-POSIX cases)
             .escape_b => 0x08, // Inside a class, \b is backspace, not a word boundary.
+            .backref => blk: {
+                if (self.unicode or self.unicode_sets) break :blk null;
+                var bytes: [8]u8 = undefined;
+                const fallback = self.decimalEscapeFallbackBytes(self.current_token, &bytes);
+                break :blk if (fallback.len == 0) null else fallback[0];
+            },
             // These should not appear here
-            .rbracket, .caret, .backslash, .escape_d, .escape_D, .escape_w, .escape_W, .escape_s, .escape_S, .escape_B, .escape_A, .escape_z, .escape_Z, .backref, .escape_p, .escape_P, .eof => null,
+            .rbracket, .backslash, .escape_d, .escape_D, .escape_w, .escape_W, .escape_s, .escape_S, .escape_B, .escape_A, .escape_z, .escape_Z, .escape_p, .escape_P, .eof => null,
         };
     }
 
