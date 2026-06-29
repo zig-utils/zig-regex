@@ -107,6 +107,7 @@ pub const Regex = struct {
         var p = try parser.Parser.init(allocator, pattern);
         p.unicode_sets = flags.unicode_sets;
         p.unicode = flags.unicode;
+        p.case_insensitive = flags.case_insensitive;
         p.ecmascript = flags.ecmascript;
         // The `x`, `u`, and `v` flags affect lexing from the first token, so
         // enable them on the lexer and re-lex the already-fetched first token.
@@ -961,8 +962,8 @@ pub const Regex = struct {
 
     fn nextCodepointStart(input: []const u8, pos: usize) usize {
         if (pos >= input.len) return input.len + 1;
-        const dec = unicode_mod.decodeUtf8Lenient(input[pos..]) orelse return pos + 1;
-        return pos + dec.len;
+        const len = common.ecmaCodePointLen(input, pos) orelse return pos + 1;
+        return pos + len;
     }
 
     // --- Prefilter hints (issue #10) -------------------------------------

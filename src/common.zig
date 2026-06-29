@@ -73,6 +73,28 @@ pub fn isEcmaLineTerminator(cp: unicode.Codepoint) bool {
     return cp == '\n' or cp == '\r' or cp == 0x2028 or cp == 0x2029;
 }
 
+pub fn isHighSurrogate(cp: unicode.Codepoint) bool {
+    return cp >= 0xD800 and cp <= 0xDBFF;
+}
+
+pub fn isLowSurrogate(cp: unicode.Codepoint) bool {
+    return cp >= 0xDC00 and cp <= 0xDFFF;
+}
+
+pub fn ecmaCodePointLen(input: []const u8, pos: usize) ?usize {
+    if (pos >= input.len) return null;
+    const first = unicode.decodeUtf8Lenient(input[pos..]) orelse return null;
+    if (isHighSurrogate(first.codepoint)) {
+        const next = pos + first.len;
+        if (next < input.len) {
+            if (unicode.decodeUtf8Lenient(input[next..])) |second| {
+                if (isLowSurrogate(second.codepoint)) return first.len + second.len;
+            }
+        }
+    }
+    return first.len;
+}
+
 pub fn dotMatchLen(input: []const u8, pos: usize, flags: CompileFlags) ?usize {
     if (pos >= input.len) return null;
 
@@ -84,7 +106,7 @@ pub fn dotMatchLen(input: []const u8, pos: usize, flags: CompileFlags) ?usize {
 
     if (!flags.dot_all and isEcmaLineTerminator(dec.codepoint)) return null;
     if (!flags.unicode and dec.codepoint > 0xFFFF) return null;
-    return dec.len;
+    return if (flags.unicode) ecmaCodePointLen(input, pos) orelse dec.len else dec.len;
 }
 
 /// Span in the source pattern (for error reporting)

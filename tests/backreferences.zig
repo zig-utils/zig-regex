@@ -263,6 +263,25 @@ test "pattern backreference: nested groups" {
     }
 }
 
+test "pattern backreference: unicode dot keeps surrogate pair atomic" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compileWithFlags(allocator, "(.+).*\\1", .{ .unicode = true, .ecmascript = true });
+    defer regex.deinit();
+
+    const input = [_]u8{
+        0xED, 0xA0, 0x80,
+        0xED, 0xB0, 0x80,
+        0xED, 0xA0, 0x80,
+    };
+    try std.testing.expect(!try regex.isMatch(&input));
+
+    const normalized_input = [_]u8{
+        0xF0, 0x90, 0x80, 0x80,
+        0xED, 0xA0, 0x80,
+    };
+    try std.testing.expect(!try regex.isMatch(&normalized_input));
+}
+
 test "pattern backreference: with alternation" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "(a|b)\\1");

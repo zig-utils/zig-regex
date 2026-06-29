@@ -86,7 +86,7 @@ pub const BacktrackEngine = struct {
     pub fn findFrom(self: *BacktrackEngine, input: []const u8, start: usize) ?BacktrackMatch {
         self.input = input;
 
-        const codepoint_search = containsCodepointAtom(self.ast_root);
+        const codepoint_search = self.flags.unicode or containsCodepointAtom(self.ast_root);
         var pos: usize = @min(start, input.len);
         // One ReDoS step budget for the whole search, NOT per start position.
         // Resetting it each position let total backtracking reach
@@ -140,8 +140,8 @@ pub const BacktrackEngine = struct {
     }
 
     fn nextCodepointStart(input: []const u8, pos: usize) usize {
-        const dec = unicode_mod.decodeUtf8Lenient(input[pos..]) orelse return pos + 1;
-        return pos + dec.len;
+        const len = common.ecmaCodePointLen(input, pos) orelse return pos + 1;
+        return pos + len;
     }
 
     /// Reset all capture groups
@@ -277,9 +277,10 @@ pub const BacktrackEngine = struct {
                 // Re-match left to this specific end position to set captures correctly
                 if (left_has_groups) {
                     if (left_has_choices) {
-                        _ = self.matchNodeConstrained(concat.left, pos, left_end);
+                        if (!self.matchNodeConstrained(concat.left, pos, left_end)) continue;
                     } else {
-                        _ = self.matchNode(concat.left, pos);
+                        const fixed_end = self.matchNode(concat.left, pos) orelse continue;
+                        if (fixed_end != left_end) continue;
                     }
                 }
 
@@ -297,8 +298,7 @@ pub const BacktrackEngine = struct {
 
                     for (right_positions.items) |right_end| {
                         @memcpy(self.captures, saved_captures);
-                        _ = self.matchNodeConstrained(concat.right, left_end, right_end);
-                        return right_end;
+                        if (self.matchNodeConstrained(concat.right, left_end, right_end)) return right_end;
                     }
                 } else {
                     if (self.matchNode(concat.right, left_end)) |result| {
@@ -706,9 +706,10 @@ pub const BacktrackEngine = struct {
                         // needed when the left side has groups — else pure waste).
                         if (left_has_groups) {
                             if (left_has_choices) {
-                                _ = self.matchNodeConstrained(c.left, pos, left_end);
+                                if (!self.matchNodeConstrained(c.left, pos, left_end)) continue;
                             } else {
-                                _ = self.matchNode(c.left, pos);
+                                const fixed_end = self.matchNode(c.left, pos) orelse continue;
+                                if (fixed_end != left_end) continue;
                             }
                         }
 
@@ -1538,6 +1539,16 @@ pub const BacktrackEngine = struct {
         if (pos == 0 or pos > self.input.len) return null;
         var start = pos - 1;
         while (start > 0 and (self.input[start] & 0xC0) == 0x80) : (start -= 1) {}
+        if (self.flags.unicode) {
+            const dec = unicode_mod.decodeUtf8Lenient(self.input[start..]) orelse return start;
+            if (common.isLowSurrogate(dec.codepoint) and start >= 3) {
+                var prev = start - 1;
+                while (prev > 0 and (self.input[prev] & 0xC0) == 0x80) : (prev -= 1) {}
+                if (unicode_mod.decodeUtf8Lenient(self.input[prev..])) |before| {
+                    if (common.isHighSurrogate(before.codepoint) and prev + before.len == start) return prev;
+                }
+            }
+        }
         return start;
     }
 

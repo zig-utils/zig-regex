@@ -163,3 +163,13 @@ test "case-insensitive repeated-atom fast path folds the class" {
     defer m.deinit(allocator);
     try std.testing.expectEqualStrings("XyZ", m.slice);
 }
+
+test "case insensitive unicode literal uses ECMAScript simple folding" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compileWithFlags(allocator, "\\u212a", .{ .unicode = true, .case_insensitive = true, .ecmascript = true });
+    defer regex.deinit();
+
+    try std.testing.expect(try regex.isMatch("k"));
+    try std.testing.expect(try regex.isMatch("K"));
+    try std.testing.expect(try regex.isMatch("\u{212A}"));
+}

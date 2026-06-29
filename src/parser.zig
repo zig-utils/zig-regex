@@ -450,6 +450,9 @@ pub const Parser = struct {
     /// The `u` flag: ordinary character classes match code points instead of
     /// bytes, while keeping non-`v` class syntax.
     unicode: bool = false,
+    /// The global `i` flag. Scoped `(?i:...)` modifiers are handled at match
+    /// time, but the top-level flag can affect how Unicode literals are parsed.
+    case_insensitive: bool = false,
     /// Current `x` (extended/verbose) state. Kept in sync with `lexer.extended`;
     /// pushed/popped around `(?x:...)` / `(?-x:...)` scopes.
     extended: bool = false,
@@ -889,13 +892,27 @@ pub const Parser = struct {
                 // so the grouped concat matches the same bytes — only quantifier
                 // binding changes.
                 if ((self.unicode or self.unicode_sets) and token.value >= 0xC0) {
-                    var node = try ast.Node.createLiteral(self.allocator, token.value, span);
-                    errdefer node.destroy(self.allocator);
+                    var bytes: [4]u8 = undefined;
+                    bytes[0] = token.value;
+                    var len: usize = 1;
                     while (self.current_token.token_type == .literal and
                         self.current_token.value >= 0x80 and self.current_token.value < 0xC0)
                     {
-                        const cont = try ast.Node.createLiteral(self.allocator, self.current_token.value, self.current_token.span);
+                        if (len < bytes.len) {
+                            bytes[len] = self.current_token.value;
+                            len += 1;
+                        }
                         try self.advance();
+                    }
+                    if (self.case_insensitive) {
+                        if (unicode.decodeUtf8Lenient(bytes[0..len])) |dec| {
+                            if (dec.len == len) return self.createSingletonClassSet(dec.codepoint, span);
+                        }
+                    }
+                    var node = try ast.Node.createLiteral(self.allocator, bytes[0], span);
+                    errdefer node.destroy(self.allocator);
+                    for (bytes[1..len]) |b| {
+                        const cont = try ast.Node.createLiteral(self.allocator, b, span);
                         node = try ast.Node.createConcat(self.allocator, node, cont, span);
                     }
                     return node;
@@ -1221,6 +1238,19 @@ pub const Parser = struct {
                 return RegexError.UnexpectedCharacter;
             },
         }
+    }
+
+    fn createSingletonClassSet(self: *Parser, cp: u21, span: common.Span) RegexError!*ast.Node {
+        const items = try self.allocator.alloc(ast.Node.ClassItem, 1);
+        errdefer self.allocator.free(items);
+        items[0] = .{ .range = .{ .lo = cp, .hi = cp } };
+        const set = try self.allocator.create(ast.Node.ClassSet);
+        set.* = .{
+            .op = .union_,
+            .negated = false,
+            .items = items,
+        };
+        return ast.Node.createClassSet(self.allocator, set, span);
     }
 
     /// Parse group name from (?P<name>...) or (?<name>...)
