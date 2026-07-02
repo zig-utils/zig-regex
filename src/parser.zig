@@ -1000,6 +1000,27 @@ pub const Parser = struct {
         return out[0..encoded_len];
     }
 
+    /// True when the raw input starting at `start` (the byte just after a `{`)
+    /// forms a well-formed braced quantifier body — `DecimalDigits`, then either
+    /// `}`, or `,` optionally followed by `DecimalDigits` then `}` (`{n}`, `{n,}`,
+    /// `{n,m}`). Used to detect Annex B InvalidBracedQuantifier: such a `{` at an
+    /// Atom position (no preceding atom) is a SyntaxError in ECMAScript, taking
+    /// precedence over the ExtendedPatternCharacter literal-`{` interpretation.
+    fn bracedQuantifierBodyAt(self: *Parser, start: usize) bool {
+        const input = self.lexer.input;
+        var i = start;
+        const digits_start = i;
+        while (i < input.len and input[i] >= '0' and input[i] <= '9') i += 1;
+        if (i == digits_start) return false; // requires at least one digit
+        if (i < input.len and input[i] == '}') return true; // {n}
+        if (i < input.len and input[i] == ',') {
+            i += 1;
+            while (i < input.len and input[i] >= '0' and input[i] <= '9') i += 1;
+            if (i < input.len and input[i] == '}') return true; // {n,} / {n,m}
+        }
+        return false;
+    }
+
     /// Parse primary expressions (literals, groups, character classes)
     fn parsePrimary(self: *Parser) RegexError!*ast.Node {
         const token = self.current_token;
@@ -1368,6 +1389,11 @@ pub const Parser = struct {
             },
             .lbrace => {
                 if (self.unicode or self.unicode_sets) return RegexError.UnexpectedCharacter;
+                // Annex B InvalidBracedQuantifier: a `{` that begins a well-formed
+                // braced quantifier ({n}, {n,}, {n,m}) but has no atom to bind to is
+                // a SyntaxError in ECMAScript, not a literal `{`.
+                if (self.ecmascript and self.bracedQuantifierBodyAt(span.start + 1))
+                    return RegexError.UnexpectedCharacter;
                 try self.advance();
                 return ast.Node.createLiteral(self.allocator, '{', span);
             },
