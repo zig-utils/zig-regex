@@ -980,8 +980,13 @@ test "regression: unicode class ignore-case uses simple common folds" {
         .{ .pattern = "[\\u1FD3]", .input = "\u{0390}" },
         .{ .pattern = "[\\u03B0]", .input = "\u{1FE3}" },
         .{ .pattern = "[\\u1FE3]", .input = "\u{03B0}" },
+        .{ .pattern = "[\\u00B5]", .input = "\u{039C}" },
+        .{ .pattern = "[\\u0178]", .input = "\u{00FF}" },
+        .{ .pattern = "[\\u1E9E]", .input = "\u{00DF}" },
+        .{ .pattern = "[\\u212B]", .input = "\u{00E5}" },
         .{ .pattern = "[\\uFB05]", .input = "\u{FB06}" },
         .{ .pattern = "[\\uFB06]", .input = "\u{FB05}" },
+        .{ .pattern = "[\\u{10401}-\\u{10404}]", .input = "\u{10429}" },
     };
     for (cases) |case| {
         var regex = try Regex.compileWithFlags(allocator, case.pattern, flags);

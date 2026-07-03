@@ -173,3 +173,16 @@ test "case insensitive unicode literal uses ECMAScript simple folding" {
     try std.testing.expect(try regex.isMatch("K"));
     try std.testing.expect(try regex.isMatch("\u{212A}"));
 }
+
+test "case insensitive ascii unicode literal matches non-ascii folds" {
+    const allocator = std.testing.allocator;
+    const flags = @import("regex").common.CompileFlags{ .unicode = true, .case_insensitive = true, .ecmascript = true };
+
+    var kelvin = try Regex.compileWithFlags(allocator, "K+", flags);
+    defer kelvin.deinit();
+    try std.testing.expect(try kelvin.isMatch("Kk\u{212A}"));
+
+    var long_s = try Regex.compileWithFlags(allocator, "s+", flags);
+    defer long_s.deinit();
+    try std.testing.expect(try long_s.isMatch("Ss\u{017F}"));
+}

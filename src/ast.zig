@@ -226,7 +226,9 @@ pub const Node = struct {
                 if (ignore_case) {
                     const folded = simpleCaseFold(cp);
                     if (folded >= r.lo and folded <= r.hi) return true;
-                    if (r.lo == r.hi and simpleCaseFold(r.lo) == folded) return true;
+                    const folded_lo = simpleCaseFold(r.lo);
+                    const folded_hi = simpleCaseFold(r.hi);
+                    if (folded_lo <= folded_hi and folded >= folded_lo and folded <= folded_hi) return true;
                     if (cp >= 'A' and cp <= 'Z') {
                         const l = cp + 32;
                         if (l >= r.lo and l <= r.hi) return true;
@@ -246,9 +248,17 @@ pub const Node = struct {
 
     fn simpleCaseFold(cp: u21) u21 {
         if (cp >= 'A' and cp <= 'Z') return cp + 32;
+        if (cp >= 0x00C0 and cp <= 0x00D6) return cp + 0x20;
+        if (cp >= 0x00D8 and cp <= 0x00DE) return cp + 0x20;
+        if (cp >= 0x10400 and cp <= 0x10427) return cp + 0x28;
         return switch (cp) {
+            0x00B5 => 0x03BC,
+            0x0178 => 0x00FF,
             0x017F => 's',
+            0x039C => 0x03BC,
+            0x1E9E => 0x00DF,
             0x212A => 'k',
+            0x212B => 0x00E5,
             0x1FD3 => 0x0390,
             0x1FE3 => 0x03B0,
             0xFB05 => 0xFB06,

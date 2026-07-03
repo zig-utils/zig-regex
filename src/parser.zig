@@ -1061,6 +1061,8 @@ pub const Parser = struct {
                     }
                     return node;
                 }
+                if ((self.unicode or self.unicode_sets) and self.case_insensitive)
+                    return self.createSingletonClassSet(token.value, span);
                 return ast.Node.createLiteral(self.allocator, token.value, span);
             },
             .dot => {
