@@ -1703,16 +1703,17 @@ pub const Parser = struct {
                     i.* += 2;
                     if (i.* < input.len and input[i.*] == '{') {
                         i.* += 1;
-                        var cp: u21 = 0;
+                        var cp: u32 = 0;
                         var any = false;
                         while (i.* < input.len and input[i.*] != '}') : (i.* += 1) {
                             const d = std.fmt.charToDigit(input[i.*], 16) catch return RegexError.InvalidEscapeSequence;
-                            cp = @intCast(@as(u32, cp) * 16 + d);
+                            cp = cp * 16 + d;
+                            if (cp > 0x10FFFF) return RegexError.InvalidEscapeSequence;
                             any = true;
                         }
                         if (!any or i.* >= input.len) return RegexError.InvalidEscapeSequence;
                         i.* += 1; // consume }
-                        return cp;
+                        return @intCast(cp);
                     }
                     const cp = classHex(input, i, 4) orelse return RegexError.InvalidEscapeSequence;
                     // In Unicode mode a `\uLEAD\uTRAIL` surrogate pair combines
@@ -2244,6 +2245,7 @@ pub const Parser = struct {
             if (input[i] >= 0x80) return true;
             if (input[i] == '\\' and i + 1 < input.len) {
                 const e = input[i + 1];
+                if (e == 's' or e == 'S') return true;
                 if (e == 'u' or e == 'x') return true;
                 i += 1;
             }

@@ -509,6 +509,20 @@ test "regression: `\\s` matches multi-byte Unicode whitespace" {
     try std.testing.expect(!try regex.isMatch("a\xa0b"));
 }
 
+test "regression: bracket `\\s` uses ECMAScript whitespace" {
+    const allocator = std.testing.allocator;
+    var ws = try Regex.compile(allocator, "^[\\s]+$");
+    defer ws.deinit();
+    var not_ws = try Regex.compile(allocator, "^[^\\s]+$");
+    defer not_ws.deinit();
+    var non_ws = try Regex.compile(allocator, "^[\\S]+$");
+    defer non_ws.deinit();
+
+    try std.testing.expect(try ws.isMatch("\u{FEFF}"));
+    try std.testing.expect(!try not_ws.isMatch("\u{FEFF}"));
+    try std.testing.expect(!try non_ws.isMatch("\u{FEFF}"));
+}
+
 test "regression: `\\S` excludes whitespace, includes non-ASCII" {
     const allocator = std.testing.allocator;
     var regex = try Regex.compile(allocator, "\\S+");

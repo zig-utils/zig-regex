@@ -185,6 +185,7 @@ test "parser: unicode character class rejects invalid escapes and class ranges" 
     try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\00]", flags));
     try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\c]", flags));
     try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\c_]", flags));
+    try std.testing.expectError(RegexError.InvalidEscapeSequence, Regex.compileWithFlags(allocator, "[\\u{110000}]", flags));
     try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compileWithFlags(allocator, "[\\d-a]", flags));
     try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compileWithFlags(allocator, "[a-\\d]", flags));
     try std.testing.expectError(RegexError.InvalidCharacterClass, Regex.compileWithFlags(allocator, "[\\d-\\d]", flags));
