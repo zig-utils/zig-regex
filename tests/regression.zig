@@ -957,6 +957,28 @@ test "regression: unicode ignore-case word characters include canonicalized asci
     try std.testing.expect(try non_boundary.isMatch("Z\u{017F}"));
     try std.testing.expect(try non_boundary.isMatch("Z\u{212A}"));
 
+    const global_flags = @import("regex").common.CompileFlags{ .unicode = true, .case_insensitive = true };
+
+    var global_boundary = try Regex.compileWithFlags(allocator, "\\b", global_flags);
+    defer global_boundary.deinit();
+    try std.testing.expect(try global_boundary.isMatch("\u{017F}"));
+    try std.testing.expect(try global_boundary.isMatch("\u{212A}"));
+
+    var global_non_boundary = try Regex.compileWithFlags(allocator, "\\B", global_flags);
+    defer global_non_boundary.deinit();
+    try std.testing.expect(!try global_non_boundary.isMatch("\u{017F}"));
+    try std.testing.expect(!try global_non_boundary.isMatch("\u{212A}"));
+
+    var long_s_pair = try Regex.compileWithFlags(allocator, "i\\B\\u017F", global_flags);
+    defer long_s_pair.deinit();
+    try std.testing.expect(try long_s_pair.isMatch("is"));
+    try std.testing.expect(!try long_s_pair.isMatch("it"));
+
+    var kelvin_pair = try Regex.compileWithFlags(allocator, "\\u212A\\Bi", global_flags);
+    defer kelvin_pair.deinit();
+    try std.testing.expect(try kelvin_pair.isMatch("ki"));
+    try std.testing.expect(!try kelvin_pair.isMatch("ti"));
+
     var upper_prop = try Regex.compileWithFlags(allocator, "(?i:\\p{Lu})", flags);
     defer upper_prop.deinit();
     try std.testing.expect(try upper_prop.isMatch("A"));

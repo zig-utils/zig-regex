@@ -2528,6 +2528,12 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         // These features require backtracking
         .lookahead, .lookbehind, .backref, .unicode_property => return true,
 
+        // Under `/iu`, ECMAScript word-boundary assertions treat characters
+        // that canonicalize to ASCII word characters (U+017F, U+212A) as word
+        // characters. The byte DFA only tracks ASCII word bytes.
+        .anchor => return flags.unicode and flags.case_insensitive and
+            (node.data.anchor == .word_boundary or node.data.anchor == .non_word_boundary),
+
         // A `class_set` (`\s`, `\S`, `/v` Unicode brackets) lowers to a UTF-8
         // byte automaton when it's a union of code-point ranges — including under
         // plain `i`, where the compiler ASCII-case-folds the ranges. But `u`+`i`
@@ -2587,7 +2593,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         .any => return false,
 
         // These don't require backtracking
-        .literal, .char_class, .anchor, .empty => return false,
+        .literal, .char_class, .empty => return false,
     }
 }
 
