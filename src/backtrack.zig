@@ -1033,7 +1033,7 @@ pub const BacktrackEngine = struct {
     /// membership, consuming the whole code point on a match.
     fn matchClassSet(self: *BacktrackEngine, set: *ast.Node.ClassSet, pos: usize) ?usize {
         // The longest match (a `\q{...}` string can consume several code points).
-        return set.matchLongest(self.input, pos, self.flags.case_insensitive);
+        return set.matchLongestMode(self.input, pos, self.classSetCaseFoldMode());
     }
 
     fn matchGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {
@@ -1616,11 +1616,16 @@ pub const BacktrackEngine = struct {
     fn matchReverseClassSet(self: *BacktrackEngine, set: *ast.Node.ClassSet, pos: usize) ?usize {
         var start: usize = 0;
         while (start < pos) : (start += 1) {
-            if (set.matchLongest(self.input, start, self.flags.case_insensitive)) |end| {
+            if (set.matchLongestMode(self.input, start, self.classSetCaseFoldMode())) |end| {
                 if (end == pos) return start;
             }
         }
         return null;
+    }
+
+    fn classSetCaseFoldMode(self: *const BacktrackEngine) ast.Node.ClassSet.CaseFoldMode {
+        if (!self.flags.case_insensitive) return .none;
+        return if (self.flags.unicode or self.flags.unicode_sets) .unicode else .legacy;
     }
 
     fn matchReverseBackreference(self: *BacktrackEngine, backref: ast.Node.Backreference, pos: usize) ?usize {

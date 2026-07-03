@@ -123,27 +123,33 @@ pub const Node = struct {
         negated: bool = false,
         items: []const ClassItem,
 
+        pub const CaseFoldMode = enum { none, legacy, unicode };
+
         /// The longest byte length the class matches at `input[start..]`, or null.
         /// Strings (`\q{...}`) and nested sets can consume multiple code points;
         /// set operations compare exact elements so character operands do not
         /// subtract multi-code-point string literals that merely share a prefix.
         pub fn matchLongest(self: *const ClassSet, input: []const u8, start: usize, ignore_case: bool) ?usize {
+            return self.matchLongestMode(input, start, if (ignore_case) .unicode else .none);
+        }
+
+        pub fn matchLongestMode(self: *const ClassSet, input: []const u8, start: usize, fold_mode: CaseFoldMode) ?usize {
             const u = @import("unicode.zig");
             if (self.op == .union_ and self.negated) {
                 if (start >= input.len) return null;
                 const dec = u.decodeUtf8Lenient(input[start..]) orelse return null;
-                if (!self.matches(dec.codepoint, ignore_case)) return null;
+                if (!self.matchesMode(dec.codepoint, fold_mode)) return null;
                 return start + dec.len;
             }
             if (self.op != .union_) {
                 if (self.items.len == 0) return null;
-                const end = itemMatchLongest(self.items[0], input, start, ignore_case) orelse return null;
-                if (!self.containsMatch(input, start, end, ignore_case)) return null;
+                const end = itemMatchLongest(self.items[0], input, start, fold_mode) orelse return null;
+                if (!self.containsMatch(input, start, end, fold_mode)) return null;
                 return end;
             }
             var best: ?usize = null;
             for (self.items) |it| {
-                const e = itemMatchLongest(it, input, start, ignore_case);
+                const e = itemMatchLongest(it, input, start, fold_mode);
                 if (e) |end| {
                     if (best == null or end > best.?) best = end;
                 }
@@ -152,39 +158,43 @@ pub const Node = struct {
         }
 
         pub fn matches(self: *const ClassSet, cp: u21, ignore_case: bool) bool {
+            return self.matchesMode(cp, if (ignore_case) .unicode else .none);
+        }
+
+        pub fn matchesMode(self: *const ClassSet, cp: u21, fold_mode: CaseFoldMode) bool {
             const r = switch (self.op) {
                 .union_ => blk: {
-                    for (self.items) |it| if (itemMatches(it, cp, ignore_case)) break :blk true;
+                    for (self.items) |it| if (itemMatches(it, cp, fold_mode)) break :blk true;
                     break :blk false;
                 },
                 .intersection => blk: {
-                    for (self.items) |it| if (!itemMatches(it, cp, ignore_case)) break :blk false;
+                    for (self.items) |it| if (!itemMatches(it, cp, fold_mode)) break :blk false;
                     break :blk true;
                 },
                 .difference => blk: {
                     if (self.items.len == 0) break :blk false;
-                    if (!itemMatches(self.items[0], cp, ignore_case)) break :blk false;
-                    for (self.items[1..]) |it| if (itemMatches(it, cp, ignore_case)) break :blk false;
+                    if (!itemMatches(self.items[0], cp, fold_mode)) break :blk false;
+                    for (self.items[1..]) |it| if (itemMatches(it, cp, fold_mode)) break :blk false;
                     break :blk true;
                 },
             };
             return r != self.negated;
         }
 
-        fn containsMatch(self: *const ClassSet, input: []const u8, start: usize, end: usize, ignore_case: bool) bool {
+        fn containsMatch(self: *const ClassSet, input: []const u8, start: usize, end: usize, fold_mode: CaseFoldMode) bool {
             const r = switch (self.op) {
                 .union_ => blk: {
-                    for (self.items) |it| if (itemContainsMatch(it, input, start, end, ignore_case)) break :blk true;
+                    for (self.items) |it| if (itemContainsMatch(it, input, start, end, fold_mode)) break :blk true;
                     break :blk false;
                 },
                 .intersection => blk: {
-                    for (self.items) |it| if (!itemContainsMatch(it, input, start, end, ignore_case)) break :blk false;
+                    for (self.items) |it| if (!itemContainsMatch(it, input, start, end, fold_mode)) break :blk false;
                     break :blk true;
                 },
                 .difference => blk: {
                     if (self.items.len == 0) break :blk false;
-                    if (!itemContainsMatch(self.items[0], input, start, end, ignore_case)) break :blk false;
-                    for (self.items[1..]) |it| if (itemContainsMatch(it, input, start, end, ignore_case)) break :blk false;
+                    if (!itemContainsMatch(self.items[0], input, start, end, fold_mode)) break :blk false;
+                    for (self.items[1..]) |it| if (itemContainsMatch(it, input, start, end, fold_mode)) break :blk false;
                     break :blk true;
                 },
             };
@@ -192,42 +202,42 @@ pub const Node = struct {
         }
     };
 
-    fn itemMatchLongest(it: ClassItem, input: []const u8, start: usize, ignore_case: bool) ?usize {
+    fn itemMatchLongest(it: ClassItem, input: []const u8, start: usize, fold_mode: ClassSet.CaseFoldMode) ?usize {
         const u = @import("unicode.zig");
         return switch (it) {
-            .string => |s| matchStringItem(input, start, s, ignore_case),
-            .nested => |n| n.matchLongest(input, start, ignore_case),
+            .string => |s| matchStringItem(input, start, s, fold_mode),
+            .nested => |n| n.matchLongestMode(input, start, fold_mode),
             .range, .property => blk: {
                 if (start >= input.len) break :blk null;
                 const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk null;
-                break :blk if (itemMatches(it, dec.codepoint, ignore_case)) start + dec.len else null;
+                break :blk if (itemMatches(it, dec.codepoint, fold_mode)) start + dec.len else null;
             },
         };
     }
 
-    fn itemContainsMatch(it: ClassItem, input: []const u8, start: usize, end: usize, ignore_case: bool) bool {
+    fn itemContainsMatch(it: ClassItem, input: []const u8, start: usize, end: usize, fold_mode: ClassSet.CaseFoldMode) bool {
         const u = @import("unicode.zig");
         return switch (it) {
-            .string => |s| if (matchStringItem(input, start, s, ignore_case)) |e| e == end else false,
-            .nested => |n| n.containsMatch(input, start, end, ignore_case),
+            .string => |s| if (matchStringItem(input, start, s, fold_mode)) |e| e == end else false,
+            .nested => |n| n.containsMatch(input, start, end, fold_mode),
             .range, .property => blk: {
                 const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk false;
                 if (start + dec.len != end) break :blk false;
-                break :blk itemMatches(it, dec.codepoint, ignore_case);
+                break :blk itemMatches(it, dec.codepoint, fold_mode);
             },
         };
     }
 
-    fn itemMatches(it: ClassItem, cp: u21, ignore_case: bool) bool {
+    fn itemMatches(it: ClassItem, cp: u21, fold_mode: ClassSet.CaseFoldMode) bool {
         const u = @import("unicode.zig");
         switch (it) {
             .range => |r| {
                 if (cp >= r.lo and cp <= r.hi) return true;
-                if (ignore_case) {
-                    const folded = simpleCaseFold(cp);
+                if (fold_mode != .none) {
+                    const folded = canonicalCaseFold(cp, fold_mode);
                     if (folded >= r.lo and folded <= r.hi) return true;
-                    const folded_lo = simpleCaseFold(r.lo);
-                    const folded_hi = simpleCaseFold(r.hi);
+                    const folded_lo = canonicalCaseFold(r.lo, fold_mode);
+                    const folded_hi = canonicalCaseFold(r.hi, fold_mode);
                     if (folded_lo <= folded_hi and folded >= folded_lo and folded <= folded_hi) return true;
                     if (cp >= 'A' and cp <= 'Z') {
                         const l = cp + 32;
@@ -240,22 +250,67 @@ pub const Node = struct {
                 return false;
             },
             .property => |p| return u.matchesSpec(cp, p.spec) != p.negated,
-            .nested => |n| return n.matches(cp, ignore_case),
+            .nested => |n| return n.matchesMode(cp, fold_mode),
             // A single-code-point string contributes that code point to membership.
-            .string => |s| return s.len == 1 and (s[0] == cp or (ignore_case and simpleCaseFold(s[0]) == simpleCaseFold(cp))),
+            .string => |s| return s.len == 1 and (s[0] == cp or (fold_mode != .none and canonicalCaseFold(s[0], fold_mode) == canonicalCaseFold(cp, fold_mode))),
         }
+    }
+
+    fn canonicalCaseFold(cp: u21, mode: ClassSet.CaseFoldMode) u21 {
+        return switch (mode) {
+            .none => cp,
+            .legacy => legacyCaseFold(cp),
+            .unicode => simpleCaseFold(cp),
+        };
+    }
+
+    fn legacyCaseFold(cp: u21) u21 {
+        if (cp >= 'A' and cp <= 'Z') return cp + 32;
+        if (cp >= 0x00C0 and cp <= 0x00D6) return cp + 0x20;
+        if (cp >= 0x00D8 and cp <= 0x00DE) return cp + 0x20;
+        if (cp >= 0x0391 and cp <= 0x03A1) return cp + 0x20;
+        if (cp >= 0x03A3 and cp <= 0x03AB) return cp + 0x20;
+        return switch (cp) {
+            0x00B5, 0x039C, 0x03BC => 0x03BC,
+            0x0178, 0x00FF => 0x00FF,
+            0x0345, 0x0399, 0x03B9, 0x1FBE => 0x03B9,
+            0x03C2, 0x03A3, 0x03C3 => 0x03C3,
+            0x03D0, 0x0392, 0x03B2 => 0x03B2,
+            0x03D1, 0x0398, 0x03B8 => 0x03B8,
+            0x03D5, 0x03A6, 0x03C6 => 0x03C6,
+            0x03D6, 0x03A0, 0x03C0 => 0x03C0,
+            0x03F0, 0x039A, 0x03BA => 0x03BA,
+            0x03F1, 0x03A1, 0x03C1 => 0x03C1,
+            0x03F5, 0x0395, 0x03B5 => 0x03B5,
+            0x1E9B, 0x1E60, 0x1E61 => 0x1E61,
+            else => cp,
+        };
     }
 
     fn simpleCaseFold(cp: u21) u21 {
         if (cp >= 'A' and cp <= 'Z') return cp + 32;
         if (cp >= 0x00C0 and cp <= 0x00D6) return cp + 0x20;
         if (cp >= 0x00D8 and cp <= 0x00DE) return cp + 0x20;
+        if (cp >= 0x0100 and cp <= 0x012F and cp % 2 == 0) return cp + 1;
+        if (cp >= 0x0139 and cp <= 0x0148 and cp % 2 == 1) return cp + 1;
+        if (cp >= 0x014A and cp <= 0x0177 and cp % 2 == 0) return cp + 1;
+        if (cp >= 0x0391 and cp <= 0x03A1) return cp + 0x20;
+        if (cp >= 0x03A3 and cp <= 0x03AB) return cp + 0x20;
         if (cp >= 0x10400 and cp <= 0x10427) return cp + 0x28;
         return switch (cp) {
-            0x00B5 => 0x03BC,
+            0x00B5, 0x039C, 0x03BC => 0x03BC,
             0x0178 => 0x00FF,
             0x017F => 's',
-            0x039C => 0x03BC,
+            0x0345, 0x0399, 0x03B9, 0x1FBE => 0x03B9,
+            0x03C2, 0x03A3, 0x03C3 => 0x03C3,
+            0x03D0, 0x0392, 0x03B2 => 0x03B2,
+            0x03D1, 0x0398, 0x03B8 => 0x03B8,
+            0x03D5, 0x03A6, 0x03C6 => 0x03C6,
+            0x03D6, 0x03A0, 0x03C0 => 0x03C0,
+            0x03F0, 0x039A, 0x03BA => 0x03BA,
+            0x03F1, 0x03A1, 0x03C1 => 0x03C1,
+            0x03F5, 0x0395, 0x03B5 => 0x03B5,
+            0x1E9B, 0x1E60, 0x1E61 => 0x1E61,
             0x1E9E => 0x00DF,
             0x212A => 'k',
             0x212B => 0x00E5,
@@ -268,13 +323,13 @@ pub const Node = struct {
 
     /// Match a `\q{...}` string (a sequence of code points) at `input[start..]`,
     /// returning the end byte position or null.
-    fn matchStringItem(input: []const u8, start: usize, s: []const u21, ignore_case: bool) ?usize {
+    fn matchStringItem(input: []const u8, start: usize, s: []const u21, fold_mode: ClassSet.CaseFoldMode) ?usize {
         const u = @import("unicode.zig");
         var pos = start;
         for (s) |scp| {
             if (pos >= input.len) return null;
             const dec = u.decodeUtf8Lenient(input[pos..]) orelse return null;
-            if (dec.codepoint != scp and !(ignore_case and simpleCaseFold(dec.codepoint) == simpleCaseFold(scp))) return null;
+            if (dec.codepoint != scp and !(fold_mode != .none and canonicalCaseFold(dec.codepoint, fold_mode) == canonicalCaseFold(scp, fold_mode))) return null;
             pos += dec.len;
         }
         return pos;

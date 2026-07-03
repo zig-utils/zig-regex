@@ -1117,6 +1117,92 @@ test "regression: unicode class ignore-case uses simple common folds" {
     }
 }
 
+test "regression: legacy ignore-case class sets use ECMAScript canonicalization" {
+    const allocator = std.testing.allocator;
+    const legacy_i = @import("regex").common.CompileFlags{ .case_insensitive = true };
+
+    var micro = try Regex.compileWithFlags(allocator, "\u{039C}", legacy_i);
+    defer micro.deinit();
+    try std.testing.expect(try micro.isMatch("\u{00B5}"));
+    try std.testing.expect(try micro.isMatch("\u{03BC}"));
+
+    var y_diaeresis = try Regex.compileWithFlags(allocator, "\u{0178}", legacy_i);
+    defer y_diaeresis.deinit();
+    try std.testing.expect(try y_diaeresis.isMatch("\u{00FF}"));
+
+    var long_s = try Regex.compileWithFlags(allocator, "\u{017F}", legacy_i);
+    defer long_s.deinit();
+    try std.testing.expect(!try long_s.isMatch("s"));
+
+    var kelvin = try Regex.compileWithFlags(allocator, "\u{212A}", legacy_i);
+    defer kelvin.deinit();
+    try std.testing.expect(!try kelvin.isMatch("k"));
+
+    var sharp_s = try Regex.compileWithFlags(allocator, "\u{1E9E}", legacy_i);
+    defer sharp_s.deinit();
+    try std.testing.expect(!try sharp_s.isMatch("\u{00DF}"));
+
+    var angstrom = try Regex.compileWithFlags(allocator, "\u{212B}", legacy_i);
+    defer angstrom.deinit();
+    try std.testing.expect(!try angstrom.isMatch("\u{00E5}"));
+}
+
+test "regression: ignore-case folds Greek symbol equivalence classes" {
+    const allocator = std.testing.allocator;
+    const legacy_i = @import("regex").common.CompileFlags{ .case_insensitive = true };
+
+    var ypogegrammeni = try Regex.compileWithFlags(allocator, "\u{0345}", legacy_i);
+    defer ypogegrammeni.deinit();
+    try std.testing.expect(try ypogegrammeni.isMatch("\u{0399}"));
+    try std.testing.expect(try ypogegrammeni.isMatch("\u{03B9}"));
+    try std.testing.expect(try ypogegrammeni.isMatch("\u{1FBE}"));
+
+    var sigma = try Regex.compileWithFlags(allocator, "\u{03C2}", legacy_i);
+    defer sigma.deinit();
+    try std.testing.expect(try sigma.isMatch("\u{03A3}"));
+    try std.testing.expect(try sigma.isMatch("\u{03C3}"));
+
+    var beta = try Regex.compileWithFlags(allocator, "\u{03D0}", legacy_i);
+    defer beta.deinit();
+    try std.testing.expect(try beta.isMatch("\u{0392}"));
+    try std.testing.expect(try beta.isMatch("\u{03B2}"));
+
+    var theta = try Regex.compileWithFlags(allocator, "\u{03D1}", legacy_i);
+    defer theta.deinit();
+    try std.testing.expect(try theta.isMatch("\u{0398}"));
+    try std.testing.expect(try theta.isMatch("\u{03B8}"));
+
+    var phi = try Regex.compileWithFlags(allocator, "\u{03D5}", legacy_i);
+    defer phi.deinit();
+    try std.testing.expect(try phi.isMatch("\u{03A6}"));
+    try std.testing.expect(try phi.isMatch("\u{03C6}"));
+
+    var pi = try Regex.compileWithFlags(allocator, "\u{03D6}", legacy_i);
+    defer pi.deinit();
+    try std.testing.expect(try pi.isMatch("\u{03A0}"));
+    try std.testing.expect(try pi.isMatch("\u{03C0}"));
+
+    var kappa = try Regex.compileWithFlags(allocator, "\u{03F0}", legacy_i);
+    defer kappa.deinit();
+    try std.testing.expect(try kappa.isMatch("\u{039A}"));
+    try std.testing.expect(try kappa.isMatch("\u{03BA}"));
+
+    var rho = try Regex.compileWithFlags(allocator, "\u{03F1}", legacy_i);
+    defer rho.deinit();
+    try std.testing.expect(try rho.isMatch("\u{03A1}"));
+    try std.testing.expect(try rho.isMatch("\u{03C1}"));
+
+    var epsilon = try Regex.compileWithFlags(allocator, "\u{03F5}", legacy_i);
+    defer epsilon.deinit();
+    try std.testing.expect(try epsilon.isMatch("\u{0395}"));
+    try std.testing.expect(try epsilon.isMatch("\u{03B5}"));
+
+    var dotted_long_s = try Regex.compileWithFlags(allocator, "\u{1E9B}", legacy_i);
+    defer dotted_long_s.deinit();
+    try std.testing.expect(try dotted_long_s.isMatch("\u{1E60}"));
+    try std.testing.expect(try dotted_long_s.isMatch("\u{1E61}"));
+}
+
 test "regression: unicode set difference keeps string literals distinct from characters" {
     const allocator = std.testing.allocator;
     const flags = @import("regex").common.CompileFlags{ .unicode_sets = true };
@@ -1604,19 +1690,23 @@ test "regression: Matcher leftmost-longest count over many lines equals plain" {
 
 // --- case-insensitive on the byte engine (folded NFA/DFA) ---
 //
-// Under `i` (without the `u` flag) the compiler ASCII-case-folds char/class
-// transitions, so case-insensitive patterns run on the fast byte NFA/DFA
-// instead of the per-position NFA/backtracker. These guard the folding,
-// especially **negated** classes (folding must precede negation) and the
-// engine actually used.
+// Under `i` (without the `u` flag) the compiler ASCII-case-folds byte
+// char/class transitions, so those case-insensitive patterns run on the fast
+// byte NFA/DFA instead of the per-position NFA/backtracker. Unicode class-set
+// atoms still use the backtracker because ECMAScript legacy `/i` and `/iu`
+// canonicalization differ.
 
 test "regression: case-insensitive runs on the byte engine, not the backtracker" {
     const allocator = std.testing.allocator;
-    inline for (.{ "\\w+\\s+\\w+", "[a-z]+[0-9]+", "foo.*bar" }) |p| {
+    inline for (.{ "\\w+\\d+\\w+", "[a-z]+[0-9]+", "foo.*bar" }) |p| {
         var re = try Regex.compileWithFlags(allocator, p, .{ .case_insensitive = true });
         defer re.deinit();
         try std.testing.expect(re.engine_type == .thompson_nfa);
     }
+
+    var class_set = try Regex.compileWithFlags(allocator, "\\s+", .{ .case_insensitive = true });
+    defer class_set.deinit();
+    try std.testing.expect(class_set.engine_type == .backtracking);
 }
 
 test "regression: case-insensitive matching folds both cases" {

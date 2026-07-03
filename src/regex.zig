@@ -2538,12 +2538,10 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
             isAsciiWordClass(node.data.char_class),
 
         // A `class_set` (`\s`, `\S`, `/v` Unicode brackets) lowers to a UTF-8
-        // byte automaton when it's a union of code-point ranges — including under
-        // plain `i`, where the compiler ASCII-case-folds the ranges. But `u`+`i`
-        // needs *Unicode* simple case folds (e.g. U+0390↔U+1FD3), which only the
-        // backtracker does; and unrepresentable shapes (Unicode properties,
-        // multi-code-point strings, intersection/difference) also need it.
-        .class_set => return (flags.case_insensitive and flags.unicode) or
+        // byte automaton when it's a union of code-point ranges. Under `i`,
+        // ECMAScript distinguishes legacy `/i` canonicalization from `/iu`
+        // Unicode simple folds, which only the backtracker models.
+        .class_set => return flags.case_insensitive or
             !@import("utf8_class.zig").compilable(node.data.class_set),
 
         // Check for lazy quantifiers
