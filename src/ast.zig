@@ -1,5 +1,6 @@
 const std = @import("std");
 const common = @import("common.zig");
+const casefold_data = @import("unicode_casefold_data.zig");
 
 /// Abstract Syntax Tree node types for regular expressions
 pub const NodeType = enum {
@@ -288,37 +289,7 @@ pub const Node = struct {
     }
 
     fn simpleCaseFold(cp: u21) u21 {
-        if (cp >= 'A' and cp <= 'Z') return cp + 32;
-        if (cp >= 0x00C0 and cp <= 0x00D6) return cp + 0x20;
-        if (cp >= 0x00D8 and cp <= 0x00DE) return cp + 0x20;
-        if (cp >= 0x0100 and cp <= 0x012F and cp % 2 == 0) return cp + 1;
-        if (cp >= 0x0139 and cp <= 0x0148 and cp % 2 == 1) return cp + 1;
-        if (cp >= 0x014A and cp <= 0x0177 and cp % 2 == 0) return cp + 1;
-        if (cp >= 0x0391 and cp <= 0x03A1) return cp + 0x20;
-        if (cp >= 0x03A3 and cp <= 0x03AB) return cp + 0x20;
-        if (cp >= 0x10400 and cp <= 0x10427) return cp + 0x28;
-        return switch (cp) {
-            0x00B5, 0x039C, 0x03BC => 0x03BC,
-            0x0178 => 0x00FF,
-            0x017F => 's',
-            0x0345, 0x0399, 0x03B9, 0x1FBE => 0x03B9,
-            0x03C2, 0x03A3, 0x03C3 => 0x03C3,
-            0x03D0, 0x0392, 0x03B2 => 0x03B2,
-            0x03D1, 0x0398, 0x03B8 => 0x03B8,
-            0x03D5, 0x03A6, 0x03C6 => 0x03C6,
-            0x03D6, 0x03A0, 0x03C0 => 0x03C0,
-            0x03F0, 0x039A, 0x03BA => 0x03BA,
-            0x03F1, 0x03A1, 0x03C1 => 0x03C1,
-            0x03F5, 0x0395, 0x03B5 => 0x03B5,
-            0x1E9B, 0x1E60, 0x1E61 => 0x1E61,
-            0x1E9E => 0x00DF,
-            0x212A => 'k',
-            0x212B => 0x00E5,
-            0x1FD3 => 0x0390,
-            0x1FE3 => 0x03B0,
-            0xFB05 => 0xFB06,
-            else => cp,
-        };
+        return casefold_data.fold(cp);
     }
 
     /// Match a `\q{...}` string (a sequence of code points) at `input[start..]`,
