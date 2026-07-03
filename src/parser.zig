@@ -323,11 +323,13 @@ pub const Lexer = struct {
     fn parseUnicodeEscape(self: *Lexer) !Token {
         const save = self.pos;
         var cp: u32 = 0;
+        var braced = false;
         if (self.peek() == '{') {
             if (!self.unicode_strict) {
                 self.pos = save;
                 return self.makeToken(.literal, 'u');
             }
+            braced = true;
             self.pos += 1; // consume '{'
             var n: usize = 0;
             while (self.peekHex(0)) |d| {
@@ -354,7 +356,7 @@ pub const Lexer = struct {
             }
             self.pos += 4;
         }
-        if (self.unicode_strict and cp >= 0xD800 and cp <= 0xDBFF) {
+        if (self.unicode_strict and !braced and cp >= 0xD800 and cp <= 0xDBFF) {
             if (self.peekSurrogatePairLow()) |lo| {
                 self.pos += 6;
                 cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
@@ -1033,13 +1035,12 @@ pub const Parser = struct {
         switch (token.token_type) {
             .literal => {
                 try self.advance();
-                // In Unicode mode a multi-byte UTF-8 code point is a SINGLE atom:
-                // group its lead + continuation byte literals so a following
-                // quantifier binds to the whole code point (`𝌆{2}` repeats the
-                // code point, not just its last byte). The matcher is byte-based,
-                // so the grouped concat matches the same bytes — only quantifier
-                // binding changes.
-                if ((self.unicode or self.unicode_sets) and token.value >= 0xC0) {
+                // A multi-byte UTF-8/WTF-8 code unit is a SINGLE atom: group its
+                // lead + continuation byte literals so a following quantifier
+                // binds to the whole character/code unit, not just its last byte.
+                // The matcher is byte-based, so the grouped concat matches the
+                // same bytes; only quantifier binding changes.
+                if (token.value >= 0xC0) {
                     var bytes: [4]u8 = undefined;
                     bytes[0] = token.value;
                     var len: usize = 1;

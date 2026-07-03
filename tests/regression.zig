@@ -963,6 +963,60 @@ test "regression: unicode surrogate escape pairs match astral input" {
     var codepoint = try Regex.compileWithFlags(allocator, "\\u{1D306}", flags);
     defer codepoint.deinit();
     try std.testing.expect(try codepoint.isMatch("\u{1D306}"));
+
+    var raw_pair = try Regex.compileWithFlags(allocator, "\u{1F438}", flags);
+    defer raw_pair.deinit();
+    try std.testing.expect(try raw_pair.isMatch("\u{1F438}"));
+
+    var optional_pair = try Regex.compileWithFlags(allocator, "\\uD83D\\uDC38?", flags);
+    defer optional_pair.deinit();
+    if (try optional_pair.find("\u{1F438}")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("\u{1F438}", match.slice);
+    } else return error.TestExpectedMatch;
+    if (try optional_pair.find("")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("", match.slice);
+    } else return error.TestExpectedMatch;
+
+    var braced_lead = try Regex.compileWithFlags(allocator, "\\u{D83D}", flags);
+    defer braced_lead.deinit();
+    try std.testing.expect(!try braced_lead.isMatch("\u{1F438}"));
+    try std.testing.expect(try braced_lead.isMatch(&.{ 0xED, 0xA0, 0xBD, 0xEE, 0x80, 0x80 }));
+
+    var braced_pair = try Regex.compileWithFlags(allocator, "\\u{D83D}\\u{DC38}+", flags);
+    defer braced_pair.deinit();
+    try std.testing.expect(!try braced_pair.isMatch(&.{ 0xF0, 0x9F, 0x90, 0xB8, 0xED, 0xB0, 0xB8 }));
+}
+
+test "regression: multibyte atoms bind quantifiers outside unicode mode" {
+    const allocator = std.testing.allocator;
+
+    var escaped_pair_optional = try Regex.compile(allocator, "\\uD83D\\uDC38?");
+    defer escaped_pair_optional.deinit();
+    if (try escaped_pair_optional.find(&.{ 0xED, 0xA0, 0xBD, 0xED, 0xB0, 0xB8 })) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, &.{ 0xED, 0xA0, 0xBD, 0xED, 0xB0, 0xB8 }, match.slice);
+    } else return error.TestExpectedMatch;
+    if (try escaped_pair_optional.find(&.{ 0xED, 0xA0, 0xBD })) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, &.{ 0xED, 0xA0, 0xBD }, match.slice);
+    } else return error.TestExpectedMatch;
+    try std.testing.expect(!try escaped_pair_optional.isMatch(""));
+
+    const raw_pair_pattern = [_]u8{ 0xED, 0xA0, 0xBD, 0xED, 0xB0, 0xB8, '?' };
+    var raw_pair_optional = try Regex.compile(allocator, &raw_pair_pattern);
+    defer raw_pair_optional.deinit();
+    if (try raw_pair_optional.find(&.{ 0xED, 0xA0, 0xBD, 0xED, 0xB0, 0xB8 })) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, &.{ 0xED, 0xA0, 0xBD, 0xED, 0xB0, 0xB8 }, match.slice);
+    } else return error.TestExpectedMatch;
+    try std.testing.expect(!try raw_pair_optional.isMatch(""));
 }
 
 test "regression: unicode ignore-case word characters include canonicalized ascii" {
