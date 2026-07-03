@@ -900,6 +900,38 @@ test "regression: hex escapes above ascii match utf8 input" {
     } else return error.TestExpectedMatch;
 }
 
+test "regression: braced unicode escape is strict-mode only" {
+    const allocator = std.testing.allocator;
+    const unicode_flags = @import("regex").common.CompileFlags{ .unicode = true };
+
+    const repeated_u = "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu";
+
+    var annex_b_quantifier = try Regex.compile(allocator, "\\u{41}");
+    defer annex_b_quantifier.deinit();
+    if (try annex_b_quantifier.find("ABC" ++ repeated_u)) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings(repeated_u, match.slice);
+    } else return error.TestExpectedMatch;
+    try std.testing.expect(!try annex_b_quantifier.isMatch("ABC"));
+
+    var annex_b_literal = try Regex.compile(allocator, "\\u{4A}");
+    defer annex_b_literal.deinit();
+    if (try annex_b_literal.find("JKLu{4A}")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("u{4A}", match.slice);
+    } else return error.TestExpectedMatch;
+
+    var unicode_escape = try Regex.compileWithFlags(allocator, "\\u{41}", unicode_flags);
+    defer unicode_escape.deinit();
+    if (try unicode_escape.find("ABC")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("A", match.slice);
+    } else return error.TestExpectedMatch;
+}
+
 test "regression: empty inline modifier arithmetic is rejected" {
     const allocator = std.testing.allocator;
 
@@ -968,6 +1000,20 @@ test "regression: unicode ignore-case word characters include canonicalized asci
     defer global_non_boundary.deinit();
     try std.testing.expect(!try global_non_boundary.isMatch("\u{017F}"));
     try std.testing.expect(!try global_non_boundary.isMatch("\u{212A}"));
+
+    var global_word = try Regex.compileWithFlags(allocator, "\\w", global_flags);
+    defer global_word.deinit();
+    try std.testing.expect(try global_word.isMatch("s"));
+    try std.testing.expect(try global_word.isMatch("\u{017F}"));
+    try std.testing.expect(try global_word.isMatch("k"));
+    try std.testing.expect(try global_word.isMatch("\u{212A}"));
+
+    var global_non_word = try Regex.compileWithFlags(allocator, "\\W", global_flags);
+    defer global_non_word.deinit();
+    try std.testing.expect(!try global_non_word.isMatch("s"));
+    try std.testing.expect(!try global_non_word.isMatch("\u{017F}"));
+    try std.testing.expect(!try global_non_word.isMatch("k"));
+    try std.testing.expect(!try global_non_word.isMatch("\u{212A}"));
 
     var long_s_pair = try Regex.compileWithFlags(allocator, "i\\B\\u017F", global_flags);
     defer long_s_pair.deinit();

@@ -1117,7 +1117,7 @@ pub const Regex = struct {
         // anchors: a trailing-`$`-only pattern (anchored_end without
         // anchored_start) has no branch here, so it falls through to the general
         // engine rather than the anchor-blind unanchored scan below.
-        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
+        if (self.engine_type == .thompson_nfa) if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
@@ -1306,7 +1306,7 @@ pub const Regex = struct {
             return null;
         }
         // Repeated-atom fast path: leftmost maximal run of `table` bytes.
-        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
+        if (self.engine_type == .thompson_nfa) if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
@@ -1596,7 +1596,7 @@ pub const Regex = struct {
         // (capped at max) is one non-overlapping match. No NFA, no per-match
         // capture allocation. Honors anchors (see repeatAtomFastPathOk); an
         // anchored pattern yields at most one match.
-        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
+        if (self.engine_type == .thompson_nfa) if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
@@ -2063,7 +2063,7 @@ pub const Regex = struct {
         }
         // Repeated-atom: count maximal runs of >= min table bytes. Honors anchors
         // (see repeatAtomFastPathOk); anchored patterns yield at most one match.
-        if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
+        if (self.engine_type == .thompson_nfa) if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
             const table = repeatTable(ra, self.flags.case_insensitive);
             const max = ra.max orelse std.math.maxInt(usize);
             if (self.opt_info.anchored_start and self.opt_info.anchored_end) {
@@ -2534,6 +2534,9 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         .anchor => return flags.unicode and flags.case_insensitive and
             (node.data.anchor == .word_boundary or node.data.anchor == .non_word_boundary),
 
+        .char_class => return flags.unicode and flags.case_insensitive and
+            isAsciiWordClass(node.data.char_class),
+
         // A `class_set` (`\s`, `\S`, `/v` Unicode brackets) lowers to a UTF-8
         // byte automaton when it's a union of code-point ranges — including under
         // plain `i`, where the compiler ASCII-case-folds the ranges. But `u`+`i`
@@ -2593,8 +2596,17 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         .any => return false,
 
         // These don't require backtracking
-        .literal, .char_class, .empty => return false,
+        .literal, .empty => return false,
     }
+}
+
+fn isAsciiWordClass(char_class: common.CharClass) bool {
+    const word = common.CharClasses.word;
+    if (char_class.ranges.len != word.ranges.len) return false;
+    for (char_class.ranges, word.ranges) |a, b| {
+        if (a.start != b.start or a.end != b.end) return false;
+    }
+    return true;
 }
 
 fn containsAlternation(node: *ast.Node) bool {

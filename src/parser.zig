@@ -324,6 +324,10 @@ pub const Lexer = struct {
         const save = self.pos;
         var cp: u32 = 0;
         if (self.peek() == '{') {
+            if (!self.unicode_strict) {
+                self.pos = save;
+                return self.makeToken(.literal, 'u');
+            }
             self.pos += 1; // consume '{'
             var n: usize = 0;
             while (self.peekHex(0)) |d| {
