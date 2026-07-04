@@ -960,6 +960,10 @@ pub const Regex = struct {
         return .{ .count = run, .end = p };
     }
 
+    fn anchoredStartSkipped(self: *const Regex, start: usize) bool {
+        return start > 0 and self.opt_info.anchored_start and !self.flags.multiline;
+    }
+
     fn nextCodepointStart(input: []const u8, pos: usize) usize {
         if (pos >= input.len) return input.len + 1;
         const len = common.ecmaCodePointLen(input, pos) orelse return pos + 1;
@@ -1470,15 +1474,66 @@ pub const Regex = struct {
     pub fn findFrom(self: *const Regex, input: []const u8, start: usize) !?Match {
         if (start == 0) return self.find(input);
         if (self.requiredAbsent(input)) return null;
+        const from = @min(start, input.len);
+        if (self.anchoredStartSkipped(from)) return null;
 
         if (self.opt_info.exact_literal) |lit| {
             const found = if (self.flags.case_insensitive) blk: {
-                var sc = CiLiteralScanner.init(input, lit, @min(start, input.len));
+                var sc = CiLiteralScanner.init(input, lit, from);
                 break :blk sc.next();
-            } else literalSearch(input, lit, @min(start, input.len));
+            } else literalSearch(input, lit, from);
             if (found) |i| return Match{ .slice = input[i .. i + lit.len], .start = i, .end = i + lit.len };
             return null;
         }
+        if (self.engine_type == .thompson_nfa) if (self.opt_info.repeat_atom) |ra| if (self.repeatAtomFastPathOk()) {
+            const table = repeatTable(ra, self.flags.case_insensitive);
+            const max = ra.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_end) {
+                var p = from;
+                while (p < input.len and !table[input[p]]) p += 1;
+                if (p >= input.len) return null;
+                const run = repeatRunAt(input, table, p, max);
+                const end = p + run;
+                if (end == input.len and repeatBoundsOk(run, ra.min, max))
+                    return Match{ .slice = input[p..end], .start = p, .end = end };
+                return null;
+            }
+            var p = from;
+            while (p < input.len) {
+                while (p < input.len and !table[input[p]]) p += 1;
+                if (p >= input.len) break;
+                const match_start = p;
+                var run: usize = 0;
+                while (p < input.len and table[input[p]] and run < max) : (p += 1) run += 1;
+                if (run >= ra.min) return Match{ .slice = input[match_start..p], .start = match_start, .end = p };
+            }
+            return null;
+        };
+        if (self.opt_info.unicode_repeat_atom) |ura| if (!self.flags.case_insensitive and self.repeatAtomFastPathOk()) {
+            const max = ura.max orelse std.math.maxInt(usize);
+            if (self.opt_info.anchored_end) {
+                var p = from;
+                while (p < input.len) {
+                    const run = unicodeRepeatRunAt(input, ura.property, p, max);
+                    if (run.count >= ura.min) {
+                        if (run.end == input.len)
+                            return Match{ .slice = input[p..run.end], .start = p, .end = run.end };
+                        return null;
+                    }
+                    p = nextCodepointStart(input, p);
+                }
+                return null;
+            }
+            var p = from;
+            while (p < input.len) {
+                const run = unicodeRepeatRunAt(input, ura.property, p, max);
+                if (run.count >= ura.min) {
+                    return Match{ .slice = input[p..run.end], .start = p, .end = run.end };
+                }
+                p = nextCodepointStart(input, p);
+            }
+            return null;
+        };
 
         switch (self.engine_type) {
             .thompson_nfa => {
@@ -1488,7 +1543,7 @@ pub const Regex = struct {
 
                 if (self.onepass) |plan| {
                     const fb = self.opt_info.first_bytes;
-                    var scan: usize = @min(start, input.len);
+                    var scan: usize = from;
                     while (scan <= input.len) {
                         if (fb) |t| {
                             while (scan < input.len and !t[input[scan]]) scan += 1;
@@ -1504,7 +1559,7 @@ pub const Regex = struct {
 
                 if (self.opt_info.literal_prefix) |prefix| {
                     if (!self.flags.case_insensitive) {
-                        var search_from: usize = @min(start, input.len);
+                        var search_from: usize = from;
                         while (std.mem.indexOf(u8, input[search_from..], prefix)) |rel_pos| {
                             const prefix_pos = search_from + rel_pos;
                             if (try virtual_machine.matchAt(input, prefix_pos)) |result| {
@@ -1518,7 +1573,7 @@ pub const Regex = struct {
 
                 if (self.opt_info.first_bytes) |fb| {
                     if (!self.flags.case_insensitive) {
-                        var scan: usize = @min(start, input.len);
+                        var scan: usize = from;
                         while (scan < input.len) {
                             while (scan < input.len and !fb[input[scan]]) scan += 1;
                             if (scan >= input.len) break;
@@ -1531,7 +1586,7 @@ pub const Regex = struct {
                     }
                 }
 
-                var scan: usize = @min(start, input.len);
+                var scan: usize = from;
                 while (scan <= input.len) {
                     if (try virtual_machine.matchAt(input, scan)) |result| {
                         return try self.buildMatch(input, result);
@@ -3055,6 +3110,32 @@ test "unicode surrogate escapes compile to WTF-8 code units" {
     var regex = try Regex.compile(allocator, "\\uDF06");
     defer regex.deinit();
     try std.testing.expect(try regex.isMatch(&.{ 0xED, 0xBC, 0x86 }));
+}
+
+test "findFrom uses repeated atom fast paths after nonzero start" {
+    const allocator = std.testing.allocator;
+
+    var digits = try Regex.compile(allocator, "\\d+");
+    defer digits.deinit();
+    if (try digits.findFrom("xx123yy", 2)) |match_result| {
+        try std.testing.expectEqualStrings("123", match_result.slice);
+    } else try std.testing.expect(false);
+    if (try digits.findFrom("xx123yy", 4)) |match_result| {
+        try std.testing.expectEqualStrings("3", match_result.slice);
+    } else try std.testing.expect(false);
+
+    var letters = try Regex.compileWithFlags(allocator, "\\p{Letter}+", .{ .unicode = true });
+    defer letters.deinit();
+    if (try letters.findFrom("12abc", 2)) |match_result| {
+        try std.testing.expectEqualStrings("abc", match_result.slice);
+    } else try std.testing.expect(false);
+    if (try letters.findFrom("12abc", 3)) |match_result| {
+        try std.testing.expectEqualStrings("bc", match_result.slice);
+    } else try std.testing.expect(false);
+
+    var anchored = try Regex.compileWithFlags(allocator, "^\\p{Letter}+$", .{ .unicode = true });
+    defer anchored.deinit();
+    try std.testing.expect((try anchored.findFrom("abc", 1)) == null);
 }
 
 test "capture spans give per-group byte offsets" {
