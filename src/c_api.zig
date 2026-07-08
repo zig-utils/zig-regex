@@ -36,11 +36,11 @@ pub const ZigRegexError = enum(c_int) {
 };
 
 // Global allocator for C API (uses C allocator)
-var c_allocator = std.heap.c_allocator;
+const c_allocator = std.heap.c_allocator;
 
 /// Compile a regex pattern
 ///
-/// Returns NULL on error. Call zig_regex_get_last_error() to get error details.
+/// Returns NULL on error.
 /// The returned regex must be freed with zig_regex_free().
 export fn zig_regex_compile(pattern: [*:0]const u8) ?*ZigRegex {
     const pattern_slice = std.mem.span(pattern);
