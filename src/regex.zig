@@ -2639,10 +2639,11 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         // which only the backtracking engine honors.
         .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags),
 
-        // `.` lowers to a UTF-8 code-point automaton (compiler.compileAny):
-        // one code point excluding line terminators (and astral unless the `u`
-        // flag) — representable on the byte engine, so no backtracking needed.
-        .any => return false,
+        // The byte NFA can lower ordinary UTF-8 code points directly. In
+        // ECMAScript Unicode mode, however, adjacent WTF-8 high/low surrogate
+        // encodings form one code point and must be consumed atomically; the
+        // backtracker's common.dotMatchLen path implements that rule.
+        .any => return flags.unicode,
 
         // These don't require backtracking
         .literal, .empty => return false,
@@ -3121,6 +3122,29 @@ test "unicode surrogate escapes compile to WTF-8 code units" {
     var regex = try Regex.compile(allocator, "\\uDF06");
     defer regex.deinit();
     try std.testing.expect(try regex.isMatch(&.{ 0xED, 0xBC, 0x86 }));
+}
+
+test "unicode dot consumes WTF-8 surrogate pairs atomically" {
+    const allocator = std.testing.allocator;
+    const surrogate_pair = [_]u8{ 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 'Z' };
+
+    var legacy = try Regex.compileWithFlags(allocator, ".", .{ .ecmascript = true });
+    defer legacy.deinit();
+    var legacy_match = (try legacy.find(&surrogate_pair)).?;
+    defer legacy_match.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), legacy_match.end);
+
+    var unicode = try Regex.compileWithFlags(allocator, ".", .{ .unicode = true, .ecmascript = true });
+    defer unicode.deinit();
+    var unicode_match = (try unicode.find(&surrogate_pair)).?;
+    defer unicode_match.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 6), unicode_match.end);
+
+    var dot_all = try Regex.compileWithFlags(allocator, ".", .{ .unicode = true, .dot_all = true, .ecmascript = true });
+    defer dot_all.deinit();
+    var scalar_match = (try dot_all.find("\xf0\x9f\x98\x80")).?;
+    defer scalar_match.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4), scalar_match.end);
 }
 
 test "findFrom uses repeated atom fast paths after nonzero start" {
