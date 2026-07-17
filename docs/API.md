@@ -73,7 +73,6 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) !Regex
 
 **Errors:**
 
-- `RegexError.EmptyPattern` - Pattern string is empty
 - `RegexError.InvalidPattern` - Syntax error in pattern
 - `RegexError.UnexpectedCharacter` - Invalid character in pattern
 - `RegexError.UnexpectedEndOfPattern` - Pattern ended unexpectedly

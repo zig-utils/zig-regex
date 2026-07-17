@@ -99,10 +99,6 @@ pub const Regex = struct {
 
     /// Compile a regex pattern with custom flags
     pub fn compileWithFlags(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
-        if (pattern.len == 0) {
-            return RegexError.EmptyPattern;
-        }
-
         // Parse the pattern into an AST
         var p = try parser.Parser.init(allocator, pattern);
         p.unicode_sets = flags.unicode_sets;
@@ -2929,8 +2925,23 @@ fn collectNamedCaptures(
 
 test "compile empty pattern" {
     const allocator = std.testing.allocator;
-    const result = Regex.compile(allocator, "");
-    try std.testing.expectError(RegexError.EmptyPattern, result);
+    var regex = try Regex.compileWithFlags(allocator, "", .{ .ecmascript = true });
+    defer regex.deinit();
+
+    var at_start = (try regex.find("abc")).?;
+    defer at_start.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), at_start.start);
+    try std.testing.expectEqual(@as(usize, 0), at_start.end);
+
+    var after_two = (try regex.findFrom("abc", 2)).?;
+    defer after_two.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), after_two.start);
+    try std.testing.expectEqual(@as(usize, 2), after_two.end);
+
+    var at_end = (try regex.findFrom("abc", 3)).?;
+    defer at_end.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), at_end.start);
+    try std.testing.expectEqual(@as(usize, 3), at_end.end);
 }
 
 test "compile basic pattern" {
