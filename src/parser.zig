@@ -757,7 +757,10 @@ pub const Parser = struct {
             try self.advance(); // consume |
             const right = try self.parseConcat();
             const span = common.Span.init(start, self.current_token.span.end);
-            left = try ast.Node.createAlternation(self.allocator, left, right, span);
+            left = ast.Node.createAlternation(self.allocator, left, right, span) catch |err| {
+                right.destroy(self.allocator);
+                return err;
+            };
         }
 
         return left;
@@ -780,7 +783,10 @@ pub const Parser = struct {
             }
 
             const node = try self.parseRepeat();
-            try nodes.append(self.allocator, node);
+            nodes.append(self.allocator, node) catch |err| {
+                node.destroy(self.allocator);
+                return err;
+            };
         }
 
         if (nodes.items.len == 0) {
@@ -792,13 +798,14 @@ pub const Parser = struct {
         }
 
         // Build right-associative concatenation tree
-        var result = nodes.items[nodes.items.len - 1];
-        var i = nodes.items.len - 1;
-        while (i > 0) {
-            i -= 1;
-            const left = nodes.items[i];
+        var result = nodes.pop().?;
+        errdefer result.destroy(self.allocator);
+        while (nodes.pop()) |left| {
             const span = common.Span.init(left.span.start, result.span.end);
-            result = try ast.Node.createConcat(self.allocator, left, result, span);
+            result = ast.Node.createConcat(self.allocator, left, result, span) catch |err| {
+                left.destroy(self.allocator);
+                return err;
+            };
         }
 
         return result;
@@ -2391,7 +2398,10 @@ pub const Parser = struct {
         };
 
         const span = common.Span.init(start, self.current_token.span.end);
-        return ast.Node.createCharClass(self.allocator, char_class, span);
+        return ast.Node.createCharClass(self.allocator, char_class, span) catch |err| {
+            self.allocator.free(char_class.ranges);
+            return err;
+        };
     }
 };
 
@@ -2542,4 +2552,14 @@ test "parser: acceptable nesting depth" {
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 200), result.capture_count);
+}
+
+test "parser tree ownership is exhaustive-allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var parser = try Parser.init(allocator, "^alpha-(beta|gamma)-[a-z]+$");
+            var result = try parser.parse();
+            defer result.deinit();
+        }
+    }.run, .{});
 }
