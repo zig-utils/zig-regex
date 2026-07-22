@@ -16,6 +16,11 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const install_benchmarks = b.option(
+        bool,
+        "install-benchmarks",
+        "Install host-specific benchmark executables with the default artifacts",
+    ) orelse false;
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -507,7 +512,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(benchmark);
+    if (install_benchmarks) b.installArtifact(benchmark);
 
     const benchmark_run = b.addRunArtifact(benchmark);
     const benchmark_step = b.step("bench", "Run benchmarks");
@@ -525,7 +530,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(prefix_bench);
+    if (install_benchmarks) b.installArtifact(prefix_bench);
 
     const prefix_bench_run = b.addRunArtifact(prefix_bench);
     const prefix_bench_step = b.step("bench-prefix", "Run prefix optimization benchmarks");
@@ -546,7 +551,7 @@ pub fn build(b: *std.Build) void {
     });
     // clock_gettime for monotonic timing.
     findall_bench.root_module.link_libc = true;
-    b.installArtifact(findall_bench);
+    if (install_benchmarks) b.installArtifact(findall_bench);
 
     const findall_bench_run = b.addRunArtifact(findall_bench);
     const findall_bench_arg = b.option([]const u8, "findall-bench-arg", "Pass one argument to the findAll benchmark") orelse null;
@@ -567,7 +572,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(zg);
+    if (install_benchmarks) b.installArtifact(zg);
 
     const line_count_bench = b.addExecutable(.{
         .name = "line_count_bench",
@@ -581,7 +586,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     line_count_bench.root_module.link_libc = true;
-    b.installArtifact(line_count_bench);
+    if (install_benchmarks) b.installArtifact(line_count_bench);
 
     // Add debug visualization example
     const debug_example = b.addExecutable(.{
