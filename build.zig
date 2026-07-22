@@ -374,6 +374,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_fuzz_tests.step);
     test_step.dependOn(&run_benchmarks_tests.step);
 
+    // Bounded developer/consumer gate that excludes fuzz, stress, and benchmark
+    // suites. The full `test` step remains the issue-boundary qualification gate.
+    const test_core_step = b.step("test-core", "Run bounded core correctness tests");
+    test_core_step.dependOn(&run_mod_tests.step);
+    test_core_step.dependOn(&run_exe_tests.step);
+    test_core_step.dependOn(&run_case_insensitive_tests.step);
+    test_core_step.dependOn(&run_integration_tests.step);
+    test_core_step.dependOn(&run_posix_classes_tests.step);
+    test_core_step.dependOn(&run_backreferences_tests.step);
+    test_core_step.dependOn(&run_iterator_tests.step);
+    test_core_step.dependOn(&run_non_capturing_groups_tests.step);
+    test_core_step.dependOn(&run_utf8_unicode_tests.step);
+    test_core_step.dependOn(&run_string_anchors_tests.step);
+    test_core_step.dependOn(&run_anchored_search_tests.step);
+    test_core_step.dependOn(&run_multiline_dotall_tests.step);
+    test_core_step.dependOn(&run_named_captures_tests.step);
+    test_core_step.dependOn(&run_lazy_quantifiers_tests.step);
+
     // Regression tests for specific fixes
     const regression_tests = b.addTest(.{
         .root_module = b.createModule(.{
