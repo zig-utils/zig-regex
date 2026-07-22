@@ -87,6 +87,11 @@ pub const Transition = struct {
             .data = .{ .anchor = anchor_type },
         };
     }
+
+    pub fn deinit(self: *Transition, allocator: std.mem.Allocator) void {
+        if (self.transition_type == .char_class) allocator.free(self.data.char_class.ranges);
+        if (self.clear_captures.len != 0) allocator.free(self.clear_captures);
+    }
 };
 
 /// NFA State
@@ -109,19 +114,16 @@ pub const State = struct {
 
     pub fn deinit(self: *State) void {
         // Free owned transition payloads.
-        for (self.transitions.items) |transition| {
-            if (transition.transition_type == .char_class) {
-                self.allocator.free(transition.data.char_class.ranges);
-            }
-            if (transition.clear_captures.len != 0) {
-                self.allocator.free(transition.clear_captures);
-            }
-        }
+        for (self.transitions.items) |*transition| transition.deinit(self.allocator);
         self.transitions.deinit(self.allocator);
     }
 
     pub fn addTransition(self: *State, transition: Transition) !void {
-        try self.transitions.append(self.allocator, transition);
+        var owned = transition;
+        self.transitions.append(self.allocator, owned) catch |err| {
+            owned.deinit(self.allocator);
+            return err;
+        };
     }
 };
 
@@ -603,7 +605,6 @@ pub const Compiler = struct {
 
     fn addBranchTransition(self: *Compiler, state: *State, to: StateId, skipped: *ast.Node) !void {
         const captures = try self.captureIndicesIn(skipped);
-        errdefer self.allocator.free(captures);
         if (captures.len == 0) {
             self.allocator.free(captures);
             try state.addTransition(Transition.epsilon(to));

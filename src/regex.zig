@@ -192,8 +192,6 @@ pub const Regex = struct {
             };
         } else {
             // Use Thompson NFA engine
-            defer tree.deinit();
-
             // `\bfn\b`-style bounded literal (computed from the AST before it is
             // freed). Captures disable it (the fast path returns no groups).
             const bounded_literal = if (tree.capture_count == 0)
@@ -206,6 +204,10 @@ pub const Regex = struct {
             errdefer comp.deinit();
             _ = try comp.compile(&tree);
 
+            const capture_count = tree.capture_count;
+            const owned_named_capture_list = try named_capture_list.toOwnedSlice(allocator);
+            tree.deinit();
+
             return Regex{
                 .allocator = allocator,
                 .pattern = owned_pattern,
@@ -213,11 +215,11 @@ pub const Regex = struct {
                 .backtrack_engine = null,
                 .ast_tree = null,
                 .engine_type = .thompson_nfa,
-                .capture_count = tree.capture_count,
+                .capture_count = capture_count,
                 .flags = flags,
                 .opt_info = opt_info,
                 .named_captures = named_captures,
-                .named_capture_list = try named_capture_list.toOwnedSlice(allocator),
+                .named_capture_list = owned_named_capture_list,
                 .onepass = onepass_plan,
                 .bounded_literal = bounded_literal,
             };
@@ -3222,4 +3224,13 @@ test "variable-length lookbehind explores backtracking (constrained match)" {
     defer re3.deinit();
     try std.testing.expect(!(try re3.isMatch("abc")));
     try std.testing.expect(try re3.isMatch("xbc")); // not preceded by "ab"
+}
+
+test "regex compilation is exhaustive-allocation-failure safe" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var compiled = try Regex.compile(allocator, "^sec-(alpha|beta)-[a-z]+$");
+            defer compiled.deinit();
+        }
+    }.run, .{});
 }

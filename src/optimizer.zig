@@ -124,6 +124,7 @@ pub const Optimizer = struct {
     /// Analyze AST and extract optimization information
     pub fn analyze(self: *Optimizer, root: *ast.Node) !OptimizationInfo {
         var info = OptimizationInfo{};
+        errdefer info.deinit(self.allocator);
 
         info.anchored_start = hasLeadingStartAnchor(root);
         info.anchored_end = hasTrailingEndAnchor(root);
@@ -901,4 +902,19 @@ test "optimizer: min/max length calculation" {
 
     try std.testing.expectEqual(@as(usize, 1), info2.min_length);
     try std.testing.expectEqual(@as(?usize, null), info2.max_length);
+}
+
+test "optimizer analysis ownership is exhaustive-allocation-failure safe" {
+    const Parser = @import("parser.zig").Parser;
+    var parser = try Parser.init(std.testing.allocator, "^sec-(alpha|beta)-[a-z]+$");
+    var tree = try parser.parse();
+    defer tree.deinit();
+
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, root: *ast.Node) !void {
+            var optimizer = Optimizer.init(allocator);
+            var info = try optimizer.analyze(root);
+            defer info.deinit(allocator);
+        }
+    }.run, .{tree.root});
 }
