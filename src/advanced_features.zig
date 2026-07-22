@@ -16,10 +16,10 @@ pub const AtomicGroupNode = struct {
 /// Possessive Quantifiers: *+, ++, ?+, {n,m}+
 /// Like greedy quantifiers but don't backtrack
 pub const PossessiveQuantifier = enum {
-    star_possessive,     // *+
-    plus_possessive,     // ++
+    star_possessive, // *+
+    plus_possessive, // ++
     optional_possessive, // ?+
-    repeat_possessive,   // {n,m}+
+    repeat_possessive, // {n,m}+
 
     pub fn fromGreedy(_: bool) ?PossessiveQuantifier {
         // Helper to detect possessive syntax
@@ -74,7 +74,7 @@ pub const AdvancedNodeType = enum {
 // Tests
 test "atomic group creation" {
     const allocator = std.testing.allocator;
-    
+
     // Create a simple child node (literal 'a')
     const child = try ast.Node.createLiteral(allocator, 'a', .{ .start = 0, .end = 1 });
     defer allocator.destroy(child);

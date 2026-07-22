@@ -72,15 +72,15 @@ fn checkConsistency(pattern: []const u8, input: []const u8, flags: Flags) !void 
 
 // Pattern fragments that exercise the byte-scanning fast paths.
 const cores = [_][]const u8{
-    "a",       "ab",     "abc",
-    "x",       "fn",     "foo",
-    "\\w",     "\\w+",   "\\w{2}",
+    "a",        "ab",    "abc",
+    "x",        "fn",    "foo",
+    "\\w",      "\\w+",  "\\w{2}",
     "\\w{2,3}", "\\d+",  "[a-c]+",
-    ".",       ".+",     ".*",
-    "a+",      "a*",     "a?",
-    "ab+",     "(ab)+",  "a{2}",
-    "foo|bar", "a|bc",   "(a|b)+",
-    "\\s",     "\\s+",   "\\bfn\\b",
+    ".",        ".+",    ".*",
+    "a+",       "a*",    "a?",
+    "ab+",      "(ab)+", "a{2}",
+    "foo|bar",  "a|bc",  "(a|b)+",
+    "\\s",      "\\s+",  "\\bfn\\b",
 };
 
 const lead = [_][]const u8{ "", "^" };

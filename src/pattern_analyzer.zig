@@ -591,8 +591,8 @@ pub fn analyzeAndValidate(allocator: std.mem.Allocator, root: *ast.Node, max_ris
     defer result.deinit(allocator);
 
     // Check if risk exceeds maximum (reject if risk >= max)
-    const risk_value = @intFromEnum(result.risk_level);
-    const max_value = @intFromEnum(max_risk);
+    const risk_value = @backingInt(result.risk_level);
+    const max_value = @backingInt(max_risk);
 
     if (risk_value > max_value) {
         var has_critical = false;
@@ -824,4 +824,3 @@ test "analyzer: unicode-property delimited quantifier is not critical" {
         try std.testing.expectEqual(RiskLevel.critical, result.risk_level);
     }
 }
-

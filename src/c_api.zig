@@ -18,7 +18,6 @@ const Match = @import("regex.zig").Match;
 ///     zig_regex_free(regex);
 /// }
 /// ```
-
 /// Opaque handle to a compiled regex
 pub const ZigRegex = opaque {};
 
@@ -67,7 +66,7 @@ export fn zig_regex_free(regex: ?*ZigRegex) void {
 ///
 /// Returns 1 if matches, 0 if no match, -1 on error
 export fn zig_regex_is_match(regex: ?*ZigRegex, input: [*:0]const u8) c_int {
-    if (regex == null) return @intFromEnum(ZigRegexError.null_pointer);
+    if (regex == null) return @backingInt(ZigRegexError.null_pointer);
 
     const regex_ptr: *const Regex = @ptrCast(@alignCast(regex.?));
     const input_slice = std.mem.span(input);

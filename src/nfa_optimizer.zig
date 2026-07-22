@@ -237,7 +237,7 @@ pub const NFAOptimizer = struct {
         var hasher = std.hash.Wyhash.init(0);
 
         // Hash type
-        std.hash.autoHash(&hasher, @intFromEnum(trans.transition_type));
+        std.hash.autoHash(&hasher, @backingInt(trans.transition_type));
 
         // Hash target
         std.hash.autoHash(&hasher, trans.to);
@@ -253,7 +253,7 @@ pub const NFAOptimizer = struct {
                     std.hash.autoHash(&hasher, range.end);
                 }
             },
-            .anchor => std.hash.autoHash(&hasher, @intFromEnum(trans.data.anchor)),
+            .anchor => std.hash.autoHash(&hasher, @backingInt(trans.data.anchor)),
         }
 
         return hasher.final();

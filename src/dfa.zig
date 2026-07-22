@@ -204,12 +204,12 @@ pub const LazyDfa = struct {
         const word_boundary = prev_word != cur_word;
 
         var m: u8 = 0;
-        if (begin_line) m |= @as(u8, 1) << @intFromEnum(ast.AnchorType.start_line);
-        if (end_line) m |= @as(u8, 1) << @intFromEnum(ast.AnchorType.end_line);
-        if (begin_text) m |= @as(u8, 1) << @intFromEnum(ast.AnchorType.start_text);
-        if (end_text) m |= @as(u8, 1) << @intFromEnum(ast.AnchorType.end_text);
-        if (word_boundary) m |= @as(u8, 1) << @intFromEnum(ast.AnchorType.word_boundary);
-        if (!word_boundary) m |= @as(u8, 1) << @intFromEnum(ast.AnchorType.non_word_boundary);
+        if (begin_line) m |= @as(u8, 1) << @backingInt(ast.AnchorType.start_line);
+        if (end_line) m |= @as(u8, 1) << @backingInt(ast.AnchorType.end_line);
+        if (begin_text) m |= @as(u8, 1) << @backingInt(ast.AnchorType.start_text);
+        if (end_text) m |= @as(u8, 1) << @backingInt(ast.AnchorType.end_text);
+        if (word_boundary) m |= @as(u8, 1) << @backingInt(ast.AnchorType.word_boundary);
+        if (!word_boundary) m |= @as(u8, 1) << @backingInt(ast.AnchorType.non_word_boundary);
         return m;
     }
 
@@ -238,7 +238,7 @@ pub const LazyDfa = struct {
                         }
                     },
                     .anchor => {
-                        const bit = @as(u8, 1) << @intFromEnum(t.data.anchor);
+                        const bit = @as(u8, 1) << @backingInt(t.data.anchor);
                         if (mask & bit != 0 and !bitTest(out, t.to)) {
                             bitSet(out, t.to);
                             try self.stack.append(self.allocator, t.to);
