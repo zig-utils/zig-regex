@@ -242,7 +242,7 @@ For help, discussion about best practices, or any other conversation that would 
 
 For casual chit-chat with others using this package:
 
-[Join the Stacks Discord Server](https://stacksjs.com/discord)
+[Join the zig-utils Discord Server](https://discord.gg/f7wBym6JF2)
 
 ## License
 
