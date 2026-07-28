@@ -3171,6 +3171,18 @@ test "unicode shorthand classes consume code points atomically" {
     }
 }
 
+test "anchored unicode negated shorthand repeats without recursive stack growth" {
+    const allocator = std.testing.allocator;
+    const scalar = "\xf0\x9f\x90\x80";
+    var input = std.ArrayList(u8).empty;
+    defer input.deinit(allocator);
+    for (0..8192) |_| try input.appendSlice(allocator, scalar);
+
+    var re = try Regex.compileWithFlags(allocator, "^\\W+$", .{ .unicode = true, .ecmascript = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch(input.items));
+}
+
 test "findFrom uses repeated atom fast paths after nonzero start" {
     const allocator = std.testing.allocator;
 

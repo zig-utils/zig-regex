@@ -455,10 +455,46 @@ pub const BacktrackEngine = struct {
                     .repeat => node.data.repeat.bounds.max,
                     else => unreachable,
                 };
+                if (!self.hasQuantifiers(child) and !self.hasAlternation(child))
+                    return self.matchRepeatedChildConstrainedLinear(child, pos, target_end, min, max);
                 return self.matchRepeatedChildConstrained(child, pos, target_end, 0, min, max);
             },
             else => return false,
         }
+    }
+
+    fn matchRepeatedChildConstrainedLinear(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, min: usize, max: ?usize) bool {
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+        defer self.allocator.free(saved);
+        @memcpy(saved, self.captures);
+
+        var current = pos;
+        var count: usize = 0;
+        while (current < target_end) {
+            if (max) |m| if (count >= m) {
+                @memcpy(self.captures, saved);
+                return false;
+            };
+
+            self.clearCapturesIn(child);
+            const end = self.matchNode(child, current) orelse {
+                @memcpy(self.captures, saved);
+                return false;
+            };
+            if (end <= current or end > target_end) {
+                @memcpy(self.captures, saved);
+                return false;
+            }
+
+            current = end;
+            count += 1;
+        }
+
+        if (count < min) {
+            @memcpy(self.captures, saved);
+            return false;
+        }
+        return current == target_end;
     }
 
     fn matchRepeatedChildConstrained(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, count: usize, min: usize, max: ?usize) bool {
