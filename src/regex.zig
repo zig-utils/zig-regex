@@ -2590,11 +2590,13 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
         .char_class => return flags.unicode and flags.case_insensitive and
             isAsciiWordClass(node.data.char_class),
 
-        // A `class_set` (`\s`, `\S`, `/v` Unicode brackets) lowers to a UTF-8
-        // byte automaton when it's a union of code-point ranges. Under `i`,
-        // ECMAScript distinguishes legacy `/i` canonicalization from `/iu`
-        // Unicode simple folds, which only the backtracker models.
+        // A positive `class_set` (`\s`, `/v` Unicode brackets) lowers to a
+        // UTF-8 byte automaton when it's a union of code-point ranges. Negated
+        // Unicode sets must stay code-point based: the byte automaton can match
+        // a single WTF-8 surrogate code unit from an astral pair, while
+        // ECMAScript `/u` classes consume the whole code point.
         .class_set => return flags.case_insensitive or
+            ((flags.unicode or flags.unicode_sets) and node.data.class_set.negated) or
             !@import("utf8_class.zig").compilable(node.data.class_set),
 
         // Check for lazy quantifiers
@@ -3147,6 +3149,26 @@ test "unicode dot consumes WTF-8 surrogate pairs atomically" {
     var scalar_match = (try dot_all.find("\xf0\x9f\x98\x80")).?;
     defer scalar_match.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 4), scalar_match.end);
+}
+
+test "unicode shorthand classes consume code points atomically" {
+    const allocator = std.testing.allocator;
+    const surrogate_pair = [_]u8{ 0xed, 0xa0, 0xbd, 0xed, 0xb0, 0x80 };
+    const scalar = "\xf0\x9f\x90\x80";
+
+    inline for (.{ "\\D", "\\S", "\\W" }) |pattern| {
+        var re_pair = try Regex.compileWithFlags(allocator, pattern, .{ .unicode = true, .ecmascript = true });
+        defer re_pair.deinit();
+        var pair_match = (try re_pair.find(&surrogate_pair)).?;
+        defer pair_match.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, surrogate_pair.len), pair_match.end);
+
+        var re_scalar = try Regex.compileWithFlags(allocator, pattern, .{ .unicode = true, .ecmascript = true });
+        defer re_scalar.deinit();
+        var scalar_match = (try re_scalar.find(scalar)).?;
+        defer scalar_match.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, scalar.len), scalar_match.end);
+    }
 }
 
 test "findFrom uses repeated atom fast paths after nonzero start" {

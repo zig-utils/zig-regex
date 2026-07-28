@@ -135,10 +135,9 @@ pub const Node = struct {
         }
 
         pub fn matchLongestMode(self: *const ClassSet, input: []const u8, start: usize, fold_mode: CaseFoldMode) ?usize {
-            const u = @import("unicode.zig");
             if (self.op == .union_ and self.negated) {
                 if (start >= input.len) return null;
-                const dec = u.decodeUtf8Lenient(input[start..]) orelse return null;
+                const dec = decodeClassCodePoint(input, start) orelse return null;
                 if (!self.matchesMode(dec.codepoint, fold_mode)) return null;
                 return start + dec.len;
             }
@@ -204,29 +203,51 @@ pub const Node = struct {
     };
 
     fn itemMatchLongest(it: ClassItem, input: []const u8, start: usize, fold_mode: ClassSet.CaseFoldMode) ?usize {
-        const u = @import("unicode.zig");
         return switch (it) {
             .string => |s| matchStringItem(input, start, s, fold_mode),
             .nested => |n| n.matchLongestMode(input, start, fold_mode),
             .range, .property => blk: {
                 if (start >= input.len) break :blk null;
-                const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk null;
+                const dec = decodeClassCodePoint(input, start) orelse break :blk null;
                 break :blk if (itemMatches(it, dec.codepoint, fold_mode)) start + dec.len else null;
             },
         };
     }
 
     fn itemContainsMatch(it: ClassItem, input: []const u8, start: usize, end: usize, fold_mode: ClassSet.CaseFoldMode) bool {
-        const u = @import("unicode.zig");
         return switch (it) {
             .string => |s| if (matchStringItem(input, start, s, fold_mode)) |e| e == end else false,
             .nested => |n| n.containsMatch(input, start, end, fold_mode),
             .range, .property => blk: {
-                const dec = u.decodeUtf8Lenient(input[start..]) orelse break :blk false;
+                const dec = decodeClassCodePoint(input, start) orelse break :blk false;
                 if (start + dec.len != end) break :blk false;
                 break :blk itemMatches(it, dec.codepoint, fold_mode);
             },
         };
+    }
+
+    const ClassDecode = struct {
+        codepoint: u21,
+        len: usize,
+    };
+
+    fn decodeClassCodePoint(input: []const u8, start: usize) ?ClassDecode {
+        const u = @import("unicode.zig");
+        const first = u.decodeUtf8Lenient(input[start..]) orelse return null;
+        if (first.codepoint >= 0xD800 and first.codepoint <= 0xDBFF) {
+            const next = start + first.len;
+            if (next < input.len) {
+                if (u.decodeUtf8Lenient(input[next..])) |second| {
+                    if (second.codepoint >= 0xDC00 and second.codepoint <= 0xDFFF) {
+                        return .{
+                            .codepoint = 0x10000 + ((first.codepoint - 0xD800) << 10) + (second.codepoint - 0xDC00),
+                            .len = first.len + second.len,
+                        };
+                    }
+                }
+            }
+        }
+        return .{ .codepoint = first.codepoint, .len = first.len };
     }
 
     fn itemMatches(it: ClassItem, cp: u21, fold_mode: ClassSet.CaseFoldMode) bool {

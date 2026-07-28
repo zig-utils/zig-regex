@@ -1091,6 +1091,7 @@ pub const Parser = struct {
             },
             .escape_d => {
                 try self.advance();
+                if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('d', span);
                 // Duplicate ranges from static predefined class so AST can own them
                 const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.digit.ranges);
                 return ast.Node.createCharClass(self.allocator, .{
@@ -1100,6 +1101,7 @@ pub const Parser = struct {
             },
             .escape_D => {
                 try self.advance();
+                if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('D', span);
                 const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_digit.ranges);
                 return ast.Node.createCharClass(self.allocator, .{
                     .ranges = ranges,
@@ -1108,6 +1110,7 @@ pub const Parser = struct {
             },
             .escape_w => {
                 try self.advance();
+                if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('w', span);
                 const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.word.ranges);
                 return ast.Node.createCharClass(self.allocator, .{
                     .ranges = ranges,
@@ -1116,6 +1119,7 @@ pub const Parser = struct {
             },
             .escape_W => {
                 try self.advance();
+                if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('W', span);
                 const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_word.ranges);
                 return ast.Node.createCharClass(self.allocator, .{
                     .ranges = ranges,
