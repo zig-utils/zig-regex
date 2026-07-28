@@ -3199,6 +3199,19 @@ test "annex b quantified lookahead remains zero-width" {
     try std.testing.expectEqualStrings("e", not_followed_match.slice);
 }
 
+test "empty capture backreference repeats remain matchable" {
+    const allocator = std.testing.allocator;
+
+    var re = try Regex.compileWithFlags(allocator, "(a*)b\\1+", .{ .ecmascript = true });
+    defer re.deinit();
+    var match = (try re.find("baaaac")).?;
+    defer match.deinit(allocator);
+
+    try std.testing.expectEqualStrings("b", match.slice);
+    try std.testing.expectEqual(@as(usize, 1), match.captures.len);
+    try std.testing.expectEqualStrings("", match.captures[0]);
+}
+
 test "findFrom uses repeated atom fast paths after nonzero start" {
     const allocator = std.testing.allocator;
 

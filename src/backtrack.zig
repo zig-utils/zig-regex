@@ -455,7 +455,7 @@ pub const BacktrackEngine = struct {
                     .repeat => node.data.repeat.bounds.max,
                     else => unreachable,
                 };
-                if (!self.canMatchEmpty(child) and !self.hasQuantifiers(child) and !self.hasAlternation(child))
+                if (!self.canMatchEmpty(child) and !self.hasQuantifiers(child) and !self.hasAlternation(child) and !self.hasBackreference(child))
                     return self.matchRepeatedChildConstrainedLinear(child, pos, target_end, min, max);
                 return self.matchRepeatedChildConstrained(child, pos, target_end, 0, min, max);
             },
@@ -560,6 +560,22 @@ pub const BacktrackEngine = struct {
             .repeat => self.hasAlternation(node.data.repeat.child),
             .lookahead => self.hasAlternation(node.data.lookahead.child),
             .lookbehind => self.hasAlternation(node.data.lookbehind.child),
+            else => false,
+        };
+    }
+
+    fn hasBackreference(self: *BacktrackEngine, node: *ast.Node) bool {
+        return switch (node.node_type) {
+            .backref => true,
+            .concat => self.hasBackreference(node.data.concat.left) or self.hasBackreference(node.data.concat.right),
+            .alternation => self.hasBackreference(node.data.alternation.left) or self.hasBackreference(node.data.alternation.right),
+            .group => self.hasBackreference(node.data.group.child),
+            .star => self.hasBackreference(node.data.star.child),
+            .plus => self.hasBackreference(node.data.plus.child),
+            .optional => self.hasBackreference(node.data.optional.child),
+            .repeat => self.hasBackreference(node.data.repeat.child),
+            .lookahead => self.hasBackreference(node.data.lookahead.child),
+            .lookbehind => self.hasBackreference(node.data.lookbehind.child),
             else => false,
         };
     }
