@@ -3183,6 +3183,22 @@ test "anchored unicode negated shorthand repeats without recursive stack growth"
     try std.testing.expect(try re.isMatch(input.items));
 }
 
+test "annex b quantified lookahead remains zero-width" {
+    const allocator = std.testing.allocator;
+
+    var followed = try Regex.compileWithFlags(allocator, ".(?=Z)+", .{ .ecmascript = true });
+    defer followed.deinit();
+    var followed_match = (try followed.find("a bZ cZZ")).?;
+    defer followed_match.deinit(allocator);
+    try std.testing.expectEqualStrings("b", followed_match.slice);
+
+    var not_followed = try Regex.compileWithFlags(allocator, "[a-e](?!Z)+", .{ .ecmascript = true });
+    defer not_followed.deinit();
+    var not_followed_match = (try not_followed.find("aZZZZ bZZZ cZZ dZ e")).?;
+    defer not_followed_match.deinit(allocator);
+    try std.testing.expectEqualStrings("e", not_followed_match.slice);
+}
+
 test "findFrom uses repeated atom fast paths after nonzero start" {
     const allocator = std.testing.allocator;
 

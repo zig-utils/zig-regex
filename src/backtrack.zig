@@ -455,7 +455,7 @@ pub const BacktrackEngine = struct {
                     .repeat => node.data.repeat.bounds.max,
                     else => unreachable,
                 };
-                if (!self.hasQuantifiers(child) and !self.hasAlternation(child))
+                if (!self.canMatchEmpty(child) and !self.hasQuantifiers(child) and !self.hasAlternation(child))
                     return self.matchRepeatedChildConstrainedLinear(child, pos, target_end, min, max);
                 return self.matchRepeatedChildConstrained(child, pos, target_end, 0, min, max);
             },
