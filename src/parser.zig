@@ -2168,6 +2168,14 @@ pub const Parser = struct {
             return item;
         }
 
+        // ClassAtomNoDash permits an unescaped `[` in ordinary character
+        // classes. Only the `v` grammar reserves it for nested ClassSetCharacter
+        // operands, and that mode is parsed by parseClassSetV instead.
+        if (i.* < input.len and input[i.*] == '[') {
+            i.* += 1;
+            return .{ .range = .{ .lo = '[', .hi = '[' } };
+        }
+
         if (i.* < input.len and input[i.*] == '\\' and i.* + 1 < input.len) {
             const e = input[i.* + 1];
             switch (e) {

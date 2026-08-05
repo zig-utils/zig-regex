@@ -293,6 +293,26 @@ test "parser: annex b character class escapes and shorthand ranges" {
     } else return error.TestExpectedMatch;
 }
 
+test "parser: ordinary character classes allow an unescaped opening bracket" {
+    const allocator = std.testing.allocator;
+
+    var legacy = try Regex.compile(allocator, "^[\\s[]?shapgvba");
+    defer legacy.deinit();
+    try std.testing.expect(try legacy.isMatch("shapgvba"));
+    try std.testing.expect(try legacy.isMatch("[shapgvba"));
+    try std.testing.expect(try legacy.isMatch("\tshapgvba"));
+    try std.testing.expect(!try legacy.isMatch("xshapgvba"));
+
+    var unicode_mode = try Regex.compileWithFlags(allocator, "[[]", .{ .unicode = true });
+    defer unicode_mode.deinit();
+    try std.testing.expect(try unicode_mode.isMatch("["));
+
+    try std.testing.expectError(
+        RegexError.InvalidCharacterClass,
+        Regex.compileWithFlags(allocator, "[[]", .{ .unicode_sets = true }),
+    );
+}
+
 test "parser: annex b extended pattern characters are literals" {
     const allocator = std.testing.allocator;
 
