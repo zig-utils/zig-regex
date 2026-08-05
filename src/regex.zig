@@ -1064,6 +1064,12 @@ pub const Regex = struct {
         pub fn find(self: *Matcher, input: []const u8) !?Match {
             return self.re.findInner(input, self.dfaPtr(), self.vmPtr());
         }
+        /// Find from an absolute byte offset while retaining this matcher's
+        /// scratch state. Assertions still observe the original input.
+        pub fn findFrom(self: *Matcher, input: []const u8, start: usize) !?Match {
+            if (start == 0) return self.find(input);
+            return self.re.findFromInner(input, start, self.vmPtr());
+        }
         pub fn findAll(self: *Matcher, allocator: std.mem.Allocator, input: []const u8) ![]Match {
             return self.re.findAllInner(allocator, input, self.dfaPtr(), self.vmPtr());
         }
@@ -1471,6 +1477,10 @@ pub const Regex = struct {
     /// string.
     pub fn findFrom(self: *const Regex, input: []const u8, start: usize) !?Match {
         if (start == 0) return self.find(input);
+        return self.findFromInner(input, start, null);
+    }
+
+    fn findFromInner(self: *const Regex, input: []const u8, start: usize, reuse_vm: ?*vm.VM) !?Match {
         if (self.requiredAbsent(input)) return null;
         const from = @min(start, input.len);
         if (self.anchoredStartSkipped(from)) return null;
@@ -1535,9 +1545,9 @@ pub const Regex = struct {
 
         switch (self.engine_type) {
             .thompson_nfa => {
-                const nfa_mut = @constCast(&self.nfa);
-                var virtual_machine = vm.VM.init(self.allocator, nfa_mut, self.capture_count, self.flags);
-                defer virtual_machine.deinit();
+                var tmp_vm: ?vm.VM = null;
+                defer if (tmp_vm) |*v| v.deinit();
+                const virtual_machine = self.obtainVm(reuse_vm, &tmp_vm);
 
                 if (self.onepass) |plan| {
                     const fb = self.opt_info.first_bytes;
@@ -3236,6 +3246,31 @@ test "findFrom uses repeated atom fast paths after nonzero start" {
     var anchored = try Regex.compileWithFlags(allocator, "^\\p{Letter}+$", .{ .unicode = true });
     defer anchored.deinit();
     try std.testing.expect((try anchored.findFrom("abc", 1)) == null);
+}
+
+test "matcher findFrom reuses VM scratch and preserves absolute context" {
+    const allocator = std.testing.allocator;
+    const input = "id=418; state=ready; id=73; state=waiting; id=905; state=done";
+
+    var regex = try Regex.compileWithFlags(allocator, "id=(\\d+);\\s+state=([a-z]+)", .{ .ecmascript = true });
+    defer regex.deinit();
+    var matcher = regex.matcher();
+    defer matcher.deinit();
+
+    var first = (try matcher.findFrom(input, 0)).?;
+    defer first.deinit(allocator);
+    var second = (try matcher.findFrom(input, first.end)).?;
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 21), second.start);
+    try std.testing.expectEqualStrings("73", second.captures[0]);
+    try std.testing.expectEqualStrings("waiting", second.captures[1]);
+    try std.testing.expect(matcher.vm_cell != null);
+
+    var anchored = try Regex.compileWithFlags(allocator, "^id=(\\d+)", .{ .ecmascript = true });
+    defer anchored.deinit();
+    var anchored_matcher = anchored.matcher();
+    defer anchored_matcher.deinit();
+    try std.testing.expect((try anchored_matcher.findFrom(input, 1)) == null);
 }
 
 test "capture spans give per-group byte offsets" {
