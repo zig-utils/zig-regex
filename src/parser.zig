@@ -1422,15 +1422,34 @@ pub const Parser = struct {
     }
 
     fn createSingletonClassSet(self: *Parser, cp: u21, span: common.Span) RegexError!*ast.Node {
-        const items = try self.allocator.alloc(ast.Node.ClassItem, 1);
-        errdefer self.allocator.free(items);
-        items[0] = .{ .range = .{ .lo = cp, .hi = cp } };
+        var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        defer items.deinit(self.allocator);
+        try items.append(self.allocator, .{ .range = .{ .lo = cp, .hi = cp } });
+        return self.createClassSetNode(try self.finishClassSet(&items, .union_, false), span);
+    }
+
+    fn finishClassSet(
+        self: *Parser,
+        items: *std.ArrayList(ast.Node.ClassItem),
+        op: ast.Node.ClassOp,
+        negated: bool,
+    ) RegexError!*ast.Node.ClassSet {
+        const owned_items = try items.toOwnedSlice(self.allocator);
+        errdefer {
+            for (owned_items) |item| self.destroyClassItem(item);
+            self.allocator.free(owned_items);
+        }
         const set = try self.allocator.create(ast.Node.ClassSet);
         set.* = .{
-            .op = .union_,
-            .negated = false,
-            .items = items,
+            .op = op,
+            .negated = negated,
+            .items = owned_items,
         };
+        return set;
+    }
+
+    fn createClassSetNode(self: *Parser, set: *ast.Node.ClassSet, span: common.Span) RegexError!*ast.Node {
+        errdefer self.destroyClassSet(set);
         return ast.Node.createClassSet(self.allocator, set, span);
     }
 
@@ -1786,7 +1805,7 @@ pub const Parser = struct {
 
     fn buildBuiltinClassSet(self: *Parser, kind: u8) RegexError!*ast.Node.ClassSet {
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
-        errdefer items.deinit(self.allocator);
+        defer items.deinit(self.allocator);
 
         const lower = std.ascii.toLower(kind);
         const negated = std.ascii.isUpper(kind);
@@ -1801,13 +1820,11 @@ pub const Parser = struct {
             try self.appendEcmaWhitespaceItems(&items);
         }
 
-        const set = try self.allocator.create(ast.Node.ClassSet);
-        set.* = .{ .op = .union_, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
-        return set;
+        return self.finishClassSet(&items, .union_, negated);
     }
 
     fn createBuiltinClassSet(self: *Parser, kind: u8, span: common.Span) RegexError!*ast.Node {
-        return ast.Node.createClassSet(self.allocator, try self.buildBuiltinClassSet(kind), span);
+        return self.createClassSetNode(try self.buildBuiltinClassSet(kind), span);
     }
 
     /// A `\d\w\s` (and negations) shorthand as a nested set of code-point ranges.
@@ -1818,12 +1835,11 @@ pub const Parser = struct {
 
     fn byteClassItem(self: *Parser, cc: common.CharClass) RegexError!ast.Node.ClassItem {
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        defer items.deinit(self.allocator);
         for (cc.ranges) |r| {
             try items.append(self.allocator, .{ .range = .{ .lo = r.start, .hi = r.end } });
         }
-        const set = try self.allocator.create(ast.Node.ClassSet);
-        set.* = .{ .op = .union_, .negated = cc.negated, .items = try items.toOwnedSlice(self.allocator) };
-        return .{ .nested = set };
+        return .{ .nested = try self.finishClassSet(&items, .union_, cc.negated) };
     }
 
     fn destroyClassSet(self: *Parser, set: *ast.Node.ClassSet) void {
@@ -1840,11 +1856,20 @@ pub const Parser = struct {
         }
     }
 
+    fn appendOwnedClassItem(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem), item: ast.Node.ClassItem) RegexError!void {
+        errdefer self.destroyClassItem(item);
+        try items.append(self.allocator, item);
+    }
+
     /// The set of strings for a `/v` property-of-strings, or null for an ordinary
     /// (code-point) property. Compact rule-derived string properties live here;
     /// full RGI_Emoji/ZWJ needs a dedicated generated sequence table.
     fn stringPropertyItem(self: *Parser, name: []const u8) RegexError!?ast.Node.ClassItem {
         var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+        errdefer {
+            for (items.items) |item| self.destroyClassItem(item);
+            items.deinit(self.allocator);
+        }
         if (std.mem.eql(u8, name, "Emoji_Keycap_Sequence")) {
             try self.appendKeycapStrings(&items);
         } else if (std.mem.eql(u8, name, "RGI_Emoji_Tag_Sequence")) {
@@ -1864,13 +1889,12 @@ pub const Parser = struct {
         } else {
             return null;
         }
-        const set = try self.allocator.create(ast.Node.ClassSet);
-        set.* = .{ .op = .union_, .items = try items.toOwnedSlice(self.allocator) };
-        return .{ .nested = set };
+        return .{ .nested = try self.finishClassSet(&items, .union_, false) };
     }
 
     fn appendStringItem(self: *Parser, items: *std.ArrayList(ast.Node.ClassItem), cps: []const u21) RegexError!void {
         const s = try self.allocator.dupe(u21, cps);
+        errdefer self.allocator.free(s);
         try items.append(self.allocator, .{ .string = s });
     }
 
@@ -1963,14 +1987,16 @@ pub const Parser = struct {
         const set = switch (item) {
             .nested => |nested| nested,
             else => blk: {
-                const items = try self.allocator.alloc(ast.Node.ClassItem, 1);
-                items[0] = item;
-                const nested = try self.allocator.create(ast.Node.ClassSet);
-                nested.* = .{ .op = .union_, .items = items };
-                break :blk nested;
+                var items: std.ArrayList(ast.Node.ClassItem) = .empty;
+                errdefer {
+                    for (items.items) |owned_item| self.destroyClassItem(owned_item);
+                    items.deinit(self.allocator);
+                }
+                try self.appendOwnedClassItem(&items, item);
+                break :blk try self.finishClassSet(&items, .union_, false);
             },
         };
-        return ast.Node.createClassSet(self.allocator, set, span);
+        return self.createClassSetNode(set, span);
     }
 
     /// Parse one `\p{...}`/`\P{...}` property escape as a class item.
@@ -2010,13 +2036,18 @@ pub const Parser = struct {
         if (i.* >= input.len or input[i.*] != '{') return RegexError.InvalidEscapeSequence;
         i.* += 1; // consume {
         var alts: std.ArrayList(ast.Node.ClassItem) = .empty;
+        errdefer {
+            for (alts.items) |item| self.destroyClassItem(item);
+            alts.deinit(self.allocator);
+        }
         while (true) {
             var cps: std.ArrayList(u21) = .empty;
+            defer cps.deinit(self.allocator);
             while (i.* < input.len and input[i.*] != '|' and input[i.*] != '}') {
                 const cp = (try readClassCp(input, i, true)) orelse return RegexError.UnexpectedCharacter;
                 try cps.append(self.allocator, cp);
             }
-            try alts.append(self.allocator, .{ .string = try cps.toOwnedSlice(self.allocator) });
+            try self.appendOwnedClassItem(&alts, .{ .string = try cps.toOwnedSlice(self.allocator) });
             if (i.* >= input.len) return RegexError.InvalidCharacterClass;
             if (input[i.*] == '}') {
                 i.* += 1; // consume }
@@ -2024,9 +2055,7 @@ pub const Parser = struct {
             }
             i.* += 1; // consume |
         }
-        const set = try self.allocator.create(ast.Node.ClassSet);
-        set.* = .{ .op = .union_, .items = try alts.toOwnedSlice(self.allocator) };
-        return .{ .nested = set };
+        return .{ .nested = try self.finishClassSet(&alts, .union_, false) };
     }
 
     /// Parse one operand of a set expression (a range/char, escape, property, or
@@ -2111,7 +2140,7 @@ pub const Parser = struct {
         }
         var op: ast.Node.ClassOp = .union_;
         const first = try self.parseSetOperand(input, i);
-        try items.append(self.allocator, first);
+        try self.appendOwnedClassItem(&items, first);
 
         // Determine the operator from what follows the first operand.
         if (i.* + 1 < input.len and input[i.*] == '&' and input[i.* + 1] == '&') {
@@ -2122,13 +2151,13 @@ pub const Parser = struct {
 
         if (op == .union_) {
             while (i.* < input.len and input[i.*] != ']') {
-                try items.append(self.allocator, try self.parseSetOperand(input, i));
+                try self.appendOwnedClassItem(&items, try self.parseSetOperand(input, i));
             }
         } else {
             const sep: u8 = if (op == .intersection) '&' else '-';
             while (i.* + 1 < input.len and input[i.*] == sep and input[i.* + 1] == sep) {
                 i.* += 2; // consume operator
-                try items.append(self.allocator, try self.parseSetOperand(input, i));
+                try self.appendOwnedClassItem(&items, try self.parseSetOperand(input, i));
             }
         }
 
@@ -2138,9 +2167,7 @@ pub const Parser = struct {
             }
         }
 
-        const set = try self.allocator.create(ast.Node.ClassSet);
-        set.* = .{ .op = op, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
-        return set;
+        return self.finishClassSet(&items, op, negated);
     }
 
     fn parseClassSetV(self: *Parser) RegexError!*ast.Node {
@@ -2148,6 +2175,7 @@ pub const Parser = struct {
         const open = self.current_token.span.start; // position of '['
         var i: usize = open + 1;
         const set = try self.parseSetExpr(input, &i);
+        errdefer self.destroyClassSet(set);
         if (i >= input.len or input[i] != ']') return RegexError.InvalidCharacterClass;
         i += 1; // consume ]
         // Resync the lexer to just past the class and re-read the next token.
@@ -2234,20 +2262,21 @@ pub const Parser = struct {
                     },
                 }
             }
-            try items.append(self.allocator, item);
+            try self.appendOwnedClassItem(&items, item);
         }
 
         if (i >= input.len or input[i] != ']') return RegexError.InvalidCharacterClass;
         i += 1;
 
-        const set = try self.allocator.create(ast.Node.ClassSet);
-        set.* = .{ .op = .union_, .negated = negated, .items = try items.toOwnedSlice(self.allocator) };
+        const set = try self.finishClassSet(&items, .union_, negated);
+        const node = try self.createClassSetNode(set, common.Span.init(open, i));
+        errdefer node.destroy(self.allocator);
 
         self.lexer.pos = i;
         self.lexer.pending_len = 0;
         self.lexer.pending_pos = 0;
         self.current_token = try self.lexer.next();
-        return ast.Node.createClassSet(self.allocator, set, common.Span.init(open, i));
+        return node;
     }
 
     fn currentClassContainsPropertyEscape(self: *Parser) bool {

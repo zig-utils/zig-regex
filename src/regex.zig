@@ -3341,3 +3341,12 @@ test "named capture compilation rolls back every allocation failure" {
         }
     }.run, .{});
 }
+
+test "nested class-set compilation rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var compiled = try Regex.compileWithFlags(allocator, "[\\d\\-a]+", .{ .ecmascript = true });
+            defer compiled.deinit();
+        }
+    }.run, .{});
+}
