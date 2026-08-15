@@ -3332,3 +3332,12 @@ test "regex compilation is exhaustive-allocation-failure safe" {
         }
     }.run, .{});
 }
+
+test "named capture compilation rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var compiled = try Regex.compile(allocator, "^(?<word>[a-z]+)(?=\\d)-[0-9]+$");
+            defer compiled.deinit();
+        }
+    }.run, .{});
+}

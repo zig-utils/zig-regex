@@ -1092,39 +1092,22 @@ pub const Parser = struct {
             .escape_d => {
                 try self.advance();
                 if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('d', span);
-                // Duplicate ranges from static predefined class so AST can own them
-                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.digit.ranges);
-                return ast.Node.createCharClass(self.allocator, .{
-                    .ranges = ranges,
-                    .negated = common.CharClasses.digit.negated,
-                }, span);
+                return self.createOwnedCharClass(common.CharClasses.digit, span);
             },
             .escape_D => {
                 try self.advance();
                 if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('D', span);
-                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_digit.ranges);
-                return ast.Node.createCharClass(self.allocator, .{
-                    .ranges = ranges,
-                    .negated = common.CharClasses.non_digit.negated,
-                }, span);
+                return self.createOwnedCharClass(common.CharClasses.non_digit, span);
             },
             .escape_w => {
                 try self.advance();
                 if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('w', span);
-                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.word.ranges);
-                return ast.Node.createCharClass(self.allocator, .{
-                    .ranges = ranges,
-                    .negated = common.CharClasses.word.negated,
-                }, span);
+                return self.createOwnedCharClass(common.CharClasses.word, span);
             },
             .escape_W => {
                 try self.advance();
                 if (self.unicode or self.unicode_sets) return self.createBuiltinClassSet('W', span);
-                const ranges = try self.allocator.dupe(common.CharRange, common.CharClasses.non_word.ranges);
-                return ast.Node.createCharClass(self.allocator, .{
-                    .ranges = ranges,
-                    .negated = common.CharClasses.non_word.negated,
-                }, span);
+                return self.createOwnedCharClass(common.CharClasses.non_word, span);
             },
             .escape_s => {
                 try self.advance();
@@ -1188,6 +1171,11 @@ pub const Parser = struct {
                 // Check for group extensions (?...)
                 var capture_index: ?usize = null;
                 var group_name: ?[]const u8 = null;
+                // `parseGroupName` returns an owned normalized spelling before
+                // the child/group node exists. Any later parse or allocation
+                // failure must release it; successful node construction takes
+                // ownership and cancels this error-only cleanup.
+                errdefer if (group_name) |name| self.allocator.free(name);
                 // Inline-modifier groups early-return below; regular/named/`(?:`
                 // groups carry no flag delta.
                 const group_mod: ?ast.Node.FlagDelta = null;
@@ -1419,6 +1407,18 @@ pub const Parser = struct {
                 return RegexError.UnexpectedCharacter;
             },
         }
+    }
+
+    fn createOwnedCharClass(self: *Parser, class: common.CharClass, span: common.Span) RegexError!*ast.Node {
+        // Static built-in ranges become AST-owned. If node allocation fails,
+        // roll the duplicate back rather than orphaning it in the caller's
+        // freeable allocator.
+        const ranges = try self.allocator.dupe(common.CharRange, class.ranges);
+        errdefer self.allocator.free(ranges);
+        return ast.Node.createCharClass(self.allocator, .{
+            .ranges = ranges,
+            .negated = class.negated,
+        }, span);
     }
 
     fn createSingletonClassSet(self: *Parser, cp: u21, span: common.Span) RegexError!*ast.Node {
