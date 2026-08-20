@@ -988,7 +988,8 @@ pub const BacktrackEngine = struct {
         }
 
         // Greedy: return the longest match
-        return match_positions.getLast();
+        std.debug.assert(match_positions.items.len != 0);
+        return match_positions.items[match_positions.items.len - 1];
     }
 
     fn matchStarLazy(self: *BacktrackEngine, _: *ast.Node, pos: usize) ?usize {
