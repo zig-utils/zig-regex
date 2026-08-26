@@ -1382,8 +1382,11 @@ pub const Regex = struct {
                 return null;
             }
         }
-        // One-pass capture plan: deterministic capture matching, no NFA.
-        if (self.onepass) |plan| {
+        // One-pass capture plan: deterministic capture matching, no NFA. Its
+        // segment tables are per-byte, so it declines any input whose decision
+        // would consume a non-ASCII byte (`onepass.Plan.NonAscii`); that falls
+        // through to the general engine below, which matches whole code points.
+        if (self.onepass) |plan| one_pass: {
             const fb = self.opt_info.first_bytes;
             var scan: usize = 0;
             while (scan <= input.len) {
@@ -1391,9 +1394,11 @@ pub const Regex = struct {
                     while (scan < input.len and !t[input[scan]]) scan += 1;
                     if (scan >= input.len) break;
                 }
-                if (try plan.matchAt(self.allocator, input, scan)) |result| {
-                    return try self.buildMatch(input, result);
-                }
+                const attempt = plan.matchAt(self.allocator, input, scan) catch |err| switch (err) {
+                    error.OnePassNonAscii => break :one_pass,
+                    else => return err,
+                };
+                if (attempt) |result| return try self.buildMatch(input, result);
                 scan = plan.nextScan(input, scan);
             }
             return null;
@@ -1549,7 +1554,8 @@ pub const Regex = struct {
                 defer if (tmp_vm) |*v| v.deinit();
                 const virtual_machine = self.obtainVm(reuse_vm, &tmp_vm);
 
-                if (self.onepass) |plan| {
+                // Declines non-ASCII input; see the one-pass note in `find`.
+                if (self.onepass) |plan| one_pass: {
                     const fb = self.opt_info.first_bytes;
                     var scan: usize = from;
                     while (scan <= input.len) {
@@ -1557,9 +1563,11 @@ pub const Regex = struct {
                             while (scan < input.len and !t[input[scan]]) scan += 1;
                             if (scan >= input.len) break;
                         }
-                        if (try plan.matchAt(self.allocator, input, scan)) |result| {
-                            return try self.buildMatch(input, result);
-                        }
+                        const attempt = plan.matchAt(self.allocator, input, scan) catch |err| switch (err) {
+                            error.OnePassNonAscii => break :one_pass,
+                            else => return err,
+                        };
+                        if (attempt) |result| return try self.buildMatch(input, result);
                         scan = plan.nextScan(input, scan);
                     }
                     return null;
@@ -1703,8 +1711,11 @@ pub const Regex = struct {
             }
         }
 
-        // One-pass capture plan: deterministic capture matching, no NFA.
-        if (self.onepass) |plan| {
+        // One-pass capture plan: deterministic capture matching, no NFA. Its
+        // segment tables are per-byte, so it declines any input whose decision
+        // would consume a non-ASCII byte (`onepass.Plan.NonAscii`); that falls
+        // through to the general engine below, which matches whole code points.
+        if (self.onepass) |plan| one_pass: {
             const fb = self.opt_info.first_bytes;
             while (pos <= input.len) {
                 var scan = pos;
@@ -1714,7 +1725,18 @@ pub const Regex = struct {
                         while (scan < input.len and !t[input[scan]]) scan += 1;
                         if (scan >= input.len) break;
                     }
-                    if (try plan.matchAt(allocator, input, scan)) |r| {
+                    const attempt = plan.matchAt(allocator, input, scan) catch |err| switch (err) {
+                        error.OnePassNonAscii => {
+                            // Drop the prefix this plan produced and re-run the
+                            // whole input on the general engine.
+                            for (matches.items) |*m| m.deinit(allocator);
+                            matches.clearRetainingCapacity();
+                            pos = 0;
+                            break :one_pass;
+                        },
+                        else => return err,
+                    };
+                    if (attempt) |r| {
                         found = r;
                         break;
                     }

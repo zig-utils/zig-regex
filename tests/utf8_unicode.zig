@@ -224,3 +224,74 @@ test "UTF-8: known limitation - \\w is ASCII-only" {
         try std.testing.expectEqualStrings("caf", match.slice);
     }
 }
+
+// The one-pass capture plan is a per-BYTE matcher: it is only consulted for
+// simple patterns whose groups can be resolved without backtracking, and it
+// counts one table hit as one character. That equivalence holds for ASCII only,
+// so it declines any input whose decision would consume a non-ASCII byte and the
+// caller re-runs the general engine. Before that guard, `(.)` inside a group
+// consumed a single byte: `(caf)(.)` on "café" ended the match mid-sequence
+// (yielding the malformed prefix "caf\xc3"), and `(.)(x)` on "éx" matched at
+// byte 1 — inside 'é' — instead of at the start.
+test "UTF-8: one-pass capture plan matches whole code points, not bytes" {
+    const allocator = std.testing.allocator;
+
+    {
+        var regex = try Regex.compile(allocator, "(caf)(.)");
+        defer regex.deinit();
+        var match = (try regex.find("café")).?;
+        defer match.deinit(allocator);
+        try std.testing.expectEqualStrings("café", match.slice);
+        try std.testing.expectEqual(@as(usize, 0), match.start);
+        try std.testing.expectEqual(@as(usize, 5), match.end);
+        try std.testing.expectEqualStrings("caf", match.captures[0]);
+        try std.testing.expectEqualStrings("é", match.captures[1]);
+    }
+
+    {
+        // Two dots must consume two characters (4 bytes), not two bytes.
+        var regex = try Regex.compile(allocator, "(.)(.)");
+        defer regex.deinit();
+        var match = (try regex.find("éé")).?;
+        defer match.deinit(allocator);
+        try std.testing.expectEqualStrings("éé", match.slice);
+        try std.testing.expectEqualStrings("é", match.captures[0]);
+        try std.testing.expectEqualStrings("é", match.captures[1]);
+    }
+
+    {
+        // A failed attempt must not resume inside a multi-byte sequence.
+        var regex = try Regex.compile(allocator, "(.)(x)");
+        defer regex.deinit();
+        var match = (try regex.find("éx")).?;
+        defer match.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 0), match.start);
+        try std.testing.expectEqualStrings("é", match.captures[0]);
+        try std.testing.expectEqualStrings("x", match.captures[1]);
+    }
+
+    {
+        // Pure ASCII keeps taking the one-pass path and stays correct.
+        var regex = try Regex.compile(allocator, "(a)(b)");
+        defer regex.deinit();
+        var match = (try regex.find("zab")).?;
+        defer match.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), match.start);
+        try std.testing.expectEqualStrings("a", match.captures[0]);
+        try std.testing.expectEqualStrings("b", match.captures[1]);
+    }
+
+    {
+        // findAll must discard the plan's partial results and re-run cleanly.
+        var regex = try Regex.compile(allocator, "(.)(b)");
+        defer regex.deinit();
+        const all = try regex.findAll(allocator, "ab éb");
+        defer {
+            for (all) |*m| m.deinit(allocator);
+            allocator.free(all);
+        }
+        try std.testing.expectEqual(@as(usize, 2), all.len);
+        try std.testing.expectEqualStrings("ab", all[0].slice);
+        try std.testing.expectEqualStrings("éb", all[1].slice);
+    }
+}

@@ -52,8 +52,18 @@ pub const Plan = struct {
         self.allocator.destroy(self);
     }
 
+    /// Signals that this plan cannot decide `input`: its segment tables are
+    /// per-BYTE, so a segment that consumes a byte outside ASCII would count the
+    /// bytes of one multi-byte character as several characters (and could stop
+    /// mid-sequence). The caller must fall back to the general engine, which
+    /// matches whole code points. Pure-ASCII input — the overwhelmingly common
+    /// case — never raises it, so the fast path keeps its cost.
+    pub const NonAscii = error.OnePassNonAscii;
+
     /// Match anchored at `start`, returning the (longest, and only) match or null.
     /// Captures are allocated like `vm.matchAt` (caller frees `result.captures`).
+    /// Returns `error.OnePassNonAscii` if deciding the match would require
+    /// consuming a non-ASCII byte; see `NonAscii`.
     pub fn matchAt(self: *const Plan, allocator: std.mem.Allocator, input: []const u8, start: usize) !?vm.MatchResult {
         var caps = try allocator.alloc(vm.Capture, self.num_groups);
         errdefer allocator.free(caps);
@@ -68,7 +78,13 @@ pub const Plan = struct {
             // Greedy consume.
             const mx = seg.max orelse std.math.maxInt(usize);
             var cnt: usize = 0;
-            while (pos < input.len and seg.table[input[pos]] and cnt < mx) : (pos += 1) cnt += 1;
+            while (pos < input.len and seg.table[input[pos]] and cnt < mx) : (pos += 1) {
+                // `caps` is released by this function's `errdefer`; freeing it
+                // here too would double-free (unlike the `return null` paths,
+                // which are not errors and so must free explicitly).
+                if (input[pos] >= 0x80) return NonAscii;
+                cnt += 1;
+            }
             if (cnt < seg.min) {
                 allocator.free(caps);
                 return null;
@@ -86,12 +102,15 @@ pub const Plan = struct {
     }
 
     /// Match end at `start` without building captures — for count/isMatch.
-    pub fn matchEndAt(self: *const Plan, input: []const u8, start: usize) ?usize {
+    pub fn matchEndAt(self: *const Plan, input: []const u8, start: usize) !?usize {
         var pos = start;
         for (self.segs) |seg| {
             const mx = seg.max orelse std.math.maxInt(usize);
             var cnt: usize = 0;
-            while (pos < input.len and seg.table[input[pos]] and cnt < mx) : (pos += 1) cnt += 1;
+            while (pos < input.len and seg.table[input[pos]] and cnt < mx) : (pos += 1) {
+                if (input[pos] >= 0x80) return NonAscii;
+                cnt += 1;
+            }
             if (cnt < seg.min) return null;
         }
         return pos;
