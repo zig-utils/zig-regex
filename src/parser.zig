@@ -7,7 +7,7 @@ const rgi_data = @import("rgi_emoji_data.zig");
 const RegexError = @import("errors.zig").RegexError;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
-const MAX_SAFE_QUANTIFIER: usize = 9_007_199_254_740_991;
+const MAX_SAFE_QUANTIFIER: u64 = 9_007_199_254_740_991;
 
 /// Token types for lexical analysis
 pub const TokenType = enum {
