@@ -135,11 +135,11 @@ pub const Optimizer = struct {
         }
 
         // Calculate min/max lengths
-        info.min_length = self.calculateMinLength(root);
-        info.max_length = self.calculateMaxLength(root);
+        info.min_length = try self.calculateMinLength(root);
+        info.max_length = try self.calculateMaxLength(root);
 
         // Exact-literal fast path: the entire pattern is a fixed string.
-        if (isExactLiteral(root)) {
+        if (try self.isExactLiteral(root)) {
             var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
             errdefer buf.deinit(self.allocator);
             _ = try self.collectLiteralPrefix(root, &buf);
@@ -151,7 +151,7 @@ pub const Optimizer = struct {
         }
 
         // Feature scan for lazy-DFA eligibility.
-        scanFeatures(root, &info);
+        try scanFeatures(self.allocator, root, &info);
 
         // Longest mandatory literal substring (required-literal fast-fail).
         {
@@ -235,25 +235,31 @@ pub const Optimizer = struct {
     /// Accumulate the longest run of literals that must appear in every match.
     /// Only literals reached through concatenation and plain (min>=1) groups are
     /// mandatory; `?`/`*`/`{0,n}`/alternation and any non-literal break the run.
+    /// Iterative for the reason `scanFeatures` documents (#23).
     fn collectMandatory(allocator: std.mem.Allocator, node: *ast.Node, cur: *std.ArrayList(u8), best: *std.ArrayList(u8)) !void {
-        switch (node.node_type) {
-            .literal => try cur.append(allocator, node.data.literal),
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(allocator);
+        try pending.append(allocator, node);
+        while (pending.pop()) |n| switch (n.node_type) {
+            .literal => try cur.append(allocator, n.data.literal),
             .concat => {
-                try collectMandatory(allocator, node.data.concat.left, cur, best);
-                try collectMandatory(allocator, node.data.concat.right, cur, best);
+                // Elements are walked left to right, so the run is collected in
+                // source order.
+                try pending.append(allocator, n.data.concat.right);
+                try pending.append(allocator, n.data.concat.left);
             },
             .group => {
                 // A plain group (always matched once) preserves the run.
-                if (node.data.group.mod != null) {
+                if (n.data.group.mod != null) {
                     try flushMandatory(allocator, cur, best);
                 } else {
-                    try collectMandatory(allocator, node.data.group.child, cur, best);
+                    try pending.append(allocator, n.data.group.child);
                 }
             },
             // Anything else (quantifiers, alternation, classes, anchors, ...) is
             // not a guaranteed literal here: break the current run.
             else => try flushMandatory(allocator, cur, best),
-        }
+        };
     }
 
     /// The longest literal substring required by *every* alternation branch (so
@@ -301,12 +307,17 @@ pub const Optimizer = struct {
         return null;
     }
 
+    /// Iterative for the reason `scanFeatures` documents (#23).
     fn flattenAlternation(allocator: std.mem.Allocator, node: *ast.Node, out: *std.ArrayList(*ast.Node)) !void {
-        if (node.node_type == .alternation) {
-            try flattenAlternation(allocator, node.data.alternation.left, out);
-            try flattenAlternation(allocator, node.data.alternation.right, out);
-        } else {
-            try out.append(allocator, node);
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(allocator);
+        try pending.append(allocator, node);
+        while (pending.pop()) |n| {
+            if (n.node_type == .alternation) {
+                // Pushed right-first so branches come out in source order.
+                try pending.append(allocator, n.data.alternation.right);
+                try pending.append(allocator, n.data.alternation.left);
+            } else try out.append(allocator, n);
         }
     }
 
@@ -332,38 +343,52 @@ pub const Optimizer = struct {
 
     /// Walk the AST recording features that disqualify the lazy DFA: position
     /// assertions (not representable) and lazy quantifiers (not longest-match).
-    fn scanFeatures(node: *ast.Node, info: *OptimizationInfo) void {
-        switch (node.node_type) {
-            .anchor => info.has_assertions = true,
-            .literal, .any, .char_class, .empty, .unicode_property, .class_set, .backref => {},
-            .star => {
-                if (!node.data.star.greedy) info.has_lazy = true;
-                scanFeatures(node.data.star.child, info);
-            },
-            .plus => {
-                if (!node.data.plus.greedy) info.has_lazy = true;
-                scanFeatures(node.data.plus.child, info);
-            },
-            .optional => {
-                if (!node.data.optional.greedy) info.has_lazy = true;
-                scanFeatures(node.data.optional.child, info);
-            },
-            .repeat => {
-                if (!node.data.repeat.greedy) info.has_lazy = true;
-                scanFeatures(node.data.repeat.child, info);
-            },
-            .concat => {
-                scanFeatures(node.data.concat.left, info);
-                scanFeatures(node.data.concat.right, info);
-            },
-            .alternation => {
-                scanFeatures(node.data.alternation.left, info);
-                scanFeatures(node.data.alternation.right, info);
-            },
-            .group => scanFeatures(node.data.group.child, info),
-            // Assertions/captures inside lookaround route to backtracking; flag
-            // conservatively so the DFA is not used.
-            .lookahead, .lookbehind => info.has_assertions = true,
+    /// Flag the features that decide which engine can run a pattern.
+    ///
+    /// Walked with an explicit stack: a flat pattern's spine is as deep as the
+    /// pattern is long, and one native frame per element overflowed the stack on
+    /// patterns other engines compile (#23).
+    fn scanFeatures(allocator: std.mem.Allocator, node: *ast.Node, info: *OptimizationInfo) !void {
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(allocator);
+        var current: ?*ast.Node = node;
+        while (current) |n| : (current = pending.pop()) {
+            var child: ?*ast.Node = null;
+            switch (n.node_type) {
+                .anchor => info.has_assertions = true,
+                .literal, .any, .char_class, .empty, .unicode_property, .class_set, .backref => {},
+                .star => {
+                    if (!n.data.star.greedy) info.has_lazy = true;
+                    child = n.data.star.child;
+                },
+                .plus => {
+                    if (!n.data.plus.greedy) info.has_lazy = true;
+                    child = n.data.plus.child;
+                },
+                .optional => {
+                    if (!n.data.optional.greedy) info.has_lazy = true;
+                    child = n.data.optional.child;
+                },
+                .repeat => {
+                    if (!n.data.repeat.greedy) info.has_lazy = true;
+                    child = n.data.repeat.child;
+                },
+                .concat => {
+                    try pending.append(allocator, n.data.concat.right);
+                    child = n.data.concat.left;
+                },
+                .alternation => {
+                    try pending.append(allocator, n.data.alternation.right);
+                    child = n.data.alternation.left;
+                },
+                .group => child = n.data.group.child,
+                // Assertions/captures inside lookaround route to backtracking; flag
+                // conservatively so the DFA is not used.
+                .lookahead, .lookbehind => info.has_assertions = true,
+            }
+            if (child) |c| {
+                try pending.append(allocator, c);
+            }
         }
     }
 
@@ -371,25 +396,29 @@ pub const Optimizer = struct {
     /// Returns false (abandoning the fast path) if any branch is not an exact
     /// literal. Caller owns the appended strings.
     fn collectLiteralAlternatives(self: *Optimizer, node: *ast.Node, list: *std.ArrayList([]const u8)) !bool {
-        switch (node.node_type) {
-            .alternation => {
-                const a = node.data.alternation;
-                if (!try self.collectLiteralAlternatives(a.left, list)) return false;
-                return try self.collectLiteralAlternatives(a.right, list);
-            },
-            else => {
-                if (!isExactLiteral(node)) return false;
-                var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
-                errdefer buf.deinit(self.allocator);
-                _ = try self.collectLiteralPrefix(node, &buf);
-                if (buf.items.len == 0) {
-                    buf.deinit(self.allocator);
-                    return false;
-                }
-                try list.append(self.allocator, try buf.toOwnedSlice(self.allocator));
-                return true;
-            },
+        // Branches are visited left to right with an explicit stack, for the
+        // reason `scanFeatures` documents (#23).
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, node);
+        while (pending.pop()) |n| {
+            if (n.node_type == .alternation) {
+                // Pushed right-first so the left branch pops first.
+                try pending.append(self.allocator, n.data.alternation.right);
+                try pending.append(self.allocator, n.data.alternation.left);
+                continue;
+            }
+            if (!try self.isExactLiteral(n)) return false;
+            var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+            errdefer buf.deinit(self.allocator);
+            _ = try self.collectLiteralPrefix(n, &buf);
+            if (buf.items.len == 0) {
+                buf.deinit(self.allocator);
+                return false;
+            }
+            try list.append(self.allocator, try buf.toOwnedSlice(self.allocator));
         }
+        return true;
     }
 
     /// Byte-membership table for a literal or char-class node, or null.
@@ -419,10 +448,22 @@ pub const Optimizer = struct {
     /// If the pattern begins with an unbounded greedy repeat of a byte class,
     /// return that class's table. Descends the leftmost path through concat and
     /// plain groups.
+    /// Walks only leftmost elements, which on a flat pattern is its whole spine
+    /// (#23), so it steps down rather than recursing.
     fn detectFirstUnboundedClass(node: *ast.Node) ?[256]bool {
+        var current = node;
+        while (true) switch (current.node_type) {
+            .concat => current = current.data.concat.left,
+            .group => {
+                if (current.data.group.mod != null) return null;
+                current = current.data.group.child;
+            },
+            else => return detectFirstUnboundedClassAtom(current),
+        };
+    }
+
+    fn detectFirstUnboundedClassAtom(node: *ast.Node) ?[256]bool {
         return switch (node.node_type) {
-            .concat => detectFirstUnboundedClass(node.data.concat.left),
-            .group => if (node.data.group.mod != null) null else detectFirstUnboundedClass(node.data.group.child),
             .plus => if (node.data.plus.greedy) classTableOf(node.data.plus.child) else null,
             .star => if (node.data.star.greedy) classTableOf(node.data.star.child) else null,
             .repeat => blk: {
@@ -548,15 +589,25 @@ pub const Optimizer = struct {
     /// Whether the pattern is exactly a fixed string: only literals,
     /// concatenation, and non-capturing groups. Capturing groups are excluded
     /// because the fast path does not populate capture slices.
-    fn isExactLiteral(node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .literal => true,
-            .concat => isExactLiteral(node.data.concat.left) and isExactLiteral(node.data.concat.right),
-            .group => node.data.group.capture_index == null and
-                node.data.group.mod == null and
-                isExactLiteral(node.data.group.child),
-            else => false,
+    /// Whether the whole sub-pattern is a fixed string. Walked with an explicit
+    /// stack for the reason `scanFeatures` documents (#23).
+    fn isExactLiteral(self: *Optimizer, node: *ast.Node) !bool {
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, node);
+        while (pending.pop()) |n| switch (n.node_type) {
+            .literal => {},
+            .concat => {
+                try pending.append(self.allocator, n.data.concat.right);
+                try pending.append(self.allocator, n.data.concat.left);
+            },
+            .group => {
+                if (n.data.group.capture_index != null or n.data.group.mod != null) return false;
+                try pending.append(self.allocator, n.data.group.child);
+            },
+            else => return false,
         };
+        return true;
     }
 
     /// Status of a first-byte collection over a sub-pattern.
@@ -588,12 +639,18 @@ pub const Optimizer = struct {
                 return .ok_consumed;
             },
             .concat => {
-                const c = node.data.concat;
-                switch (collectFirstBytes(c.left, set)) {
-                    .fail => return .fail,
-                    .ok_consumed => return .ok_consumed,
-                    .ok_nullable => return collectFirstBytes(c.right, set),
+                // A sequence hands its first bytes to the first element that
+                // must consume one; stepping along it keeps a flat pattern to
+                // one frame (#23).
+                var current = node;
+                while (current.node_type == .concat) {
+                    switch (collectFirstBytes(current.data.concat.left, set)) {
+                        .fail => return .fail,
+                        .ok_consumed => return .ok_consumed,
+                        .ok_nullable => current = current.data.concat.right,
+                    }
                 }
+                return collectFirstBytes(current, set);
             },
             .alternation => {
                 const a = node.data.alternation;
@@ -719,127 +776,153 @@ pub const Optimizer = struct {
     }
 
     /// Recursively collect literal characters from the start of the pattern
+    /// Append the pattern's leading run of literal bytes, stopping at the first
+    /// element that is not one. Walked with an explicit stack, for the reason
+    /// `scanFeatures` documents (#23): the prefix of a flat pattern is the whole
+    /// pattern, so this saw one native frame per character.
     fn collectLiteralPrefix(self: *Optimizer, node: *ast.Node, prefix: *std.ArrayList(u8)) !bool {
-        return switch (node.node_type) {
-            .literal => {
-                try prefix.append(self.allocator, node.data.literal);
-                return true;
-            },
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, node);
+        while (pending.pop()) |n| switch (n.node_type) {
+            .literal => try prefix.append(self.allocator, n.data.literal),
             .concat => {
-                // For concatenation, try left side first
-                const concat = node.data.concat;
-                if (!try self.collectLiteralPrefix(concat.left, prefix)) {
-                    return false;
-                }
-                // If left was successful and complete, try right
-                return try self.collectLiteralPrefix(concat.right, prefix);
+                // Elements are consumed left to right; the first one that is not
+                // a literal ends the prefix, and the rest are never visited.
+                try pending.append(self.allocator, n.data.concat.right);
+                try pending.append(self.allocator, n.data.concat.left);
             },
-            .group => {
-                // For groups, recurse into child
-                return try self.collectLiteralPrefix(node.data.group.child, prefix);
-            },
-            .anchor => {
-                // Anchors don't affect prefix but don't stop collection
-                return true;
-            },
-            // Any of these stop prefix collection
-            .alternation, .star, .plus, .optional, .repeat, .any, .char_class, .backref, .unicode_property, .class_set => false,
-            // Lookahead/lookbehind don't consume input
-            .lookahead, .lookbehind => true,
-            .empty => true,
+            .group => try pending.append(self.allocator, n.data.group.child),
+            // Anchors and lookaround consume nothing, so the prefix continues.
+            .anchor, .lookahead, .lookbehind, .empty => {},
+            // Any of these stop prefix collection.
+            .alternation, .star, .plus, .optional, .repeat, .any, .char_class, .backref, .unicode_property, .class_set => return false,
         };
+        return true;
     }
 
     /// Calculate minimum possible match length
-    fn calculateMinLength(self: *Optimizer, node: *ast.Node) usize {
-        return switch (node.node_type) {
-            .literal => 1,
-            .any => 1,
-            .char_class => 1,
-            .concat => {
-                const concat = node.data.concat;
-                return self.calculateMinLength(concat.left) + self.calculateMinLength(concat.right);
-            },
-            .alternation => {
-                const alt = node.data.alternation;
-                const left_min = self.calculateMinLength(alt.left);
-                const right_min = self.calculateMinLength(alt.right);
-                return @min(left_min, right_min);
-            },
-            .star => 0, // * means 0 or more
-            .optional => 0, // ? means 0 or 1
-            .plus => {
-                // + means 1 or more
-                return self.calculateMinLength(node.data.plus.child);
-            },
-            .repeat => {
-                const repeat = node.data.repeat;
-                const child_min = self.calculateMinLength(repeat.child);
-                return child_min * repeat.bounds.min;
-            },
-            .group => {
-                return self.calculateMinLength(node.data.group.child);
-            },
-            .lookahead, .lookbehind => {
-                // Lookaround assertions don't consume input
-                return 0;
-            },
-            .backref => {
-                // Backreferences have variable length (depends on what was captured)
-                // Conservative estimate: 0 minimum
-                return 0;
-            },
-            .unicode_property, .class_set => 1, // one code point (≥ 1 byte)
-            .anchor, .empty => 0,
-        };
+    /// Shortest input the pattern can match, used to skip impossible positions.
+    ///
+    /// Evaluated with an explicit stack rather than recursively: a flat pattern
+    /// is a spine as long as the pattern, and one native frame per element
+    /// overflowed the stack (#23). Allocation failure propagates, as everywhere
+    /// else in analysis.
+    fn calculateMinLength(self: *Optimizer, node: *ast.Node) !usize {
+        var work: std.ArrayList(Step) = .empty;
+        defer work.deinit(self.allocator);
+        var values: std.ArrayList(usize) = .empty;
+        defer values.deinit(self.allocator);
+        work.append(self.allocator, .{ .node = node, .phase = .visit }) catch |err| return err;
+        while (work.pop()) |step| {
+            const n = step.node;
+            if (step.phase == .visit) {
+                switch (n.node_type) {
+                    .literal, .any, .char_class, .unicode_property, .class_set => values.append(self.allocator, 1) catch |err| return err,
+                    .star, .optional, .lookahead, .lookbehind, .backref, .anchor, .empty => values.append(self.allocator, 0) catch |err| return err,
+                    // Pass-through and combining nodes revisit themselves once
+                    // their children's values are on the value stack.
+                    .plus => self.pushChildFirst(&work, n, n.data.plus.child) catch |err| return err,
+                    .group => self.pushChildFirst(&work, n, n.data.group.child) catch |err| return err,
+                    .repeat => self.pushChildFirst(&work, n, n.data.repeat.child) catch |err| return err,
+                    .concat => self.pushPairFirst(&work, n, n.data.concat.left, n.data.concat.right) catch |err| return err,
+                    .alternation => self.pushPairFirst(&work, n, n.data.alternation.left, n.data.alternation.right) catch |err| return err,
+                }
+                continue;
+            }
+            switch (n.node_type) {
+                .concat => {
+                    const right = values.pop() orelse unreachable;
+                    const left = values.pop() orelse unreachable;
+                    values.append(self.allocator, left +| right) catch |err| return err;
+                },
+                .alternation => {
+                    const right = values.pop() orelse unreachable;
+                    const left = values.pop() orelse unreachable;
+                    values.append(self.allocator, @min(left, right)) catch |err| return err;
+                },
+                .repeat => {
+                    const child = values.pop() orelse unreachable;
+                    values.append(self.allocator, child *| n.data.repeat.bounds.min) catch |err| return err;
+                },
+                // `plus` is one or more of its child, `group` is its child.
+                else => {},
+            }
+        }
+        return if (values.items.len == 1) values.items[0] else 0;
     }
 
-    /// Calculate maximum possible match length (if bounded)
-    fn calculateMaxLength(self: *Optimizer, node: *ast.Node) ?usize {
-        return switch (node.node_type) {
-            .literal => 1,
-            .any => 1,
-            .char_class => 1,
-            .concat => {
-                const concat = node.data.concat;
-                const left_max = self.calculateMaxLength(concat.left) orelse return null;
-                const right_max = self.calculateMaxLength(concat.right) orelse return null;
-                return left_max + right_max;
-            },
-            .alternation => {
-                const alt = node.data.alternation;
-                const left_max = self.calculateMaxLength(alt.left) orelse return null;
-                const right_max = self.calculateMaxLength(alt.right) orelse return null;
-                return @max(left_max, right_max);
-            },
-            .star => null, // * means unbounded
-            .optional => {
-                // ? means 0 or 1
-                return self.calculateMaxLength(node.data.optional.child) orelse return null;
-            },
-            .plus => null, // + means unbounded
-            .repeat => {
-                const repeat = node.data.repeat;
-                if (repeat.bounds.max) |max| {
-                    const child_max = self.calculateMaxLength(repeat.child) orelse return null;
-                    return child_max * max;
+    /// Longest input the pattern can match, or null when unbounded. Iterative
+    /// for the reason `calculateMinLength` documents.
+    fn calculateMaxLength(self: *Optimizer, node: *ast.Node) !?usize {
+        var work: std.ArrayList(Step) = .empty;
+        defer work.deinit(self.allocator);
+        var values: std.ArrayList(?usize) = .empty;
+        defer values.deinit(self.allocator);
+        work.append(self.allocator, .{ .node = node, .phase = .visit }) catch |err| return err;
+        while (work.pop()) |step| {
+            const n = step.node;
+            if (step.phase == .visit) {
+                switch (n.node_type) {
+                    .literal, .any, .char_class => values.append(self.allocator, 1) catch |err| return err,
+                    .unicode_property, .class_set => values.append(self.allocator, 4) catch |err| return err, // up to a 4-byte UTF-8 code point
+                    .lookahead, .lookbehind, .anchor, .empty => values.append(self.allocator, 0) catch |err| return err,
+                    .star, .plus, .backref => values.append(self.allocator, null) catch |err| return err, // unbounded
+                    .optional => self.pushChildFirst(&work, n, n.data.optional.child) catch |err| return err,
+                    .group => self.pushChildFirst(&work, n, n.data.group.child) catch |err| return err,
+                    .repeat => {
+                        if (n.data.repeat.bounds.max == null) {
+                            values.append(self.allocator, null) catch |err| return err;
+                        } else {
+                            self.pushChildFirst(&work, n, n.data.repeat.child) catch |err| return err;
+                        }
+                    },
+                    .concat => self.pushPairFirst(&work, n, n.data.concat.left, n.data.concat.right) catch |err| return err,
+                    .alternation => self.pushPairFirst(&work, n, n.data.alternation.left, n.data.alternation.right) catch |err| return err,
                 }
-                return null;
-            },
-            .group => {
-                return self.calculateMaxLength(node.data.group.child);
-            },
-            .lookahead, .lookbehind => {
-                // Lookaround assertions don't consume input
-                return 0;
-            },
-            .backref => {
-                // Backreferences have unbounded max length
-                return null;
-            },
-            .unicode_property, .class_set => 4, // up to a 4-byte UTF-8 code point
-            .anchor, .empty => 0,
-        };
+                continue;
+            }
+            switch (n.node_type) {
+                .concat => {
+                    const right = values.pop() orelse unreachable;
+                    const left = values.pop() orelse unreachable;
+                    const sum: ?usize = if (left) |l| (if (right) |r| l +| r else null) else null;
+                    values.append(self.allocator, sum) catch |err| return err;
+                },
+                .alternation => {
+                    const right = values.pop() orelse unreachable;
+                    const left = values.pop() orelse unreachable;
+                    const widest: ?usize = if (left) |l| (if (right) |r| @max(l, r) else null) else null;
+                    values.append(self.allocator, widest) catch |err| return err;
+                },
+                .repeat => {
+                    const child = values.pop() orelse unreachable;
+                    const bounded: ?usize = if (child) |c| c *| n.data.repeat.bounds.max.? else null;
+                    values.append(self.allocator, bounded) catch |err| return err;
+                },
+                // `optional` is zero or one of its child, `group` is its child.
+                else => {},
+            }
+        }
+        return if (values.items.len == 1) values.items[0] else null;
+    }
+
+    /// One entry of the length walkers' work stack: a node to evaluate, or a
+    /// node whose children's values are ready to combine.
+    const Step = struct {
+        node: *ast.Node,
+        phase: enum { visit, combine },
+    };
+
+    fn pushChildFirst(self: *Optimizer, work: *std.ArrayList(Step), node: *ast.Node, child: *ast.Node) !void {
+        try work.append(self.allocator, .{ .node = node, .phase = .combine });
+        try work.append(self.allocator, .{ .node = child, .phase = .visit });
+    }
+
+    fn pushPairFirst(self: *Optimizer, work: *std.ArrayList(Step), node: *ast.Node, left: *ast.Node, right: *ast.Node) !void {
+        try work.append(self.allocator, .{ .node = node, .phase = .combine });
+        try work.append(self.allocator, .{ .node = right, .phase = .visit });
+        try work.append(self.allocator, .{ .node = left, .phase = .visit });
     }
 };
 

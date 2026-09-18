@@ -73,6 +73,11 @@ pub const RepeatBounds = struct {
 };
 
 /// AST Node
+/// How many pending branch points `Node.destroy` holds without recursing. Only
+/// a node whose two children both have children of their own uses a slot, so a
+/// sequence or a chain of quantifiers needs none.
+const max_teardown_branches = 256;
+
 pub const Node = struct {
     node_type: NodeType,
     data: NodeData,
@@ -557,54 +562,97 @@ pub const Node = struct {
     }
 
     /// Recursively free an AST node and all its children
+    /// Free `self` and every node below it.
+    ///
+    /// Walked with a stack held in this frame: a flat pattern's spine is as long
+    /// as the pattern, so tearing down `/aaaa…a/` used one native frame per
+    /// character and overflowed the stack on patterns other engines handle
+    /// (#23). Nothing here allocates -- a teardown runs on the rollback path of
+    /// a failed allocation, where asking for memory is exactly what is not
+    /// available -- so the stack is a fixed array, and childless nodes are freed
+    /// where they are found rather than pushed. A sequence therefore never grows
+    /// it: only a node whose *both* children have children does, which the
+    /// parser's own nesting limit bounds well below this size.
     pub fn destroy(self: *Node, allocator: std.mem.Allocator) void {
-        switch (self.data) {
-            .concat => |concat| {
-                concat.left.destroy(allocator);
-                concat.right.destroy(allocator);
-            },
-            .alternation => |alt| {
-                alt.left.destroy(allocator);
-                alt.right.destroy(allocator);
-            },
-            .star, .plus, .optional => |quant| {
-                quant.child.destroy(allocator);
-            },
-            .repeat => |repeat| {
-                repeat.child.destroy(allocator);
-            },
-            .group => |group| {
-                if (group.name) |name| {
-                    allocator.free(name);
+        var stack: [max_teardown_branches]*Node = undefined;
+        var depth: usize = 0;
+        var current: ?*Node = self;
+        while (current) |node| {
+            const children = node.freeOwnedData(allocator);
+            allocator.destroy(node);
+            current = null;
+            for (children) |maybe_child| {
+                const child = maybe_child orelse continue;
+                if (!child.hasChildren()) {
+                    // A childless node needs no bookkeeping at all: free it
+                    // where it is, so a sequence never touches the stack.
+                    _ = child.freeOwnedData(allocator);
+                    allocator.destroy(child);
+                } else if (current == null) {
+                    current = child;
+                } else if (depth < stack.len) {
+                    stack[depth] = child;
+                    depth += 1;
+                } else {
+                    // Deeper branching than the array holds: fall back to the
+                    // recursive teardown for this subtree, which is what this
+                    // did before.
+                    child.destroyRecursively(allocator);
                 }
-                group.child.destroy(allocator);
+            }
+            if (current == null and depth > 0) {
+                depth -= 1;
+                current = stack[depth];
+            }
+        }
+    }
+
+    /// Whether this node owns child nodes (as opposed to only bytes).
+    fn hasChildren(self: *const Node) bool {
+        return switch (self.data) {
+            .concat, .alternation, .star, .plus, .optional, .repeat, .group, .lookahead, .lookbehind => true,
+            else => false,
+        };
+    }
+
+    fn destroyRecursively(self: *Node, allocator: std.mem.Allocator) void {
+        const children = self.freeOwnedData(allocator);
+        allocator.destroy(self);
+        for (children) |maybe_child| if (maybe_child) |child| child.destroyRecursively(allocator);
+    }
+
+    /// Free what this node owns directly and hand back its child nodes, which
+    /// the caller then owns.
+    fn freeOwnedData(self: *Node, allocator: std.mem.Allocator) [2]?*Node {
+        return switch (self.data) {
+            .concat => |concat| .{ concat.left, concat.right },
+            .alternation => |alt| .{ alt.left, alt.right },
+            .star, .plus, .optional => |quant| .{ quant.child, null },
+            .repeat => |repeat| .{ repeat.child, null },
+            .group => |group| blk: {
+                if (group.name) |name| allocator.free(name);
+                break :blk .{ group.child, null };
             },
-            .lookahead, .lookbehind => |assertion| {
-                assertion.child.destroy(allocator);
+            .lookahead, .lookbehind => |assertion| .{ assertion.child, null },
+            .backref => |backref| blk: {
+                if (backref.name) |name| allocator.free(name);
+                break :blk .{ null, null };
             },
-            .backref => |backref| {
-                if (backref.name) |name| {
-                    allocator.free(name);
-                }
-            },
-            .char_class => |char_class| {
+            .char_class => |char_class| blk: {
                 // Free the ranges array. This is safe because:
                 // - For custom char classes ([a-z]), parser allocates ranges
                 // - For predefined classes (\d, \w), they use static arrays
                 // - Static arrays can't be freed, but we only reach here for parsed nodes
                 // - NFA already duplicated these ranges, so we own the originals
-
-                // Check if this is a heap-allocated slice (not a static array)
-                // by checking if the pointer is in the heap range
-                // For now, we'll free all of them - predefined classes aren't created via createCharClass from parser
                 allocator.free(char_class.ranges);
+                break :blk .{ null, null };
             },
-            .class_set => |set| {
+            .class_set => |set| blk: {
                 destroyClassSet(allocator, set);
+                break :blk .{ null, null };
             },
-            else => {},
-        }
-        allocator.destroy(self);
+            else => .{ null, null },
+        };
     }
 
     fn destroyClassSet(allocator: std.mem.Allocator, set: *ClassSet) void {

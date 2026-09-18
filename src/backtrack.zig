@@ -331,13 +331,31 @@ pub const BacktrackEngine = struct {
             @memcpy(self.captures, clean_captures);
             return null;
         } else {
-            // For simple patterns without quantifiers, just try once
-            if (self.matchNode(concat.left, pos)) |left_end| {
-                if (self.matchNode(concat.right, left_end)) |right_end| {
-                    return right_end;
+            // No choices anywhere in this sequence, so each element either
+            // matches where the previous one ended or the whole sequence fails:
+            // there is nothing to backtrack into. Walking the spine keeps a
+            // 31,000-element sequence to one native frame (#23); only nesting
+            // inside an element recurses, and the stack is touched at all only
+            // for a left-leaning spine.
+            var pending: std.ArrayList(*ast.Node) = .empty;
+            defer pending.deinit(self.allocator);
+            var current_pos = pos;
+            var element = concat.left;
+            var tail: ?*ast.Node = concat.right;
+            while (true) {
+                if (element.node_type == .concat) {
+                    pending.append(self.allocator, element.data.concat.right) catch return null;
+                    element = element.data.concat.left;
+                    continue;
                 }
+                current_pos = self.matchNode(element, current_pos) orelse return null;
+                if (pending.pop()) |deferred| {
+                    element = deferred;
+                    continue;
+                }
+                element = tail orelse return current_pos;
+                tail = null;
             }
-            return null;
         }
     }
 
@@ -537,62 +555,108 @@ pub const BacktrackEngine = struct {
         return false;
     }
 
+    /// What a structural check decides about one node.
+    const NodeVerdict = enum { matched, descend, skip };
+
+    /// Visit `root` and its children with an explicit stack, answering true at
+    /// the first node `decide` accepts.
+    ///
+    /// A pattern's spine is as deep as the pattern is long, so these checks
+    /// cannot recurse: `/aaaa…a/` with 30,000 elements is an ordinary pattern
+    /// that other engines run, and one native frame per element overflowed the
+    /// stack (#23). Allocation failure answers true, which routes matching to
+    /// the general path rather than a faster specialised one.
+    fn anyNodeMatches(self: *BacktrackEngine, root: *ast.Node, comptime decide: fn (*BacktrackEngine, *ast.Node) NodeVerdict) bool {
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        var current: ?*ast.Node = root;
+        while (current) |node| : (current = pending.pop()) {
+            switch (decide(self, node)) {
+                .matched => return true,
+                .skip => {},
+                .descend => self.pushNodeChildren(&pending, node) catch return true,
+            }
+        }
+        return false;
+    }
+
+    /// Push every child of `node`, right-to-left so they pop in source order.
+    fn pushNodeChildren(self: *BacktrackEngine, pending: *std.ArrayList(*ast.Node), node: *ast.Node) !void {
+        switch (node.node_type) {
+            .concat => {
+                try pending.append(self.allocator, node.data.concat.right);
+                try pending.append(self.allocator, node.data.concat.left);
+            },
+            .alternation => {
+                try pending.append(self.allocator, node.data.alternation.right);
+                try pending.append(self.allocator, node.data.alternation.left);
+            },
+            .group => try pending.append(self.allocator, node.data.group.child),
+            .star => try pending.append(self.allocator, node.data.star.child),
+            .plus => try pending.append(self.allocator, node.data.plus.child),
+            .optional => try pending.append(self.allocator, node.data.optional.child),
+            .repeat => try pending.append(self.allocator, node.data.repeat.child),
+            .lookahead => try pending.append(self.allocator, node.data.lookahead.child),
+            .lookbehind => try pending.append(self.allocator, node.data.lookbehind.child),
+            else => {},
+        }
+    }
+
     fn hasQuantifiers(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            // Any quantifier needs backtracking support
-            .star, .plus, .optional, .repeat => true,
-            // Recursively check children
-            .concat => self.hasQuantifiers(node.data.concat.left) or self.hasQuantifiers(node.data.concat.right),
-            .alternation => self.hasQuantifiers(node.data.alternation.left) or self.hasQuantifiers(node.data.alternation.right),
-            .group => self.hasQuantifiers(node.data.group.child),
-            else => false,
-        };
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    // Any quantifier needs backtracking support
+                    .star, .plus, .optional, .repeat => .matched,
+                    .concat, .alternation, .group => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
     }
 
     fn hasAlternation(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .alternation => true,
-            .concat => self.hasAlternation(node.data.concat.left) or self.hasAlternation(node.data.concat.right),
-            .group => self.hasAlternation(node.data.group.child),
-            .star => self.hasAlternation(node.data.star.child),
-            .plus => self.hasAlternation(node.data.plus.child),
-            .optional => self.hasAlternation(node.data.optional.child),
-            .repeat => self.hasAlternation(node.data.repeat.child),
-            .lookahead => self.hasAlternation(node.data.lookahead.child),
-            .lookbehind => self.hasAlternation(node.data.lookbehind.child),
-            else => false,
-        };
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    .alternation => .matched,
+                    .concat, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
     }
 
     fn hasBackreference(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .backref => true,
-            .concat => self.hasBackreference(node.data.concat.left) or self.hasBackreference(node.data.concat.right),
-            .alternation => self.hasBackreference(node.data.alternation.left) or self.hasBackreference(node.data.alternation.right),
-            .group => self.hasBackreference(node.data.group.child),
-            .star => self.hasBackreference(node.data.star.child),
-            .plus => self.hasBackreference(node.data.plus.child),
-            .optional => self.hasBackreference(node.data.optional.child),
-            .repeat => self.hasBackreference(node.data.repeat.child),
-            .lookahead => self.hasBackreference(node.data.lookahead.child),
-            .lookbehind => self.hasBackreference(node.data.lookbehind.child),
-            else => false,
-        };
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    .backref => .matched,
+                    .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
     }
 
     fn hasRepeatedAlternation(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .star => self.hasAlternation(node.data.star.child) or self.hasRepeatedAlternation(node.data.star.child),
-            .plus => self.hasAlternation(node.data.plus.child) or self.hasRepeatedAlternation(node.data.plus.child),
-            .repeat => self.hasAlternation(node.data.repeat.child) or self.hasRepeatedAlternation(node.data.repeat.child),
-            .optional => self.hasRepeatedAlternation(node.data.optional.child),
-            .concat => self.hasRepeatedAlternation(node.data.concat.left) or self.hasRepeatedAlternation(node.data.concat.right),
-            .alternation => self.hasRepeatedAlternation(node.data.alternation.left) or self.hasRepeatedAlternation(node.data.alternation.right),
-            .group => self.hasRepeatedAlternation(node.data.group.child),
-            .lookahead => self.hasRepeatedAlternation(node.data.lookahead.child),
-            .lookbehind => self.hasRepeatedAlternation(node.data.lookbehind.child),
-            else => false,
-        };
+        return self.anyNodeMatches(node, struct {
+            fn decide(engine: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                // A repetition *of* an alternation is the shape that matters;
+                // anything else only passes the question to its children.
+                const repeated: ?*ast.Node = switch (n.node_type) {
+                    .star => n.data.star.child,
+                    .plus => n.data.plus.child,
+                    .repeat => n.data.repeat.child,
+                    else => null,
+                };
+                if (repeated) |child| return if (engine.hasAlternation(child)) .matched else .descend;
+                return switch (n.node_type) {
+                    .optional, .concat, .alternation, .group, .lookahead, .lookbehind => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
     }
 
     fn needsAnchoredRepeatedAlternationRecovery(self: *BacktrackEngine, left: *ast.Node, right: *ast.Node) bool {
@@ -600,26 +664,28 @@ pub const BacktrackEngine = struct {
     }
 
     fn hasCapturingGroup(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .group => node.data.group.capture_index != null or self.hasCapturingGroup(node.data.group.child),
-            .concat => self.hasCapturingGroup(node.data.concat.left) or self.hasCapturingGroup(node.data.concat.right),
-            .alternation => self.hasCapturingGroup(node.data.alternation.left) or self.hasCapturingGroup(node.data.alternation.right),
-            .star => self.hasCapturingGroup(node.data.star.child),
-            .plus => self.hasCapturingGroup(node.data.plus.child),
-            .optional => self.hasCapturingGroup(node.data.optional.child),
-            .repeat => self.hasCapturingGroup(node.data.repeat.child),
-            .lookahead => self.hasCapturingGroup(node.data.lookahead.child),
-            .lookbehind => self.hasCapturingGroup(node.data.lookbehind.child),
-            else => false,
-        };
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    .group => if (n.data.group.capture_index != null) .matched else .descend,
+                    .concat, .alternation, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
     }
 
     fn isEndAnchorOnly(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .anchor => node.data.anchor == .end_line or node.data.anchor == .end_text,
-            .group => self.isEndAnchorOnly(node.data.group.child),
-            .concat => self.canMatchEmpty(node.data.concat.left) and self.isEndAnchorOnly(node.data.concat.right),
-            else => false,
+        // Walks the tail of a sequence, which is as long as the pattern (#23).
+        var current = node;
+        while (true) switch (current.node_type) {
+            .anchor => return current.data.anchor == .end_line or current.data.anchor == .end_text,
+            .group => current = current.data.group.child,
+            .concat => {
+                if (!self.canMatchEmpty(current.data.concat.left)) return false;
+                current = current.data.concat.right;
+            },
+            else => return false,
         };
     }
 
@@ -628,45 +694,35 @@ pub const BacktrackEngine = struct {
     /// capture-fixup re-match in matchConcat/collectAllMatches is pure waste and
     /// can be skipped — turning `\p{…}+`-style scans from O(n²) into O(n).
     fn hasGroups(self: *BacktrackEngine, node: *ast.Node) bool {
-        return switch (node.node_type) {
-            .group => true,
-            .concat => self.hasGroups(node.data.concat.left) or self.hasGroups(node.data.concat.right),
-            .alternation => self.hasGroups(node.data.alternation.left) or self.hasGroups(node.data.alternation.right),
-            .star => self.hasGroups(node.data.star.child),
-            .plus => self.hasGroups(node.data.plus.child),
-            .optional => self.hasGroups(node.data.optional.child),
-            .repeat => self.hasGroups(node.data.repeat.child),
-            .lookahead, .lookbehind => true,
-            else => false,
-        };
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    .group, .lookahead, .lookbehind => .matched,
+                    .concat, .alternation, .star, .plus, .optional, .repeat => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
     }
 
+    /// Reset every capture declared inside `node`. Walked with an explicit
+    /// stack for the reason `anyNodeMatches` documents (#23).
     fn clearCapturesIn(self: *BacktrackEngine, node: *ast.Node) void {
-        switch (node.node_type) {
-            .group => {
-                const group = node.data.group;
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        var current: ?*ast.Node = node;
+        while (current) |n| : (current = pending.pop()) {
+            if (n.node_type == .group) {
+                const group = n.data.group;
                 if (group.capture_index) |index| {
                     if (index > 0 and index <= self.captures.len) {
                         self.captures[index - 1] = .{ .start = 0, .end = 0, .matched = false };
                     }
                 }
-                self.clearCapturesIn(group.child);
-            },
-            .concat => {
-                self.clearCapturesIn(node.data.concat.left);
-                self.clearCapturesIn(node.data.concat.right);
-            },
-            .alternation => {
-                self.clearCapturesIn(node.data.alternation.left);
-                self.clearCapturesIn(node.data.alternation.right);
-            },
-            .star => self.clearCapturesIn(node.data.star.child),
-            .plus => self.clearCapturesIn(node.data.plus.child),
-            .optional => self.clearCapturesIn(node.data.optional.child),
-            .repeat => self.clearCapturesIn(node.data.repeat.child),
-            .lookahead => self.clearCapturesIn(node.data.lookahead.child),
-            .lookbehind => self.clearCapturesIn(node.data.lookbehind.child),
-            else => {},
+            }
+            // Out of memory leaves the remaining captures as they were, which is
+            // the same stale-capture state a failed match already tolerates.
+            self.pushNodeChildren(&pending, n) catch return;
         }
     }
 

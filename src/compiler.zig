@@ -302,25 +302,89 @@ pub const Compiler = struct {
     }
 
     /// Compile concatenation
+    /// Compile a concatenation by walking its spine.
+    ///
+    /// A concatenation contributes no states of its own -- it only links one
+    /// element's accept to the next element's start -- so chaining the elements
+    /// of a whole sequence here builds exactly the automaton the pairwise
+    /// recursion built, for either associativity, without one native frame per
+    /// element. `/a{30000}/` written out longhand is an ordinary pattern that
+    /// other engines compile, and it used to overflow the stack (#23).
     fn compileConcat(self: *Compiler, concat: ast.Node.Concat) !Fragment {
-        const left_frag = try self.compileNode(concat.left);
-        const right_frag = try self.compileNode(concat.right);
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, concat.right);
+        try pending.append(self.allocator, concat.left);
 
-        // Connect left accept to right start with epsilon
-        const left_accept = self.nfa.getState(left_frag.accept);
-        try left_accept.addTransition(Transition.epsilon(right_frag.start));
+        var start: ?StateId = null;
+        var previous_accept: StateId = undefined;
+        while (pending.pop()) |current| {
+            if (current.node_type == .concat) {
+                // Elements pop in source order; nesting inside an element still
+                // recurses, which is bounded by how deep the pattern nests.
+                try pending.append(self.allocator, current.data.concat.right);
+                try pending.append(self.allocator, current.data.concat.left);
+                continue;
+            }
+            const fragment = try self.compileNode(current);
+            if (start == null) {
+                start = fragment.start;
+            } else {
+                try self.nfa.getState(previous_accept).addTransition(Transition.epsilon(fragment.start));
+            }
+            previous_accept = fragment.accept;
+        }
 
-        return Fragment{
-            .start = left_frag.start,
-            .accept = right_frag.accept,
-        };
+        return Fragment{ .start = start.?, .accept = previous_accept };
     }
 
-    /// Compile alternation (|)
+    /// Compile an alternation by walking its spine.
+    ///
+    /// Unlike a concatenation, each `|` node contributes its own start/accept
+    /// pair and clears the capture groups of the branch it skips, so the shape
+    /// of the tree is observable. This evaluates the same tree bottom-up with an
+    /// explicit stack -- identical states, transitions and branch order -- so a
+    /// 15,000-branch alternation compiles in one native frame instead of one per
+    /// branch (#23).
     fn compileAlternation(self: *Compiler, alt: ast.Node.Alternation) !Fragment {
-        const left_frag = try self.compileNode(alt.left);
-        const right_frag = try self.compileNode(alt.right);
+        const Frame = struct { alt: ast.Node.Alternation, left: ?Fragment = null };
+        var pending: std.ArrayList(Frame) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, .{ .alt = alt });
 
+        // Carries a finished child fragment back to the frame that asked for it.
+        var completed: ?Fragment = null;
+        while (pending.items.len > 0) {
+            const frame = &pending.items[pending.items.len - 1];
+            if (frame.left == null) {
+                if (completed) |child| {
+                    frame.left = child;
+                    completed = null;
+                } else if (frame.alt.left.node_type == .alternation) {
+                    try pending.append(self.allocator, .{ .alt = frame.alt.left.data.alternation });
+                } else {
+                    frame.left = try self.compileNode(frame.alt.left);
+                }
+                continue;
+            }
+            const right_frag = if (completed) |child| blk: {
+                completed = null;
+                break :blk child;
+            } else if (frame.alt.right.node_type == .alternation) {
+                try pending.append(self.allocator, .{ .alt = frame.alt.right.data.alternation });
+                continue;
+            } else try self.compileNode(frame.alt.right);
+            const finished = try self.joinAlternation(frame.alt, frame.left.?, right_frag);
+            _ = pending.pop();
+            completed = finished;
+        }
+        return completed.?;
+    }
+
+    /// Join two compiled branches the way the pairwise recursion did: a fresh
+    /// start and accept, the left branch preferred, and each branch clearing the
+    /// captures of the one it skips.
+    fn joinAlternation(self: *Compiler, alt: ast.Node.Alternation, left_frag: Fragment, right_frag: Fragment) !Fragment {
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
 
@@ -620,29 +684,40 @@ pub const Compiler = struct {
         return captures.toOwnedSlice(self.allocator);
     }
 
+    /// Append the capture indices inside `node`, in source order.
+    ///
+    /// Walked with an explicit stack rather than recursively: this runs over a
+    /// skipped alternation branch, which for a flat pattern is as deep as the
+    /// pattern is long, and one native frame per element overflowed the stack
+    /// on patterns other engines accept (#23).
     fn collectCaptureIndices(self: *Compiler, node: *ast.Node, captures: *std.ArrayList(usize)) !void {
-        switch (node.node_type) {
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        try pending.append(self.allocator, node);
+        // Children are pushed right-to-left, so they pop in source order and the
+        // collected indices keep the order the recursive walk produced.
+        while (pending.pop()) |current| switch (current.node_type) {
             .group => {
-                const group = node.data.group;
+                const group = current.data.group;
                 if (group.capture_index) |index| try captures.append(self.allocator, index);
-                try self.collectCaptureIndices(group.child, captures);
+                try pending.append(self.allocator, group.child);
             },
             .concat => {
-                try self.collectCaptureIndices(node.data.concat.left, captures);
-                try self.collectCaptureIndices(node.data.concat.right, captures);
+                try pending.append(self.allocator, current.data.concat.right);
+                try pending.append(self.allocator, current.data.concat.left);
             },
             .alternation => {
-                try self.collectCaptureIndices(node.data.alternation.left, captures);
-                try self.collectCaptureIndices(node.data.alternation.right, captures);
+                try pending.append(self.allocator, current.data.alternation.right);
+                try pending.append(self.allocator, current.data.alternation.left);
             },
-            .star => try self.collectCaptureIndices(node.data.star.child, captures),
-            .plus => try self.collectCaptureIndices(node.data.plus.child, captures),
-            .optional => try self.collectCaptureIndices(node.data.optional.child, captures),
-            .repeat => try self.collectCaptureIndices(node.data.repeat.child, captures),
-            .lookahead => try self.collectCaptureIndices(node.data.lookahead.child, captures),
-            .lookbehind => try self.collectCaptureIndices(node.data.lookbehind.child, captures),
+            .star => try pending.append(self.allocator, current.data.star.child),
+            .plus => try pending.append(self.allocator, current.data.plus.child),
+            .optional => try pending.append(self.allocator, current.data.optional.child),
+            .repeat => try pending.append(self.allocator, current.data.repeat.child),
+            .lookahead => try pending.append(self.allocator, current.data.lookahead.child),
+            .lookbehind => try pending.append(self.allocator, current.data.lookbehind.child),
             else => {},
-        }
+        };
     }
 
     /// Compile anchor
