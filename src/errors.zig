@@ -40,6 +40,30 @@ pub const RegexError = error{
     NotImplemented,
 };
 
+/// Precise parse reason for callers that need to render engine-specific
+/// diagnostics while preserving the stable, coarse `RegexError` categories.
+/// Set only when compilation fails and the parser knows the exact reason.
+pub const CompileErrorReason = enum {
+    missing_closing_parenthesis,
+    missing_character_class_terminator,
+    quantifier_numbers_out_of_order,
+    nothing_to_repeat,
+    trailing_backslash,
+    invalid_group_specifier_name,
+    range_out_of_order_in_character_class,
+    duplicate_group_specifier_name,
+    invalid_named_backreference,
+    invalid_property_expression,
+    invalid_escaped_character_for_unicode_pattern,
+    invalid_unicode_escape,
+    invalid_unicode_code_point_escape,
+    invalid_octal_escape_for_unicode_pattern,
+    invalid_range_in_character_class_for_unicode_pattern,
+    invalid_backreference_for_unicode_pattern,
+    unrecognized_character_after_group_start,
+    unmatched_parentheses,
+};
+
 /// Error context for better error reporting
 pub const ErrorContext = struct {
     error_type: RegexError,

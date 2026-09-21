@@ -5,6 +5,7 @@ const unicode = @import("unicode.zig");
 const prop_data = @import("unicode_prop_data.zig");
 const rgi_data = @import("rgi_emoji_data.zig");
 const RegexError = @import("errors.zig").RegexError;
+const CompileErrorReason = @import("errors.zig").CompileErrorReason;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
 const MAX_SAFE_QUANTIFIER: usize = 9_007_199_254_740_991;
@@ -91,6 +92,7 @@ pub const Lexer = struct {
     /// parser). When set (or in `u`/`v` mode) `\k` must be a `\k<name>` named
     /// backreference; otherwise a lone `\k` is the identity escape (Annex B).
     has_named_groups: bool = false,
+    diagnostic: ?*?CompileErrorReason = null,
 
     pub fn init(input: []const u8) Lexer {
         return .{
@@ -98,6 +100,17 @@ pub const Lexer = struct {
             .pos = 0,
             .start_pos = 0,
         };
+    }
+
+    pub fn initWithDiagnostic(input: []const u8, diagnostic: *?CompileErrorReason) Lexer {
+        var lexer = init(input);
+        lexer.diagnostic = diagnostic;
+        return lexer;
+    }
+
+    fn fail(self: *Lexer, err: RegexError, reason: CompileErrorReason) RegexError {
+        if (self.diagnostic) |diagnostic| diagnostic.* = reason;
+        return err;
     }
 
     /// In `x` mode, advance past unescaped whitespace and `#` line comments.
@@ -149,7 +162,7 @@ pub const Lexer = struct {
 
     fn parseEscape(self: *Lexer) !Token {
         // We've already consumed the backslash
-        const c = self.advance() orelse return RegexError.UnexpectedEndOfPattern;
+        const c = self.advance() orelse return self.fail(RegexError.UnexpectedEndOfPattern, .trailing_backslash);
 
         return switch (c) {
             'd' => self.makeToken(.escape_d, 0),
@@ -184,21 +197,21 @@ pub const Lexer = struct {
                 // `[+NamedCaptureGroups]` or in `u`/`v` mode; otherwise a lone `\k`
                 // is the identity escape (literal `k`) under Annex B.
                 if (self.has_named_groups or self.unicode_strict) {
-                    if (self.peek() != '<') return RegexError.InvalidEscapeSequence;
+                    if (self.peek() != '<') return self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
                     _ = self.advance();
                     const name_start = self.pos;
                     while (self.peek()) |p| {
                         if (p == '>') {
                             const name = self.input[name_start..self.pos];
                             _ = self.advance();
-                            if (name.len == 0) return RegexError.InvalidEscapeSequence;
+                            if (name.len == 0) return self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
                             var tok = self.makeToken(.backref, 0);
                             tok.name = name;
                             return tok;
                         }
                         _ = self.advance();
                     }
-                    return RegexError.UnexpectedEndOfPattern;
+                    return self.fail(RegexError.UnexpectedEndOfPattern, .invalid_escaped_character_for_unicode_pattern);
                 }
                 return self.makeToken(.literal, 'k');
             },
@@ -208,7 +221,7 @@ pub const Lexer = struct {
                 // `\0` is valid in Unicode mode only when it is not followed by
                 // another decimal digit. `\00` etc. are legacy octal escapes.
                 if (self.unicode_strict) if (self.peek()) |following| {
-                    if (std.ascii.isDigit(following)) return RegexError.InvalidEscapeSequence;
+                    if (std.ascii.isDigit(following)) return self.fail(RegexError.InvalidEscapeSequence, .invalid_octal_escape_for_unicode_pattern);
                 };
                 var value: u8 = 0;
                 if (!self.unicode_strict) {
@@ -226,7 +239,7 @@ pub const Lexer = struct {
             'c' => blk: {
                 // \cX control escape: the control letter's code mod 32.
                 const x = self.peek() orelse {
-                    if (self.unicode_strict) break :blk RegexError.InvalidEscapeSequence;
+                    if (self.unicode_strict) break :blk self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
                     break :blk self.literalWithPending('\\', "c");
                 };
                 if (std.ascii.isAlphabetic(x)) {
@@ -237,7 +250,7 @@ pub const Lexer = struct {
                     _ = self.advance();
                     break :blk self.makeToken(.escape_char, x % 32);
                 }
-                if (self.unicode_strict) break :blk RegexError.InvalidEscapeSequence;
+                if (self.unicode_strict) break :blk self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
                 break :blk self.literalWithPending('\\', "c"); // Annex B: invalid \c is literal "\c"
             },
             'u' => try self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
@@ -251,7 +264,7 @@ pub const Lexer = struct {
             // the literal `X` rather than being a syntax error, matching how web
             // JavaScript engines treat e.g. `\-`, `\ `, `\<`.
             else => {
-                if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+                if (self.unicode_strict) return self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
                 return self.makeToken(.literal, c);
             },
         };
@@ -266,7 +279,7 @@ pub const Lexer = struct {
     /// unknown / unsupported property name is a syntax error.
     fn parsePropertyEscape(self: *Lexer, negated: bool) !Token {
         if (self.peek() != '{') {
-            if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+            if (self.unicode_strict) return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
             return self.makeToken(.literal, if (negated) 'P' else 'p');
         }
         _ = self.advance(); // consume '{'
@@ -275,7 +288,7 @@ pub const Lexer = struct {
             if (c == '}') break;
             _ = self.advance();
         }
-        if (self.peek() != '}') return RegexError.InvalidEscapeSequence;
+        if (self.peek() != '}') return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         const body = self.input[start..self.pos];
         _ = self.advance(); // consume '}'
         // `\p{Name}` is a lone binary-property/General_Category value;
@@ -291,7 +304,7 @@ pub const Lexer = struct {
         if (lhs == null and name.len > 0 and name[0] == '^') {
             complement = !complement;
             name = name[1..];
-            if (name.len == 0) return RegexError.InvalidEscapeSequence;
+            if (name.len == 0) return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         }
         var tok = self.makeToken(if (complement) .escape_P else .escape_p, 0);
         if (unicode.resolveProperty(lhs, name, self.unicode_strict)) |spec| {
@@ -299,7 +312,7 @@ pub const Lexer = struct {
         } else if (lhs == null and !complement and isStringPropertyName(name)) {
             tok.name = name;
         } else {
-            return RegexError.InvalidEscapeSequence;
+            return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         }
         return tok;
     }
@@ -313,7 +326,7 @@ pub const Lexer = struct {
             return self.emitCodepoint(h1.? * 16 + h2.?);
         }
         self.pos = save;
-        if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+        if (self.unicode_strict) return self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
         return self.makeToken(.literal, 'x');
     }
 
@@ -340,7 +353,7 @@ pub const Lexer = struct {
             }
             if (n == 0 or self.peek() != '}' or cp > 0x10FFFF) {
                 self.pos = save;
-                if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+                if (self.unicode_strict) return self.fail(RegexError.InvalidEscapeSequence, .invalid_unicode_code_point_escape);
                 return self.makeToken(.literal, 'u');
             }
             self.pos += 1; // consume '}'
@@ -349,7 +362,7 @@ pub const Lexer = struct {
             while (i < 4) : (i += 1) {
                 const d = self.peekHex(i) orelse {
                     self.pos = save;
-                    if (self.unicode_strict) return RegexError.InvalidEscapeSequence;
+                    if (self.unicode_strict) return self.fail(RegexError.InvalidEscapeSequence, .invalid_unicode_escape);
                     return self.makeToken(.literal, 'u');
                 };
                 cp = cp * 16 + d;
@@ -564,7 +577,11 @@ pub const Parser = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) !Parser {
-        var lexer = Lexer.init(pattern);
+        return initWithDiagnostic(allocator, pattern, null);
+    }
+
+    pub fn initWithDiagnostic(allocator: std.mem.Allocator, pattern: []const u8, diagnostic: ?*?CompileErrorReason) !Parser {
+        var lexer = if (diagnostic) |out| Lexer.initWithDiagnostic(pattern, out) else Lexer.init(pattern);
         lexer.has_named_groups = scanForNamedGroups(pattern);
         const first_token = try lexer.next();
         return .{
@@ -575,6 +592,15 @@ pub const Parser = struct {
             .total_capture_count = countCaptures(pattern),
             .nesting_depth = 0,
         };
+    }
+
+    fn fail(self: *Parser, err: RegexError, reason: CompileErrorReason) RegexError {
+        return self.lexer.fail(err, reason);
+    }
+
+    fn expectWithReason(self: *Parser, expected: TokenType, reason: CompileErrorReason) RegexError!void {
+        if (self.current_token.token_type != expected) return self.fail(RegexError.UnexpectedCharacter, reason);
+        try self.advance();
     }
 
     fn advance(self: *Parser) !void {
@@ -600,7 +626,7 @@ pub const Parser = struct {
         // Verify all input was consumed
         if (self.peek() != .eof) {
             return switch (self.peek()) {
-                .rparen => RegexError.UnmatchedParenthesis,
+                .rparen => self.fail(RegexError.UnmatchedParenthesis, .unmatched_parentheses),
                 .rbracket => RegexError.UnmatchedBracket,
                 else => RegexError.UnexpectedCharacter,
             };
@@ -641,7 +667,7 @@ pub const Parser = struct {
         switch (node.data) {
             .group => |group| {
                 if (group.name) |name| {
-                    if (names.contains(name)) return RegexError.DuplicateGroupName;
+                    if (names.contains(name)) return self.fail(RegexError.DuplicateGroupName, .duplicate_group_specifier_name);
                     try names.put(self.allocator, name, {});
                 }
                 try self.validateDuplicateGroupNamesBranch(group.child, names);
@@ -718,7 +744,7 @@ pub const Parser = struct {
             .lookahead, .lookbehind => |assertion| try self.checkNamedBackrefs(assertion.child, names),
             .backref => |backref| {
                 if (backref.name) |nm| {
-                    if (!names.contains(nm)) return RegexError.InvalidBackreference;
+                    if (!names.contains(nm)) return self.fail(RegexError.InvalidBackreference, .invalid_named_backreference);
                 }
             },
             else => {},
@@ -741,7 +767,7 @@ pub const Parser = struct {
             .lookahead, .lookbehind => |assertion| try self.validateUnicodeBackrefs(assertion.child),
             .backref => |backref| {
                 if (backref.name == null and (backref.index == 0 or backref.index > self.capture_count))
-                    return RegexError.InvalidBackreference;
+                    return self.fail(RegexError.InvalidBackreference, .invalid_backreference_for_unicode_pattern);
             },
             else => {},
         }
@@ -836,7 +862,7 @@ pub const Parser = struct {
     }
 
     fn checkQuantifierTarget(self: *Parser, node: *ast.Node) RegexError!void {
-        if (isQuantifierNode(node)) return RegexError.InvalidQuantifier;
+        if (isQuantifierNode(node)) return self.fail(RegexError.InvalidQuantifier, .nothing_to_repeat);
         // Lookbehind is never a QuantifiableAssertion in any mode; lookahead is
         // only quantifiable in Annex B (non-unicode) web-compat mode.
         switch (node.node_type) {
@@ -904,9 +930,7 @@ pub const Parser = struct {
                         const digit = self.current_token.value - '0';
 
                         // Check for multiplication overflow before computing
-                        if (min > std.math.maxInt(usize) / 10) {
-                            return RegexError.InvalidQuantifier;
-                        }
+                        if (min > std.math.maxInt(usize) / 10) return RegexError.InvalidQuantifier;
 
                         const new_min = min * 10 + digit;
 
@@ -954,9 +978,8 @@ pub const Parser = struct {
 
                     // Validate min <= max
                     if (max) |max_val| {
-                        if (min > max_val) {
-                            return RegexError.InvalidQuantifier;
-                        }
+                        if (min > max_val)
+                            return self.fail(RegexError.InvalidQuantifier, .quantifier_numbers_out_of_order);
                     }
 
                     const bounds = ast.RepeatBounds.init(min, max);
@@ -1139,7 +1162,10 @@ pub const Parser = struct {
             },
             .backref => {
                 try self.advance();
-                const name = if (token.name) |n| try self.normalizeGroupName(n) else null;
+                const name = if (token.name) |n| self.normalizeGroupName(n) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    return self.fail(err, .invalid_escaped_character_for_unicode_pattern);
+                } else null;
                 errdefer if (name) |n| self.allocator.free(n);
                 const index = token.index; // 1-based capture group index; 0 for named-only references
                 if (name == null and index > self.total_capture_count and !(self.unicode or self.unicode_sets)) {
@@ -1194,14 +1220,14 @@ pub const Parser = struct {
                             try self.advance(); // consume =
                             const child = try self.parseAlternation();
                             errdefer child.destroy(self.allocator);
-                            try self.expect(.rparen);
+                            try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                             return ast.Node.createLookahead(self.allocator, child, true, span);
                         } else if (self.current_token.value == '!') {
                             // Negative lookahead (?!...)
                             try self.advance(); // consume !
                             const child = try self.parseAlternation();
                             errdefer child.destroy(self.allocator);
-                            try self.expect(.rparen);
+                            try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                             return ast.Node.createLookahead(self.allocator, child, false, span);
                         } else if (self.current_token.value == 'P') {
                             // Python-style named group (?P<name>...)
@@ -1225,14 +1251,14 @@ pub const Parser = struct {
                                 try self.advance(); // consume =
                                 const child = try self.parseAlternation();
                                 errdefer child.destroy(self.allocator);
-                                try self.expect(.rparen);
+                                try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                                 return ast.Node.createLookbehind(self.allocator, child, true, span);
                             } else if (self.current_token.token_type == .literal and self.current_token.value == '!') {
                                 // Negative lookbehind (?<!...)
                                 try self.advance(); // consume !
                                 const child = try self.parseAlternation();
                                 errdefer child.destroy(self.allocator);
-                                try self.expect(.rparen);
+                                try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                                 return ast.Node.createLookbehind(self.allocator, child, false, span);
                             } else {
                                 // .NET/Perl-style named group (?<name>...)
@@ -1240,7 +1266,10 @@ pub const Parser = struct {
                                 self.lexer.pos = saved_pos;
                                 self.current_token = saved_token;
                                 try self.advance(); // consume <
-                                group_name = try self.parseGroupName();
+                                group_name = self.parseGroupName() catch |err| {
+                                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                                    return self.fail(err, .invalid_group_specifier_name);
+                                };
                                 self.capture_count += 1;
                                 capture_index = self.capture_count;
                             }
@@ -1355,17 +1384,17 @@ pub const Parser = struct {
                             };
                             self.setParseFlags(saved_extended, saved_swap_greedy);
                             errdefer body.destroy(self.allocator);
-                            try self.expect(.rparen);
+                            try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                             const node = try ast.Node.createGroup(self.allocator, body, null, span);
                             if (mod.any()) node.data.group.mod = mod;
                             return node;
                         } else {
                             // Unknown group extension
-                            return RegexError.UnexpectedCharacter;
+                            return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                         }
                     } else {
                         // Invalid syntax after (?
-                        return RegexError.UnexpectedCharacter;
+                        return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                     }
                 } else {
                     // Regular capturing group - assign capture index BEFORE parsing child
@@ -1375,7 +1404,7 @@ pub const Parser = struct {
 
                 const child = try self.parseAlternation();
                 errdefer child.destroy(self.allocator);
-                try self.expect(.rparen);
+                try self.expectWithReason(.rparen, .missing_closing_parenthesis);
 
                 if (group_name) |name| {
                     return ast.Node.createNamedGroup(self.allocator, child, capture_index, name, span);
@@ -1399,9 +1428,12 @@ pub const Parser = struct {
                 // braced quantifier ({n}, {n,}, {n,m}) but has no atom to bind to is
                 // a SyntaxError in ECMAScript, not a literal `{`.
                 if (self.ecmascript and self.bracedQuantifierBodyAt(span.start + 1))
-                    return RegexError.UnexpectedCharacter;
+                    return self.fail(RegexError.UnexpectedCharacter, .nothing_to_repeat);
                 try self.advance();
                 return ast.Node.createLiteral(self.allocator, '{', span);
+            },
+            .star, .plus, .question => {
+                return self.fail(RegexError.UnexpectedCharacter, .nothing_to_repeat);
             },
             else => {
                 return RegexError.UnexpectedCharacter;
@@ -2003,11 +2035,11 @@ pub const Parser = struct {
     fn propertyClassItem(self: *Parser, input: []const u8, i: *usize) RegexError!ast.Node.ClassItem {
         var neg = input[i.* + 1] == 'P';
         i.* += 2; // consume \p
-        if (i.* >= input.len or input[i.*] != '{') return RegexError.InvalidEscapeSequence;
+        if (i.* >= input.len or input[i.*] != '{') return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         i.* += 1;
         const begin = i.*;
         while (i.* < input.len and input[i.*] != '}') i.* += 1;
-        if (i.* >= input.len) return RegexError.InvalidEscapeSequence;
+        if (i.* >= input.len) return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         const body = input[begin..i.*];
         i.* += 1; // consume }
         var lhs: ?[]const u8 = null;
@@ -2019,14 +2051,14 @@ pub const Parser = struct {
         if (lhs == null and name.len > 0 and name[0] == '^') {
             neg = !neg;
             name = name[1..];
-            if (name.len == 0) return RegexError.InvalidEscapeSequence;
+            if (name.len == 0) return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         }
         if (lhs == null) if (try self.stringPropertyItem(name)) |item| {
             // A property of strings can't be complemented (`\P{...}`).
             if (neg) return RegexError.UnexpectedCharacter;
             return item;
         };
-        const spec = unicode.resolveProperty(lhs, name, self.unicode or self.unicode_sets) orelse return RegexError.InvalidEscapeSequence;
+        const spec = unicode.resolveProperty(lhs, name, self.unicode or self.unicode_sets) orelse return self.fail(RegexError.InvalidEscapeSequence, .invalid_property_expression);
         return .{ .property = .{ .spec = spec, .negated = neg } };
     }
 
@@ -2176,7 +2208,7 @@ pub const Parser = struct {
         var i: usize = open + 1;
         const set = try self.parseSetExpr(input, &i);
         errdefer self.destroyClassSet(set);
-        if (i >= input.len or input[i] != ']') return RegexError.InvalidCharacterClass;
+        if (i >= input.len or input[i] != ']') return self.fail(RegexError.InvalidCharacterClass, .missing_character_class_terminator);
         i += 1; // consume ]
         // Resync the lexer to just past the class and re-read the next token.
         self.lexer.pos = i;
@@ -2246,26 +2278,26 @@ pub const Parser = struct {
                         const hi_item = try self.parseUnicodeClassAtom(input, &i, self.unicode or self.unicode_sets);
                         switch (hi_item) {
                             .range => |hi| if (hi.lo == hi.hi) {
-                                if (hi.lo < lo.lo) return RegexError.InvalidCharacterClass;
+                                if (hi.lo < lo.lo) return self.fail(RegexError.InvalidCharacterClass, .range_out_of_order_in_character_class);
                                 try items.append(self.allocator, .{ .range = .{ .lo = lo.lo, .hi = hi.lo } });
                                 continue;
-                            } else return RegexError.InvalidCharacterClass,
+                            } else return self.fail(RegexError.InvalidCharacterClass, .invalid_range_in_character_class_for_unicode_pattern),
                             else => {
                                 self.destroyClassItem(hi_item);
-                                return RegexError.InvalidCharacterClass;
+                                return self.fail(RegexError.InvalidCharacterClass, .invalid_range_in_character_class_for_unicode_pattern);
                             },
                         }
                     } else {},
                     else => {
                         self.destroyClassItem(item);
-                        return RegexError.InvalidCharacterClass;
+                        return self.fail(RegexError.InvalidCharacterClass, .invalid_range_in_character_class_for_unicode_pattern);
                     },
                 }
             }
             try self.appendOwnedClassItem(&items, item);
         }
 
-        if (i >= input.len or input[i] != ']') return RegexError.InvalidCharacterClass;
+        if (i >= input.len or input[i] != ']') return self.fail(RegexError.InvalidCharacterClass, .missing_character_class_terminator);
         i += 1;
 
         const set = try self.finishClassSet(&items, .union_, negated);
@@ -2422,7 +2454,7 @@ pub const Parser = struct {
                     // (< 0x80), where byte order is code-point order. (A reversed
                     // multibyte range is rare and unreliable to detect by byte.)
                     if (first_char < 0x80 and second_char < 0x80 and first_char > second_char)
-                        return RegexError.InvalidCharacterClass;
+                        return self.fail(RegexError.InvalidCharacterClass, .range_out_of_order_in_character_class);
                     try ranges.append(self.allocator, common.CharRange.init(first_char, second_char));
                 }
             } else {
@@ -2431,7 +2463,9 @@ pub const Parser = struct {
             }
         }
 
-        try self.expect(.rbracket);
+        if (self.peek() != .rbracket)
+            return self.fail(RegexError.UnexpectedCharacter, .missing_character_class_terminator);
+        try self.advance();
 
         const char_class = common.CharClass{
             .ranges = try ranges.toOwnedSlice(self.allocator),

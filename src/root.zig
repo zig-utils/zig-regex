@@ -19,6 +19,7 @@ const std = @import("std");
 pub const Regex = @import("regex.zig").Regex;
 pub const Match = @import("regex.zig").Match;
 pub const RegexError = @import("errors.zig").RegexError;
+pub const CompileErrorReason = @import("errors.zig").CompileErrorReason;
 pub const ErrorContext = @import("errors.zig").ErrorContext;
 pub const ErrorHelper = @import("errors.zig").ErrorHelper;
 

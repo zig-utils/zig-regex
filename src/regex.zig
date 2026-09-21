@@ -1,5 +1,6 @@
 const std = @import("std");
 const RegexError = @import("errors.zig").RegexError;
+const CompileErrorReason = @import("errors.zig").CompileErrorReason;
 const parser = @import("parser.zig");
 const compiler = @import("compiler.zig");
 const vm = @import("vm.zig");
@@ -99,8 +100,16 @@ pub const Regex = struct {
 
     /// Compile a regex pattern with custom flags
     pub fn compileWithFlags(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
+        var ignored_diagnostic: ?CompileErrorReason = null;
+        return compileWithFlagsDiagnostic(allocator, pattern, flags, &ignored_diagnostic);
+    }
+
+    /// Compile while retaining the precise parse reason on failure. The
+    /// ordinary error return remains source-compatible with `compileWithFlags`.
+    pub fn compileWithFlagsDiagnostic(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: *?CompileErrorReason) !Regex {
+        diagnostic.* = null;
         // Parse the pattern into an AST
-        var p = try parser.Parser.init(allocator, pattern);
+        var p = try parser.Parser.initWithDiagnostic(allocator, pattern, diagnostic);
         p.unicode_sets = flags.unicode_sets;
         p.unicode = flags.unicode;
         p.case_insensitive = flags.case_insensitive;
@@ -3151,6 +3160,42 @@ test "out-of-order ASCII character-class range is rejected" {
     var mb = try Regex.compile(allocator, "[\\u2000-\\u200A]");
     defer mb.deinit();
     try std.testing.expect(try mb.isMatch("\u{2005}"));
+}
+
+test "compile diagnostic preserves ECMAScript failure reasons" {
+    const Case = struct {
+        pattern: []const u8,
+        flags: common.CompileFlags = .{ .ecmascript = true },
+        expected_error: RegexError,
+        reason: CompileErrorReason,
+    };
+    const cases = [_]Case{
+        .{ .pattern = "(", .expected_error = RegexError.UnexpectedCharacter, .reason = .missing_closing_parenthesis },
+        .{ .pattern = "[a", .expected_error = RegexError.UnexpectedCharacter, .reason = .missing_character_class_terminator },
+        .{ .pattern = "a{2,1}", .expected_error = RegexError.InvalidQuantifier, .reason = .quantifier_numbers_out_of_order },
+        .{ .pattern = "*", .expected_error = RegexError.UnexpectedCharacter, .reason = .nothing_to_repeat },
+        .{ .pattern = "a**", .expected_error = RegexError.InvalidQuantifier, .reason = .nothing_to_repeat },
+        .{ .pattern = "a\\", .expected_error = RegexError.UnexpectedEndOfPattern, .reason = .trailing_backslash },
+        .{ .pattern = "(?<1>a)", .expected_error = RegexError.InvalidCharacterClass, .reason = .invalid_group_specifier_name },
+        .{ .pattern = "[z-a]", .expected_error = RegexError.InvalidCharacterClass, .reason = .range_out_of_order_in_character_class },
+        .{ .pattern = "(?<a>x)(?<a>y)", .expected_error = RegexError.DuplicateGroupName, .reason = .duplicate_group_specifier_name },
+        .{ .pattern = "\\k<z>(?<a>x)", .expected_error = RegexError.InvalidBackreference, .reason = .invalid_named_backreference },
+        .{ .pattern = "\\p{Nope}", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidEscapeSequence, .reason = .invalid_property_expression },
+        .{ .pattern = "\\q", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidEscapeSequence, .reason = .invalid_escaped_character_for_unicode_pattern },
+        .{ .pattern = "\\u123", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidEscapeSequence, .reason = .invalid_unicode_escape },
+        .{ .pattern = "\\u{110000}", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidEscapeSequence, .reason = .invalid_unicode_code_point_escape },
+        .{ .pattern = "\\01", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidEscapeSequence, .reason = .invalid_octal_escape_for_unicode_pattern },
+        .{ .pattern = "[\\d-a]", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidCharacterClass, .reason = .invalid_range_in_character_class_for_unicode_pattern },
+        .{ .pattern = "\\1", .flags = .{ .unicode = true, .ecmascript = true }, .expected_error = RegexError.InvalidBackreference, .reason = .invalid_backreference_for_unicode_pattern },
+        .{ .pattern = "(?", .expected_error = RegexError.UnexpectedCharacter, .reason = .unrecognized_character_after_group_start },
+        .{ .pattern = ")", .expected_error = RegexError.UnmatchedParenthesis, .reason = .unmatched_parentheses },
+    };
+
+    for (cases) |case| {
+        var diagnostic: ?CompileErrorReason = null;
+        try std.testing.expectError(case.expected_error, Regex.compileWithFlagsDiagnostic(std.testing.allocator, case.pattern, case.flags, &diagnostic));
+        try std.testing.expectEqual(case.reason, diagnostic.?);
+    }
 }
 
 test "unicode surrogate escapes compile to WTF-8 code units" {
