@@ -100,14 +100,17 @@ pub const Regex = struct {
 
     /// Compile a regex pattern with custom flags
     pub fn compileWithFlags(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
-        var ignored_diagnostic: ?CompileErrorReason = null;
-        return compileWithFlagsDiagnostic(allocator, pattern, flags, &ignored_diagnostic);
+        return compileWithFlagsInner(allocator, pattern, flags, null);
     }
 
     /// Compile while retaining the precise parse reason on failure. The
     /// ordinary error return remains source-compatible with `compileWithFlags`.
     pub fn compileWithFlagsDiagnostic(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: *?CompileErrorReason) !Regex {
         diagnostic.* = null;
+        return compileWithFlagsInner(allocator, pattern, flags, diagnostic);
+    }
+
+    fn compileWithFlagsInner(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: ?*?CompileErrorReason) !Regex {
         // Parse the pattern into an AST
         var p = try parser.Parser.initWithDiagnostic(allocator, pattern, diagnostic);
         p.unicode_sets = flags.unicode_sets;
