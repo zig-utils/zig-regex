@@ -1737,6 +1737,98 @@ pub const BacktrackEngine = struct {
         return if (self.flags.unicode or self.flags.unicode_sets) .unicode else .legacy;
     }
 
+    /// One character of a case-insensitive ECMAScript backreference: its
+    /// Canonicalize key (`ast.Node.canonicalizeKey`) and its length in bytes.
+    const CanonUnit = struct { key: u21, len: usize };
+
+    /// A byte that does not decode compares only with the same byte.
+    const undecodable_key_base: u21 = 0x110000;
+
+    /// The character that starts at `i`, read no further than `hi`. With `u`
+    /// or `v` a high and a low surrogate triple form one character; without
+    /// them every WTF-8 sequence is one UTF-16 code unit, since zig-js splits
+    /// astral characters into surrogate triples before non-`u` matching.
+    fn canonUnitAt(self: *const BacktrackEngine, i: usize, hi: usize, mode: ast.Node.ClassSet.CaseFoldMode) CanonUnit {
+        const b = self.input[i];
+        if (b < 0x80) return .{ .key = std.ascii.toLower(b), .len = 1 };
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[i..hi]) orelse
+            return .{ .key = undecodable_key_base + b, .len = 1 };
+        var cp: u21 = dec.codepoint;
+        var len: usize = dec.len;
+        if (mode == .unicode and common.isHighSurrogate(cp) and i + len < hi) {
+            if (unicode_mod.decodeUtf8Lenient(self.input[i + len .. hi])) |low| {
+                if (common.isLowSurrogate(low.codepoint)) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low.codepoint - 0xDC00);
+                    len += low.len;
+                }
+            }
+        }
+        return .{ .key = ast.Node.canonicalizeKey(cp, mode), .len = len };
+    }
+
+    /// The character that ends at `end`, starting no earlier than `lo`; the
+    /// mirror of `canonUnitAt` for backreferences matched backward.
+    fn canonUnitBefore(self: *const BacktrackEngine, lo: usize, end: usize, mode: ast.Node.ClassSet.CaseFoldMode) CanonUnit {
+        const last = self.input[end - 1];
+        if (last < 0x80) return .{ .key = std.ascii.toLower(last), .len = 1 };
+        var start = end - 1;
+        var back: usize = 0;
+        while (start > lo and back < 3 and (self.input[start] & 0xC0) == 0x80) : ({
+            start -= 1;
+            back += 1;
+        }) {}
+        const dec = unicode_mod.decodeUtf8Lenient(self.input[start..end]) orelse
+            return .{ .key = undecodable_key_base + last, .len = 1 };
+        if (start + dec.len != end) return .{ .key = undecodable_key_base + last, .len = 1 };
+        var cp: u21 = dec.codepoint;
+        var len: usize = dec.len;
+        if (mode == .unicode and common.isLowSurrogate(cp) and start >= lo + 3) {
+            if (unicode_mod.decodeUtf8Lenient(self.input[start - 3 .. start])) |high| {
+                if (high.len == 3 and common.isHighSurrogate(high.codepoint)) {
+                    cp = 0x10000 + ((high.codepoint - 0xD800) << 10) + (cp - 0xDC00);
+                    len += 3;
+                }
+            }
+        }
+        return .{ .key = ast.Node.canonicalizeKey(cp, mode), .len = len };
+    }
+
+    /// BackreferenceMatcher (22.2.2.7.2) under IgnoreCase: the captured
+    /// characters and the input's compare one by one after Canonicalize. Folded
+    /// pairs can differ in byte length (ſ and s, K and k, ẞ and ß), so the two
+    /// spans advance on separate cursors instead of being sliced to one length.
+    fn matchCaptureTextCanonical(self: *BacktrackEngine, capture: CaptureGroup, pos: usize) ?usize {
+        const mode = self.classSetCaseFoldMode();
+        var c = capture.start;
+        var i = pos;
+        while (c < capture.end) {
+            if (i >= self.input.len) return null;
+            const a = self.canonUnitAt(c, capture.end, mode);
+            const b = self.canonUnitAt(i, self.input.len, mode);
+            if (a.key != b.key) return null;
+            c += a.len;
+            i += b.len;
+        }
+        return i;
+    }
+
+    /// `matchCaptureTextCanonical` for a backreference matched backward (in a
+    /// lookbehind): both spans are walked from their ends.
+    fn matchCaptureTextCanonicalReverse(self: *BacktrackEngine, capture: CaptureGroup, pos: usize) ?usize {
+        const mode = self.classSetCaseFoldMode();
+        var c = capture.end;
+        var i = pos;
+        while (c > capture.start) {
+            if (i == 0) return null;
+            const a = self.canonUnitBefore(capture.start, c, mode);
+            const b = self.canonUnitBefore(0, i, mode);
+            if (a.key != b.key) return null;
+            c -= a.len;
+            i -= b.len;
+        }
+        return i;
+    }
+
     fn matchReverseBackreference(self: *BacktrackEngine, backref: ast.Node.Backreference, pos: usize) ?usize {
         if (backref.name) |name| return self.matchNamedBackreferenceReverse(self.ast_root, name, pos);
         return self.matchCaptureBackreferenceReverse(backref.index, pos);
@@ -1757,6 +1849,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchCaptureTextReverse(self: *BacktrackEngine, capture: CaptureGroup, pos: usize) ?usize {
+        if (self.flags.case_insensitive and self.flags.ecmascript) return self.matchCaptureTextCanonicalReverse(capture, pos);
         const captured_text = self.input[capture.start..capture.end];
         if (captured_text.len > pos) return null;
         const start = pos - captured_text.len;
@@ -1855,6 +1948,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchCaptureText(self: *BacktrackEngine, capture: CaptureGroup, pos: usize) ?usize {
+        if (self.flags.case_insensitive and self.flags.ecmascript) return self.matchCaptureTextCanonical(capture, pos);
         // Get the captured text
         const captured_text = self.input[capture.start..capture.end];
 

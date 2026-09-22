@@ -334,3 +334,74 @@ test "pattern backreference: quoted strings" {
     try std.testing.expect(try regex.isMatch("\"hello\""));
     try std.testing.expect(!try regex.isMatch("'hello\""));
 }
+
+// ECMAScript IgnoreCase backreferences compare characters after Canonicalize
+// (ECMA-262 22.2.2.7.2, 22.2.2.7.3): simple case folding under u, the
+// single-code-unit toUppercase rule without it. Every row was checked against
+// node v24.4.1 (zig-regex#29).
+const IgnoreCaseBackrefCase = struct { pattern: []const u8, unicode: bool, input: []const u8, expected: ?[]const u8 };
+
+const ignore_case_backref_cases = [_]IgnoreCaseBackrefCase{
+    .{ .pattern = "(\u{E0})\\1", .unicode = false, .input = "\u{E0}\u{C0}", .expected = "\u{E0}\u{C0}" },
+    .{ .pattern = "(\u{3C3})\\1", .unicode = false, .input = "\u{3C3}\u{3C2}", .expected = "\u{3C3}\u{3C2}" },
+    .{ .pattern = "(\u{3A3})\\1\\1", .unicode = false, .input = "\u{3A3}\u{3C3}\u{3C2}", .expected = "\u{3A3}\u{3C3}\u{3C2}" },
+    .{ .pattern = "(\u{101})\\1", .unicode = false, .input = "\u{101}\u{100}", .expected = "\u{101}\u{100}" },
+    .{ .pattern = "(\u{434})\\1", .unicode = false, .input = "\u{434}\u{414}", .expected = "\u{434}\u{414}" },
+    .{ .pattern = "(\u{1C6})\\1", .unicode = false, .input = "\u{1C6}\u{1C5}", .expected = "\u{1C6}\u{1C5}" },
+    .{ .pattern = "(?<n>\u{3C3})\\k<n>", .unicode = false, .input = "\u{3C2}\u{3A3}", .expected = "\u{3C2}\u{3A3}" },
+    .{ .pattern = "(.)\\1", .unicode = false, .input = "\u{23A}\u{2C65}", .expected = "\u{23A}\u{2C65}" },
+    .{ .pattern = "(.)\\1", .unicode = false, .input = "\u{1FBE}\u{399}", .expected = "\u{1FBE}\u{399}" },
+    .{ .pattern = "(\u{DF})\\1", .unicode = false, .input = "\u{DF}\u{1E9E}", .expected = null },
+    .{ .pattern = "(.)\\1", .unicode = false, .input = "\u{17F}s", .expected = null },
+    .{ .pattern = "(.)\\1", .unicode = false, .input = "\u{212A}k", .expected = null },
+    .{ .pattern = "(.)\\1", .unicode = false, .input = "\u{2126}\u{3C9}", .expected = null },
+    .{ .pattern = "(\u{E9}+)x\\1", .unicode = false, .input = "\u{E9}\u{E9}x\u{C9}\u{C9}", .expected = "\u{E9}\u{E9}x\u{C9}\u{C9}" },
+    .{ .pattern = "(\u{17F})\\1", .unicode = true, .input = "\u{17F}s", .expected = "\u{17F}s" },
+    .{ .pattern = "(s)\\1", .unicode = true, .input = "s\u{17F}", .expected = "s\u{17F}" },
+    .{ .pattern = "(k)\\1", .unicode = true, .input = "\u{212A}K", .expected = "\u{212A}K" },
+    .{ .pattern = "(K)\\1", .unicode = true, .input = "K\u{212A}", .expected = "K\u{212A}" },
+    .{ .pattern = "(\u{DF})\\1", .unicode = true, .input = "\u{DF}\u{1E9E}", .expected = "\u{DF}\u{1E9E}" },
+    .{ .pattern = "(\u{1E9E})\\1", .unicode = true, .input = "\u{1E9E}\u{DF}", .expected = "\u{1E9E}\u{DF}" },
+    .{ .pattern = "(\u{DF})\\1", .unicode = true, .input = "\u{DF}ss", .expected = null },
+    .{ .pattern = "(\u{17F})\\1", .unicode = true, .input = "\u{17F}", .expected = null },
+    .{ .pattern = "(.)\\1", .unicode = true, .input = "\u{10400}\u{10428}", .expected = "\u{10400}\u{10428}" },
+    .{ .pattern = "^(\u{17F}K)\\1x$", .unicode = true, .input = "\u{17F}KsKx", .expected = "\u{17F}KsKx" },
+    .{ .pattern = "(?<n>k)\\k<n>", .unicode = true, .input = "\u{212A}k", .expected = "\u{212A}k" },
+    .{ .pattern = "(?<=\\1(k))x", .unicode = true, .input = "\u{212A}kx", .expected = "x" },
+    .{ .pattern = "(?<=\\1(k))x", .unicode = false, .input = "\u{212A}kx", .expected = null },
+    .{ .pattern = "(?<=\\1(\u{17F}))x", .unicode = true, .input = "s\u{17F}x", .expected = "x" },
+    .{ .pattern = "(?<=\\1(s))x", .unicode = true, .input = "\u{17F}sx", .expected = "x" },
+    .{ .pattern = "(?<=\\1(s))x", .unicode = false, .input = "\u{17F}sx", .expected = null },
+    .{ .pattern = "(?<=\\1(\u{E0}))x", .unicode = false, .input = "\u{C0}\u{E0}x", .expected = "x" },
+    .{ .pattern = "(?<=\\1(\u{DF}))x", .unicode = false, .input = "\u{1E9E}\u{DF}x", .expected = null },
+    .{ .pattern = "(?<=\\1(\u{DF}))x", .unicode = true, .input = "\u{1E9E}\u{DF}x", .expected = "x" },
+    .{ .pattern = "(?<=\\1(.))x", .unicode = false, .input = "\u{23A}\u{2C65}x", .expected = "x" },
+};
+
+test "pattern backreference: ECMAScript ignoreCase compares canonicalized characters" {
+    const allocator = std.testing.allocator;
+    for (ignore_case_backref_cases) |c| {
+        var regex = try Regex.compileWithFlags(allocator, c.pattern, .{ .case_insensitive = true, .ecmascript = true, .unicode = c.unicode });
+        defer regex.deinit();
+        var found = try regex.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        if (c.expected) |want| {
+            const m = found orelse {
+                std.debug.print("no match: /{s}/{s} on {s}\n", .{ c.pattern, if (c.unicode) "iu" else "i", c.input });
+                return error.TestExpectedMatch;
+            };
+            try std.testing.expectEqualStrings(want, m.slice);
+        } else if (found) |m| {
+            std.debug.print("unexpected match {s}: /{s}/{s} on {s}\n", .{ m.slice, c.pattern, if (c.unicode) "iu" else "i", c.input });
+            return error.TestUnexpectedMatch;
+        }
+    }
+}
+
+test "pattern backreference: non-ECMAScript ignoreCase keeps its ASCII-only comparison" {
+    const allocator = std.testing.allocator;
+    var regex = try Regex.compileWithFlags(allocator, "(\u{E0})\\1", .{ .case_insensitive = true });
+    defer regex.deinit();
+    try std.testing.expect(!try regex.isMatch("\u{E0}\u{C0}"));
+    try std.testing.expect(try regex.isMatch("\u{E0}\u{E0}"));
+}

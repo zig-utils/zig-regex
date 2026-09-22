@@ -318,6 +318,58 @@ pub const Node = struct {
         return casefold_data.fold(cp);
     }
 
+    /// An equality key for ECMA-262 Canonicalize (22.2.2.7.3): two characters
+    /// get the same key exactly when Canonicalize maps them to the same
+    /// character, which is all a backreference compares (22.2.2.7.2).
+    ///
+    /// With `u` or `v`, Canonicalize is simple case folding. Without them it is
+    /// toUppercase kept to a single code unit, and that groups characters the
+    /// same way as simple case folding except for the characters that
+    /// `legacyCanonicalizeKeepsSelf` lists, which only match themselves.
+    pub fn canonicalizeKey(cp: u21, mode: ClassSet.CaseFoldMode) u21 {
+        return switch (mode) {
+            .none => cp,
+            .unicode => casefold_data.fold(cp),
+            .legacy => if (cp > 0xFFFF or legacyCanonicalizeKeepsSelf(cp)) cp else casefold_data.fold(cp),
+        };
+    }
+
+    /// Code units that non-`u` Canonicalize maps to themselves although simple
+    /// case folding joins them to another class. The list was checked against
+    /// the spec algorithm over every BMP code unit for the Unicode data in
+    /// `unicode_casefold_data.zig`; re-derive it if that table is regenerated.
+    fn legacyCanonicalizeKeepsSelf(cp: u21) bool {
+        return switch (cp) {
+            // Step 9: toUppercase maps a non-ASCII character to ASCII (ſ -> S).
+            0x017F,
+            // toUppercase is the character itself, but simple case folding joins
+            // it to a class whose uppercase is another character (ϴ, ẞ, Ω, K, Å).
+            0x03F4,
+            0x1E9E,
+            0x2126,
+            0x212A,
+            0x212B,
+            // Step 7: toUppercase has more than one code point, so the character
+            // is its own canonical form; both members of each such class.
+            0x00DF,
+            0x0390,
+            0x03B0,
+            0x1F80...0x1FAF,
+            0x1FB3,
+            0x1FBC,
+            0x1FC3,
+            0x1FCC,
+            0x1FD3,
+            0x1FE3,
+            0x1FF3,
+            0x1FFC,
+            0xFB05,
+            0xFB06,
+            => true,
+            else => false,
+        };
+    }
+
     /// Match a `\q{...}` string (a sequence of code points) at `input[start..]`,
     /// returning the end byte position or null.
     fn matchStringItem(input: []const u8, start: usize, s: []const u21, fold_mode: ClassSet.CaseFoldMode) ?usize {
@@ -731,4 +783,29 @@ test "repeat bounds" {
     const between_1_5 = RepeatBounds.between(1, 5);
     try std.testing.expectEqual(@as(usize, 1), between_1_5.min);
     try std.testing.expectEqual(@as(usize, 5), between_1_5.max.?);
+}
+
+test "canonicalizeKey follows ECMAScript Canonicalize with and without u" {
+    const key = Node.canonicalizeKey;
+    // Pairs that Canonicalize joins in both modes.
+    for ([_][2]u21{ .{ 0x0101, 0x0100 }, .{ 0x03C3, 0x03C2 }, .{ 0x03C3, 0x03A3 }, .{ 0x00B5, 0x039C }, .{ 0x01C6, 0x01C5 }, .{ 'a', 'A' } }) |p| {
+        try std.testing.expectEqual(key(p[0], .legacy), key(p[1], .legacy));
+        try std.testing.expectEqual(key(p[0], .unicode), key(p[1], .unicode));
+    }
+    // Pairs that only simple case folding (u, v) joins.
+    for ([_][2]u21{ .{ 0x212A, 'k' }, .{ 0x017F, 's' }, .{ 0x00DF, 0x1E9E }, .{ 0x2126, 0x03C9 }, .{ 0x212B, 0x00E5 }, .{ 0x03F4, 0x03B8 } }) |p| {
+        try std.testing.expectEqual(key(p[0], .unicode), key(p[1], .unicode));
+        try std.testing.expect(key(p[0], .legacy) != key(p[1], .legacy));
+    }
+    // Without u these keep themselves although simple case folding moves them.
+    for ([_]u21{ 0x017F, 0x03F4, 0x1E9E, 0x2126, 0x212A, 0x212B }) |cp| {
+        try std.testing.expect(casefold_data.fold(cp) != cp);
+        try std.testing.expectEqual(cp, key(cp, .legacy));
+    }
+    // Characters whose uppercase has more than one code point are their own
+    // canonical form without u.
+    for ([_]u21{ 0x00DF, 0x0390, 0x03B0, 0x1F80, 0x1F88, 0x1FAF, 0x1FB3, 0x1FBC, 0x1FF3, 0x1FFC, 0xFB05, 0xFB06 }) |cp| {
+        try std.testing.expectEqual(cp, key(cp, .legacy));
+    }
+    try std.testing.expectEqual(@as(u21, 0x10428), key(0x10400, .unicode));
 }
