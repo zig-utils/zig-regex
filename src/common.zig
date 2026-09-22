@@ -73,6 +73,34 @@ pub fn isEcmaLineTerminator(cp: unicode.Codepoint) bool {
     return cp == '\n' or cp == '\r' or cp == 0x2028 or cp == 0x2029;
 }
 
+/// Whether U+2028 or U+2029 (WTF-8 `E2 80 A8` / `E2 80 A9`) starts at `i`.
+pub fn isLsPsAt(input: []const u8, i: usize) bool {
+    return i + 2 < input.len and input[i] == 0xE2 and input[i + 1] == 0x80 and
+        (input[i + 2] == 0xA8 or input[i + 2] == 0xA9);
+}
+
+/// Multiline `^` holds at `pos` when the character before it is a line
+/// terminator (ECMA-262 22.2.2.4 CompileAssertion). ECMAScript's
+/// LineTerminator (12.3) is LF, CR, U+2028 and U+2029; other dialects keep
+/// the LF-only rule.
+pub fn lineTerminatorBefore(input: []const u8, pos: usize, flags: CompileFlags) bool {
+    if (pos == 0 or pos > input.len) return false;
+    const b = input[pos - 1];
+    if (b == '\n') return true;
+    if (!flags.ecmascript) return false;
+    return b == '\r' or ((b == 0xA8 or b == 0xA9) and pos >= 3 and isLsPsAt(input, pos - 3));
+}
+
+/// Multiline `$` holds at `pos` when the character at it is a line
+/// terminator; see `lineTerminatorBefore`.
+pub fn lineTerminatorAt(input: []const u8, pos: usize, flags: CompileFlags) bool {
+    if (pos >= input.len) return false;
+    const b = input[pos];
+    if (b == '\n') return true;
+    if (!flags.ecmascript) return false;
+    return b == '\r' or isLsPsAt(input, pos);
+}
+
 pub fn isHighSurrogate(cp: unicode.Codepoint) bool {
     return cp >= 0xD800 and cp <= 0xDBFF;
 }

@@ -408,14 +408,8 @@ pub const VM = struct {
                     const anchor_type = transition.data.anchor;
                     // Check if anchor matches at current position
                     const anchor_matches = switch (anchor_type) {
-                        .start_line => if (self.flags.multiline)
-                            pos == 0 or (pos > 0 and input[pos - 1] == '\n')
-                        else
-                            pos == 0,
-                        .end_line => if (self.flags.multiline)
-                            pos == input.len or (pos < input.len and input[pos] == '\n')
-                        else
-                            pos == input.len,
+                        .start_line => pos == 0 or (self.flags.multiline and common.lineTerminatorBefore(input, pos, self.flags)),
+                        .end_line => pos == input.len or (self.flags.multiline and common.lineTerminatorAt(input, pos, self.flags)),
                         .start_text => pos == 0,
                         .end_text => pos == input.len,
                         .word_boundary => self.isWordBoundary(input, pos),

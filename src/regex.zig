@@ -426,8 +426,8 @@ pub const Regex = struct {
     /// NFA's anchor evaluation (vm.zig), including multiline `^`/`$`.
     fn anchorHolds(self: *const Regex, a: ast.AnchorType, input: []const u8, pos: usize) bool {
         return switch (a) {
-            .start_line => if (self.flags.multiline) (pos == 0 or input[pos - 1] == '\n') else pos == 0,
-            .end_line => if (self.flags.multiline) (pos == input.len or input[pos] == '\n') else pos == input.len,
+            .start_line => pos == 0 or (self.flags.multiline and common.lineTerminatorBefore(input, pos, self.flags)),
+            .end_line => pos == input.len or (self.flags.multiline and common.lineTerminatorAt(input, pos, self.flags)),
             .start_text => pos == 0,
             .end_text => pos == input.len,
             .word_boundary => isWordBoundaryAt(input, pos),
@@ -640,9 +640,20 @@ pub const Regex = struct {
     fn nextLineStart(self: *const Regex, input: []const u8, pos: usize) ?usize {
         if (pos == 0) return 0;
         if (!self.flags.multiline) return null; // only line start is 0
-        const nl = std.mem.indexOfScalarPos(u8, input, pos - 1, '\n') orelse return null;
-        const s = nl + 1;
-        return if (s <= input.len) s else null;
+        if (!self.flags.ecmascript) {
+            const nl = std.mem.indexOfScalarPos(u8, input, pos - 1, '\n') orelse return null;
+            const s = nl + 1;
+            return if (s <= input.len) s else null;
+        }
+        // ECMAScript line terminators also include CR, U+2028 and U+2029, whose
+        // WTF-8 encodings end in A8/A9. Those bytes also end other characters,
+        // so each candidate is confirmed; the scan only moves forward.
+        var i = pos - 1;
+        while (std.mem.indexOfAnyPos(u8, input, i, "\n\r\xA8\xA9")) |t| {
+            if (common.lineTerminatorBefore(input, t + 1, self.flags)) return t + 1;
+            i = t + 1;
+        }
+        return null;
     }
 
     /// Next start to try after a failed DFA match at `scan`, where `stop` is the
@@ -3419,4 +3430,135 @@ test "nested class-set compilation rolls back every allocation failure" {
             defer compiled.deinit();
         }
     }.run, .{});
+}
+
+// ECMAScript multiline ^ and $ (22.2.2.4) treat every LineTerminator (12.3) --
+// LF, CR, U+2028, U+2029 -- as a line boundary, in every engine: the lazy DFA
+// (including terminators it consumes mid-scan), the VM behind findFrom, the
+// backtracker and the bounded-literal path. Each row was checked against node
+// v24.4.1, with node's UTF-16 indices converted to byte offsets (zig-regex#28).
+const EcmaLineOp = enum { find, from, all, is_match };
+const EcmaLineCase = struct {
+    op: EcmaLineOp,
+    pattern: []const u8,
+    multiline: bool,
+    dot_all: bool = false,
+    input: []const u8,
+    from: usize = 0,
+    span: ?[2]usize = null,
+    spans: []const [2]usize = &.{},
+    matches: bool = false,
+};
+
+const ecma_line_cases = [_]EcmaLineCase{
+    // DFA: CR before ^
+    .{ .op = .find, .pattern = "^b", .multiline = true, .input = "a\rb", .span = .{ 2, 3 } },
+    // VM: findFrom past the CR
+    .{ .op = .from, .pattern = "^b", .multiline = true, .input = "a\rb", .from = 1, .span = .{ 2, 3 } },
+    // backtracker
+    .{ .op = .find, .pattern = "(?=b)^b", .multiline = true, .input = "a\rb", .span = .{ 2, 3 } },
+    // bounded literal
+    .{ .op = .find, .pattern = "^bc", .multiline = true, .input = "a\rbc", .span = .{ 2, 4 } },
+    // DFA: PS look-ahead for $
+    .{ .op = .find, .pattern = "a$", .multiline = true, .input = "a\u{2029}b", .span = .{ 0, 1 } },
+    // DFA: LS before ^
+    .{ .op = .find, .pattern = "^b", .multiline = true, .input = "a\u{2028}b", .span = .{ 4, 5 } },
+    // DFA consumes LS mid-scan
+    .{ .op = .find, .pattern = "x.^b", .multiline = true, .dot_all = true, .input = "x\u{2028}b", .span = .{ 0, 5 } },
+    // DFA consumes PS mid-scan
+    .{ .op = .find, .pattern = "x.^b", .multiline = true, .dot_all = true, .input = "x\u{2029}b", .span = .{ 0, 5 } },
+    // DFA consumes CR mid-scan
+    .{ .op = .find, .pattern = "x.^b", .multiline = true, .dot_all = true, .input = "x\rb", .span = .{ 0, 3 } },
+    // look-alike: e9 ends in A9
+    .{ .op = .find, .pattern = "x.^b", .multiline = true, .dot_all = true, .input = "x\u{E9}b", .span = null },
+    // look-alike: E2 82 AC
+    .{ .op = .find, .pattern = "x.^b", .multiline = true, .dot_all = true, .input = "x\u{20AC}b", .span = null },
+    // look-alike: C2 A8
+    .{ .op = .find, .pattern = "x.^b", .multiline = true, .dot_all = true, .input = "x\u{A8}b", .span = null },
+    // backtracker $ before CR
+    .{ .op = .find, .pattern = "a(?=$)", .multiline = true, .input = "a\r", .span = .{ 0, 1 } },
+    // backtracker $ before LS
+    .{ .op = .find, .pattern = "a(?=$)", .multiline = true, .input = "a\u{2028}", .span = .{ 0, 1 } },
+    // modifier turns multiline on
+    .{ .op = .find, .pattern = "(?m:a$)", .multiline = false, .input = "a\rb", .span = .{ 0, 1 } },
+    // modifier turns multiline off
+    .{ .op = .find, .pattern = "(?-m:a$)", .multiline = true, .input = "a\rb", .span = null },
+    // every terminator
+    .{ .op = .all, .pattern = "^\\w$", .multiline = true, .input = "a\r\nb\rc\u{2028}d", .spans = &.{ .{ 0, 1 }, .{ 3, 4 }, .{ 5, 6 }, .{ 9, 10 } } },
+    // line starts around LS
+    .{ .op = .all, .pattern = "^", .multiline = true, .input = "\u{2028}", .spans = &.{ .{ 0, 0 }, .{ 3, 3 } } },
+    // empty lines around CRLF
+    .{ .op = .all, .pattern = "^$", .multiline = true, .input = "\r\n", .spans = &.{ .{ 0, 0 }, .{ 1, 1 }, .{ 2, 2 } } },
+    // search DFA
+    .{ .op = .is_match, .pattern = "^b", .multiline = true, .input = "a\u{2028}b", .matches = true },
+    // search DFA $ before CR
+    .{ .op = .is_match, .pattern = "a$", .multiline = true, .input = "a\r", .matches = true },
+    // $ before CR is the first line end
+    .{ .op = .find, .pattern = ".$", .multiline = true, .input = "ab\rcd", .span = .{ 1, 2 } },
+    // no m: ^ is only the start
+    .{ .op = .find, .pattern = "^b", .multiline = false, .input = "a\rb", .span = null },
+};
+
+fn expectEcmaLineCase(m: *Regex.Matcher, c: EcmaLineCase) !void {
+    const allocator = std.testing.allocator;
+    switch (c.op) {
+        .find, .from => {
+            var found = if (c.op == .find) try m.find(c.input) else try m.findFrom(c.input, c.from);
+            defer if (found) |*f| f.deinit(allocator);
+            if (c.span) |want| {
+                const f = found orelse {
+                    std.debug.print("no match: {s} on {any}\n", .{ c.pattern, c.input });
+                    return error.TestExpectedMatch;
+                };
+                try std.testing.expectEqual(want, [2]usize{ f.start, f.end });
+            } else if (found) |f| {
+                std.debug.print("unexpected match {d}..{d}: {s} on {any}\n", .{ f.start, f.end, c.pattern, c.input });
+                return error.TestUnexpectedMatch;
+            }
+        },
+        .all => {
+            const all = try m.findAll(allocator, c.input);
+            defer {
+                for (all) |*f| f.deinit(allocator);
+                allocator.free(all);
+            }
+            try std.testing.expectEqual(c.spans.len, all.len);
+            for (c.spans, all) |want, f| try std.testing.expectEqual(want, [2]usize{ f.start, f.end });
+        },
+        .is_match => try std.testing.expectEqual(c.matches, try m.isMatch(c.input)),
+    }
+}
+
+test "ECMAScript multiline anchors treat CR, U+2028 and U+2029 as line terminators" {
+    const allocator = std.testing.allocator;
+    for (ecma_line_cases) |c| {
+        var regex = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true, .multiline = c.multiline, .dot_all = c.dot_all });
+        defer regex.deinit();
+        // Twice on the same matcher, so the lazy DFA's cached transitions are
+        // exercised as well as freshly computed ones.
+        var m = regex.matcher();
+        defer m.deinit();
+        try expectEcmaLineCase(&m, c);
+        try expectEcmaLineCase(&m, c);
+    }
+}
+
+test "non-ECMAScript multiline anchors keep the LF-only rule" {
+    const allocator = std.testing.allocator;
+    const controls = [_]EcmaLineCase{
+        .{ .op = .find, .pattern = "^b", .multiline = true, .input = "a\rb" },
+        .{ .op = .from, .pattern = "^b", .multiline = true, .input = "a\rb", .from = 1 },
+        .{ .op = .find, .pattern = "(?=b)^b", .multiline = true, .input = "a\rb" },
+        .{ .op = .find, .pattern = "^bc", .multiline = true, .input = "a\rbc" },
+        .{ .op = .find, .pattern = "a$", .multiline = true, .input = "a\u{2028}b" },
+        .{ .op = .is_match, .pattern = "^b", .multiline = true, .input = "a\u{2028}b", .matches = false },
+        .{ .op = .find, .pattern = "^b", .multiline = true, .input = "a\nb", .span = .{ 2, 3 } },
+    };
+    for (controls) |c| {
+        var regex = try Regex.compileWithFlags(allocator, c.pattern, .{ .multiline = c.multiline });
+        defer regex.deinit();
+        var m = regex.matcher();
+        defer m.deinit();
+        try expectEcmaLineCase(&m, c);
+    }
 }

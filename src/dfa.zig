@@ -18,6 +18,12 @@
 //! the boundary assertions are a pure function of (stored flags, current byte),
 //! every transition stays keyed on (state, byte) and remains cacheable.
 //!
+//! ECMAScript's multiline `^`/`$` also treat CR, U+2028 and U+2029 as line
+//! terminators. U+2028/U+2029 are three WTF-8 bytes (`E2 80 A8/A9`), so a
+//! second virtual symbol (`LT_LEAD`, column 257) stands for an `E2` that starts
+//! one — giving `$` its look-ahead — and two transient look-behind bits carry
+//! the triple through its last byte, where `^` becomes true.
+//!
 //! Match boundaries are identical to `vm.matchAt`: from a start position it
 //! returns the end of the longest match, tracking the last accepting position.
 
@@ -39,22 +45,30 @@ const DEAD: i32 = -1;
 const ACCEPT_BIT: i32 = 1 << 30;
 const STATE_MASK: i32 = ACCEPT_BIT - 1;
 
-/// Transition/accept tables are this wide: 256 byte values plus one virtual
-/// end-of-input symbol at index 256.
+/// Transition/accept tables are this wide: 256 byte values, a virtual
+/// end-of-input symbol at index 256, and at 257 a virtual symbol for an `E2`
+/// byte that starts U+2028 or U+2029 (read only when `ecma_lines` is set).
 const EOF: usize = 256;
-const ALPHA: usize = 257;
+const LT_LEAD: usize = 257;
+const ALPHA: usize = 258;
 
 /// Cap on materialized DFA states; beyond this we bail to the NFA. Pathological
 /// patterns (huge bounded repeats, many alternations) can blow up the subset
 /// construction, so this keeps memory and build time bounded. Assertion context
-/// can multiply states by up to the 8 look-behind combinations, so the cap is a
-/// little higher than the assertion-free engine needed.
+/// can multiply states by the look-behind combinations (8, and at most 32 with
+/// ECMAScript line anchors, where the two transient bits occur only inside a
+/// U+2028/U+2029 triple), so the cap is a little higher than the assertion-free
+/// engine needed.
 const MAX_STATES: usize = 16384;
 
 // Look-behind flag bits stored per DFA state (the context on entry).
 const FLAG_START: u8 = 1; // position 0 of the text
 const FLAG_PREV_WORD: u8 = 2; // previous byte was a word byte
-const FLAG_PREV_NL: u8 = 4; // previous byte was '\n'
+const FLAG_PREV_NL: u8 = 4; // previous character was a line terminator
+// Under `ecma_lines` only: inside U+2028/U+2029, after its first (LT2) or
+// second (LT1) byte. The third byte turns them into FLAG_PREV_NL.
+const FLAG_LT2: u8 = 8;
+const FLAG_LT1: u8 = 16;
 
 pub const LazyDfa = struct {
     allocator: std.mem.Allocator,
@@ -64,6 +78,8 @@ pub const LazyDfa = struct {
     word_count: usize, // bytes per NFA-state-set bitset
     key_len: usize, // word_count + 1 flag byte
     anchored: bool, // NFA contains an anchor transition (else look-behind flags are inert)
+    // ECMAScript multiline `^`/`$`: CR, U+2028 and U+2029 end lines as '\n' does.
+    ecma_lines: bool,
     unanchored: bool, // search mode: every step re-seeds the start (implicit `.*` prefix)
     start_closure: []u8, // epsilon closure of the NFA start state (the re-seed set)
 
@@ -87,7 +103,7 @@ pub const LazyDfa = struct {
     keys: std.ArrayList([]u8),
     map: std.StringHashMapUnmanaged(i32), // key bytes -> dfa index
 
-    start_cache: [8]i32, // start state per look-behind flag combination
+    start_cache: [32]i32, // start state per look-behind flag combination
     overflow: bool,
 
     // scratch reused across steps
@@ -113,14 +129,14 @@ pub const LazyDfa = struct {
         // Look-behind flags only matter when some state has an anchor transition;
         // otherwise keeping them at 0 avoids splitting DFA states by context.
         var anchored = false;
+        var line_anchor = false;
         for (nfa.states.items) |st| {
             for (st.transitions.items) |t| {
                 if (t.transition_type == .anchor) {
                     anchored = true;
-                    break;
+                    if (t.data.anchor == .start_line or t.data.anchor == .end_line) line_anchor = true;
                 }
             }
-            if (anchored) break;
         }
         var self: LazyDfa = .{
             .allocator = allocator,
@@ -130,6 +146,7 @@ pub const LazyDfa = struct {
             .word_count = word_count,
             .key_len = word_count + 1,
             .anchored = anchored,
+            .ecma_lines = flags.ecmascript and flags.multiline and line_anchor,
             .unanchored = unanchored,
             .start_closure = try allocator.alloc(u8, word_count),
             .trans = .empty,
@@ -139,7 +156,7 @@ pub const LazyDfa = struct {
             .accel_set = .empty,
             .keys = .empty,
             .map = .{},
-            .start_cache = .{ UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED, UNCOMPUTED },
+            .start_cache = @splat(UNCOMPUTED),
             .overflow = false,
             .move_buf = try allocator.alloc(u8, word_count),
             .closure_buf = try allocator.alloc(u8, word_count),
@@ -199,8 +216,11 @@ pub const LazyDfa = struct {
         const begin_text = at_start;
         const end_text = at_eof;
         const begin_line = if (self.flags.multiline) (at_start or prev_nl) else at_start;
-        const end_line = if (self.flags.multiline) (at_eof or sym == '\n') else at_eof;
-        const cur_word = !at_eof and isWordByte(@intCast(sym));
+        const end_line = if (self.flags.multiline)
+            (at_eof or sym == '\n' or (self.ecma_lines and (sym == '\r' or sym == LT_LEAD)))
+        else
+            at_eof;
+        const cur_word = sym < 256 and isWordByte(@intCast(sym));
         const word_boundary = prev_word != cur_word;
 
         var m: u8 = 0;
@@ -322,7 +342,7 @@ pub const LazyDfa = struct {
 
         var result: i32 = DEAD;
         if (sym != EOF) {
-            const c: u8 = @intCast(sym);
+            const c: u8 = if (sym == LT_LEAD) 0xE2 else @intCast(sym);
             // Move on the byte from the anchor-closed set.
             @memset(self.move_buf, 0);
             var any_move = false;
@@ -348,6 +368,17 @@ pub const LazyDfa = struct {
                 var new_flags: u8 = 0; // not at start after consuming a byte
                 if (isWordByte(c)) new_flags |= FLAG_PREV_WORD;
                 if (c == '\n') new_flags |= FLAG_PREV_NL;
+                if (self.ecma_lines) {
+                    if (c == '\r') {
+                        new_flags |= FLAG_PREV_NL;
+                    } else if (sym == LT_LEAD) {
+                        new_flags |= FLAG_LT2;
+                    } else if (flags & FLAG_LT2 != 0 and c == 0x80) {
+                        new_flags |= FLAG_LT1;
+                    } else if (flags & FLAG_LT1 != 0 and (c == 0xA8 or c == 0xA9)) {
+                        new_flags |= FLAG_PREV_NL;
+                    }
+                }
                 // Store the epsilon-only closure of the moved set; its anchors
                 // are evaluated on the next step.
                 try self.closure(self.move_buf, 0, self.closure_buf);
@@ -374,8 +405,27 @@ pub const LazyDfa = struct {
             const prev = input[start - 1];
             if (isWordByte(prev)) f |= FLAG_PREV_WORD;
             if (prev == '\n') f |= FLAG_PREV_NL;
+            if (self.ecma_lines) {
+                // A scan can begin inside U+2028/U+2029; the bits carry `^` to
+                // the byte after its last one.
+                if (common.lineTerminatorBefore(input, start, self.flags)) {
+                    f |= FLAG_PREV_NL;
+                } else if (common.isLsPsAt(input, start - 1)) {
+                    f |= FLAG_LT2;
+                } else if (start >= 2 and common.isLsPsAt(input, start - 2)) {
+                    f |= FLAG_LT1;
+                }
+            }
         }
         return f;
+    }
+
+    /// The table column for `input[p]`: `LT_LEAD` for an `E2` that starts
+    /// U+2028/U+2029 when ECMAScript line anchors need to see it, else the byte.
+    inline fn symAt(self: *const LazyDfa, input: []const u8, p: usize) usize {
+        const c = input[p];
+        if (c == 0xE2 and self.ecma_lines and common.isLsPsAt(input, p)) return LT_LEAD;
+        return c;
     }
 
     fn getStart(self: *LazyDfa, flags: u8) Error!i32 {
@@ -428,7 +478,7 @@ pub const LazyDfa = struct {
         var trans = self.trans.items;
         var acc = self.acc.items;
         while (true) {
-            const sym: usize = if (p < input.len) input[p] else EOF;
+            const sym: usize = if (p < input.len) self.symAt(input, p) else EOF;
             const row = @as(usize, @intCast(s)) * ALPHA + sym;
             var t = trans[row];
             if (t == UNCOMPUTED) {
@@ -477,7 +527,7 @@ pub const LazyDfa = struct {
         var trans = self.trans.items;
         var acc = self.acc.items;
         while (true) {
-            const sym: usize = if (p < input.len) input[p] else EOF;
+            const sym: usize = if (p < input.len) self.symAt(input, p) else EOF;
             const row = @as(usize, @intCast(s)) * ALPHA + sym;
             var t = trans[row];
             if (t == UNCOMPUTED) {
@@ -535,7 +585,10 @@ pub const LazyDfa = struct {
             const row = s * ALPHA + c;
             if (self.trans.items[row] == UNCOMPUTED) _ = try self.computeStep(@intCast(s), c);
             const t = self.trans.items[row];
-            const is_self = t >= 0 and (t & STATE_MASK) == @as(i32, @intCast(s)) and !self.acc.items[row];
+            // An `E2` may start U+2028/U+2029, whose column is `LT_LEAD`: never
+            // skip one blindly.
+            const is_self = t >= 0 and (t & STATE_MASK) == @as(i32, @intCast(s)) and !self.acc.items[row] and
+                !(self.ecma_lines and c == 0xE2);
             set[c] = is_self;
             if (is_self) loops += 1;
         }
@@ -657,7 +710,7 @@ pub const LazyDfa = struct {
                 const set = &self.accel_set.items[@intCast(s)];
                 while (p < le and set[input[p]]) p += 1;
             }
-            const sym: usize = if (p < le) input[p] else EOF;
+            const sym: usize = if (p < le) self.symAt(input[0..le], p) else EOF;
             const row = @as(usize, @intCast(s)) * ALPHA + sym;
             var t = trans[row];
             if (t == UNCOMPUTED) {

@@ -1179,14 +1179,8 @@ pub const BacktrackEngine = struct {
 
     fn matchAnchor(self: *BacktrackEngine, anchor_type: ast.AnchorType, pos: usize) ?usize {
         const matches = switch (anchor_type) {
-            .start_line => if (self.flags.multiline)
-                pos == 0 or (pos > 0 and self.input[pos - 1] == '\n')
-            else
-                pos == 0,
-            .end_line => if (self.flags.multiline)
-                pos == self.input.len or (pos < self.input.len and self.input[pos] == '\n')
-            else
-                pos == self.input.len,
+            .start_line => pos == 0 or (self.flags.multiline and common.lineTerminatorBefore(self.input, pos, self.flags)),
+            .end_line => pos == self.input.len or (self.flags.multiline and common.lineTerminatorAt(self.input, pos, self.flags)),
             .start_text => pos == 0,
             .end_text => pos == self.input.len,
             .word_boundary => self.isWordBoundary(pos),
