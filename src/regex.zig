@@ -129,12 +129,6 @@ pub const Regex = struct {
         var tree = try p.parse();
         errdefer tree.deinit(); // Free AST if compilation fails
 
-        // SECURITY: Analyze pattern for vulnerabilities (ReDoS, nested quantifiers, etc.)
-        // Reject patterns that are too dangerous (critical risk only)
-        // Medium and high risk patterns are allowed but will be protected by runtime step counter
-        const pattern_analyzer = @import("pattern_analyzer.zig");
-        try pattern_analyzer.analyzeAndValidate(allocator, tree.root, .high);
-
         // Store owned copy of pattern
         const owned_pattern = try allocator.dupe(u8, pattern);
         errdefer allocator.free(owned_pattern);
@@ -174,9 +168,23 @@ pub const Regex = struct {
         var needs_backtracking = requiresBacktracking(tree.root, flags);
         if (!needs_backtracking and tree.capture_count > 0) {
             onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
-            errdefer if (onepass_plan) |pl| pl.deinit();
             if (onepass_plan == null and hasAmbiguousCaptureBoundary(tree.root, flags))
                 needs_backtracking = true;
+        }
+        errdefer if (onepass_plan) |pl| pl.deinit();
+
+        // SECURITY: reject patterns whose analysis is critical (nested
+        // quantifiers and the like); medium and high risk patterns are allowed
+        // and bounded by the backtracker's step counter. The danger is
+        // exponential backtracking, which only the backtracking engine can do:
+        // the Thompson engines (VM, lazy DFA, one-pass) run in time linear in the
+        // input whatever the pattern, and the compiler caps their size
+        // (`compiler.max_nfa_states`). So an ECMAScript pattern bound for them is
+        // not refused -- /(a*)*/ is valid JavaScript -- while other dialects keep
+        // refusing critical patterns on every engine.
+        if (!flags.ecmascript or needs_backtracking) {
+            const pattern_analyzer = @import("pattern_analyzer.zig");
+            try pattern_analyzer.analyzeAndValidate(allocator, tree.root, .high);
         }
 
         if (needs_backtracking) {
@@ -3670,4 +3678,42 @@ test "ECMAScript captures and match ends are leftmost-first" {
             try expectLeftmostFirst(c, again);
         }
     }
+}
+
+test "ECMAScript patterns bound for linear engines are not refused as ReDoS risks" {
+    const allocator = std.testing.allocator;
+    // Nested quantifiers are valid JavaScript, and the Thompson engines match
+    // them in linear time; node v24.4.1's answers.
+    {
+        var regex = try Regex.compileWithFlags(allocator, "(a*)*", .{ .ecmascript = true });
+        defer regex.deinit();
+        try std.testing.expectEqual(EngineType.thompson_nfa, regex.engine_type);
+        var m = (try regex.find("b")).?;
+        defer m.deinit(allocator);
+        try std.testing.expectEqual([2]usize{ 0, 0 }, [2]usize{ m.start, m.end });
+        try std.testing.expect(!m.captures_present[0]);
+    }
+    {
+        var regex = try Regex.compileWithFlags(allocator, "(a+)+", .{ .ecmascript = true });
+        defer regex.deinit();
+        var m = (try regex.find("aaa")).?;
+        defer m.deinit(allocator);
+        try std.testing.expectEqualStrings("aaa", m.slice);
+        try std.testing.expectEqualStrings("aaa", m.captures[0]);
+    }
+    {
+        var regex = try Regex.compileWithFlags(allocator, "(?:a*)+b", .{ .ecmascript = true });
+        defer regex.deinit();
+        var m = (try regex.find("aab")).?;
+        defer m.deinit(allocator);
+        try std.testing.expectEqualStrings("aab", m.slice);
+    }
+    // A pattern the backtracker would run keeps the refusal, and so does
+    // every dialect other than ECMAScript.
+    try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(a+)+\\1", .{ .ecmascript = true }));
+    try std.testing.expectError(RegexError.PatternTooComplex, Regex.compile(allocator, "(a*)*"));
+    // Nested counted repeats expand past the NFA size cap. The cap is
+    // ECMAScript-only, so other dialects still build the million states this
+    // pattern needs -- there the analyzer, not a size limit, is the guard.
+    try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(a{1000}){1000}", .{ .ecmascript = true }));
 }

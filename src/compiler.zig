@@ -141,12 +141,23 @@ pub const Fragment = struct {
     accept: StateId,
 };
 
+/// The most states an ECMAScript NFA may have. Counted repeats expand into
+/// copies of their operand, so nested ones multiply: `(a{10000}){10000}` would
+/// need about 10^8 states. ECMAScript patterns bound for the Thompson engines
+/// skip the pattern analyzer (their matching is linear), so this caps their
+/// compile time and memory instead -- a state and its edges take a couple of
+/// hundred bytes -- and a pattern over it fails with PatternTooComplex, as other
+/// engines report too-large patterns. Other dialects keep the analyzer's
+/// refusal and no cap, so large keyword alternations still compile there.
+pub const max_nfa_states: usize = 200_000;
+
 /// Non-deterministic Finite Automaton
 pub const NFA = struct {
     states: std.ArrayList(State),
     start_state: StateId,
     accept_states: std.ArrayList(StateId),
     allocator: std.mem.Allocator,
+    max_states: usize = std.math.maxInt(usize),
 
     pub fn init(allocator: std.mem.Allocator) NFA {
         return .{
@@ -167,6 +178,7 @@ pub const NFA = struct {
 
     pub fn addState(self: *NFA) !StateId {
         const id = self.states.items.len;
+        if (id >= self.max_states) return RegexError.PatternTooComplex;
         try self.states.append(self.allocator, State.init(self.allocator, id));
         return id;
     }
@@ -193,8 +205,10 @@ pub const Compiler = struct {
     }
 
     pub fn initWithFlags(allocator: std.mem.Allocator, flags: common.CompileFlags) Compiler {
+        var nfa = NFA.init(allocator);
+        if (flags.ecmascript) nfa.max_states = max_nfa_states;
         return .{
-            .nfa = NFA.init(allocator),
+            .nfa = nfa,
             .allocator = allocator,
             .flags = flags,
         };
