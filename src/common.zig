@@ -64,8 +64,13 @@ pub const CompileFlags = packed struct {
     unicode: bool = false,
     /// The `v` (unicodeSets) flag: character classes use set notation.
     unicode_sets: bool = false,
-    /// ECMAScript-conformance mode: disable PCRE/Perl extensions ECMAScript lacks
-    /// (standalone inline modifiers `(?ims)`, unicode-escaped modifier flags).
+    /// ECMAScript-conformance mode. Parsing: disable PCRE/Perl extensions
+    /// ECMAScript lacks (standalone inline modifiers `(?ims)`, unicode-escaped
+    /// modifier flags). Matching: leftmost-first captures and match ends with
+    /// RepeatMatcher's iteration rules, CR/U+2028/U+2029 as multiline line
+    /// terminators, and Canonicalize for ignoreCase backreferences. Without it
+    /// the Thompson engines stay leftmost-longest, which is also wrong for
+    /// PCRE/Perl (leftmost-first backtrackers) but is left as it was.
     ecmascript: bool = false,
 };
 

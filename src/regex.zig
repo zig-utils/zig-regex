@@ -3562,3 +3562,112 @@ test "non-ECMAScript multiline anchors keep the LF-only rule" {
         try expectEcmaLineCase(&m, c);
     }
 }
+
+// ECMAScript matches and captures follow the spec's backtracking priority
+// (leftmost-first: 22.2.2.3 MatchTwoAlternatives, 22.2.2.3.1 RepeatMatcher),
+// on every engine a pattern can reach: the ordered lazy DFA for the match end,
+// the priority VM for captures, and the VM alone on findFrom. Each row is
+// node v24.4.1's answer for the pattern run with the g flag from `from`
+// (zig-regex#27).
+const LeftmostFirstCase = struct {
+    pattern: []const u8,
+    case_insensitive: bool,
+    input: []const u8,
+    from: usize,
+    expected: ?struct { start: usize, end: usize, captures: []const ?[]const u8 },
+};
+
+const leftmost_first_cases = [_]LeftmostFirstCase{
+    .{ .pattern = "(a|ab)(c|bcd)(d*)", .case_insensitive = false, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "a", "bcd", "" } } },
+    .{ .pattern = "(a|ab)(c|bcd)(d+)?", .case_insensitive = false, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "a", "bcd", null } } },
+    .{ .pattern = "(a|ab)(c|bcd)d?", .case_insensitive = false, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "a", "bcd" } } },
+    .{ .pattern = "^(a|ab)(c|bcd)(d*)$", .case_insensitive = false, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "a", "bcd", "" } } },
+    .{ .pattern = "(a|ab)(c|bcd)(d*)", .case_insensitive = true, .input = "ABCD", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "A", "BCD", "" } } },
+    .{ .pattern = "(a|ab)(c|bcd)(d*)", .case_insensitive = false, .input = "xxabcd", .from = 1, .expected = .{ .start = 2, .end = 6, .captures = &.{ "a", "bcd", "" } } },
+    .{ .pattern = "(x|xy)(z|yzw)(w*)", .case_insensitive = false, .input = "xyzw", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "x", "yzw", "" } } },
+    .{ .pattern = "(a|ab)(c|bcd)", .case_insensitive = false, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "a", "bcd" } } },
+    .{ .pattern = "ab|abcd", .case_insensitive = true, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{} } },
+    .{ .pattern = "ab|abcd", .case_insensitive = false, .input = "abcd abcd", .from = 2, .expected = .{ .start = 5, .end = 7, .captures = &.{} } },
+    .{ .pattern = "(?:ab)?(?:abcd)?", .case_insensitive = false, .input = "abcd", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{} } },
+    .{ .pattern = "(?:ab)?(?:abcd)?", .case_insensitive = false, .input = "xabcd", .from = 1, .expected = .{ .start = 1, .end = 3, .captures = &.{} } },
+    .{ .pattern = "in|instanceof", .case_insensitive = true, .input = "instanceof", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{} } },
+    .{ .pattern = "a*(?:ab)?", .case_insensitive = false, .input = "aab", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{} } },
+    .{ .pattern = "(\\d){2,4}", .case_insensitive = false, .input = "12", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{"2"} } },
+    .{ .pattern = "(\\d){2,4}", .case_insensitive = false, .input = "12345", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{"4"} } },
+    .{ .pattern = "([a-z]){1,3}", .case_insensitive = false, .input = "ab1", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{"b"} } },
+    .{ .pattern = "(a){1,3}", .case_insensitive = false, .input = "a", .from = 0, .expected = .{ .start = 0, .end = 1, .captures = &.{"a"} } },
+    .{ .pattern = "(a){2,3}", .case_insensitive = false, .input = "aa", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{"a"} } },
+    .{ .pattern = "(a*){3}", .case_insensitive = false, .input = "aa", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{""} } },
+    .{ .pattern = "(a*){2,3}", .case_insensitive = false, .input = "aa", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{""} } },
+    .{ .pattern = "(a?){2}", .case_insensitive = false, .input = "a", .from = 0, .expected = .{ .start = 0, .end = 1, .captures = &.{""} } },
+    .{ .pattern = "(?:(a)?b){1,3}", .case_insensitive = false, .input = "abb", .from = 0, .expected = .{ .start = 0, .end = 3, .captures = &.{null} } },
+    .{ .pattern = "(?:(a)?b){2,}", .case_insensitive = false, .input = "ababb", .from = 0, .expected = .{ .start = 0, .end = 5, .captures = &.{null} } },
+    .{ .pattern = "(a?)+", .case_insensitive = false, .input = "", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{""} } },
+    .{ .pattern = "(a?)*", .case_insensitive = false, .input = "b", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{null} } },
+    .{ .pattern = "(a*)?", .case_insensitive = false, .input = "b", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{null} } },
+    .{ .pattern = "(?:(a)*){2}", .case_insensitive = false, .input = "a", .from = 0, .expected = .{ .start = 0, .end = 1, .captures = &.{null} } },
+    .{ .pattern = "b*((?:a?b?)*)", .case_insensitive = false, .input = "bab", .from = 0, .expected = .{ .start = 0, .end = 3, .captures = &.{"ab"} } },
+    .{ .pattern = "((a?){2})?", .case_insensitive = false, .input = "", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{ null, null } } },
+    .{ .pattern = "(?:(a)|b)*", .case_insensitive = false, .input = "ab", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{null} } },
+    .{ .pattern = "(a)*b", .case_insensitive = false, .input = "aab", .from = 0, .expected = .{ .start = 0, .end = 3, .captures = &.{"a"} } },
+    .{ .pattern = "(?:(a)b)*", .case_insensitive = false, .input = "abab", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{"a"} } },
+    .{ .pattern = "(z)((a+)?(b+)?(c))*", .case_insensitive = false, .input = "zaacbbbcac", .from = 0, .expected = .{ .start = 0, .end = 10, .captures = &.{ "z", "ac", "a", null, "c" } } },
+    .{ .pattern = "((a)|b)+", .case_insensitive = false, .input = "ab", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{ "b", null } } },
+    .{ .pattern = "(\\w+)\\s(\\w+)", .case_insensitive = false, .input = "hello big world", .from = 0, .expected = .{ .start = 0, .end = 9, .captures = &.{ "hello", "big" } } },
+    .{ .pattern = "^(\\d+)-(\\d+)$", .case_insensitive = false, .input = "10-20", .from = 0, .expected = .{ .start = 0, .end = 5, .captures = &.{ "10", "20" } } },
+    .{ .pattern = "(a+)(a+)", .case_insensitive = false, .input = "aaaa", .from = 0, .expected = .{ .start = 0, .end = 4, .captures = &.{ "aaa", "a" } } },
+    .{ .pattern = "(a*)(a*)", .case_insensitive = false, .input = "aaa", .from = 0, .expected = .{ .start = 0, .end = 3, .captures = &.{ "aaa", "" } } },
+    .{ .pattern = "x(a|b)*y", .case_insensitive = false, .input = "xababy", .from = 0, .expected = .{ .start = 0, .end = 6, .captures = &.{"b"} } },
+    .{ .pattern = "(.)(.)", .case_insensitive = false, .input = "ab", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{ "a", "b" } } },
+    .{ .pattern = "\\b(\\w)", .case_insensitive = false, .input = " hi", .from = 0, .expected = .{ .start = 1, .end = 2, .captures = &.{"h"} } },
+    .{ .pattern = "(a|b|c)+?", .case_insensitive = false, .input = "abc", .from = 0, .expected = .{ .start = 0, .end = 1, .captures = &.{"a"} } },
+};
+
+fn expectLeftmostFirst(c: LeftmostFirstCase, found: ?Match) !void {
+    const want = c.expected orelse {
+        if (found) |m| {
+            std.debug.print("unexpected match {d}..{d}: /{s}/ on {s}\n", .{ m.start, m.end, c.pattern, c.input });
+            return error.TestUnexpectedMatch;
+        }
+        return;
+    };
+    const m = found orelse {
+        std.debug.print("no match: /{s}/ on {s}\n", .{ c.pattern, c.input });
+        return error.TestExpectedMatch;
+    };
+    if (m.start != want.start or m.end != want.end) {
+        std.debug.print("/{s}/ on {s}: got {d}..{d}, want {d}..{d}\n", .{ c.pattern, c.input, m.start, m.end, want.start, want.end });
+        return error.TestWrongSpan;
+    }
+    for (want.captures, 0..) |cap, i| {
+        const present = if (m.captures_present.len > i) m.captures_present[i] else i < m.captures.len;
+        if (cap) |text| {
+            if (!present or !std.mem.eql(u8, text, m.captures[i])) {
+                std.debug.print("/{s}/ on {s}: group {d} want \"{s}\"\n", .{ c.pattern, c.input, i + 1, text });
+                return error.TestWrongCapture;
+            }
+        } else if (present) {
+            std.debug.print("/{s}/ on {s}: group {d} want undefined, got \"{s}\"\n", .{ c.pattern, c.input, i + 1, m.captures[i] });
+            return error.TestWrongCapture;
+        }
+    }
+}
+
+test "ECMAScript captures and match ends are leftmost-first" {
+    const allocator = std.testing.allocator;
+    for (leftmost_first_cases) |c| {
+        var regex = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true, .case_insensitive = c.case_insensitive });
+        defer regex.deinit();
+        var m = regex.matcher();
+        defer m.deinit();
+        // findFrom (exec with lastIndex) and, from 0, find (the DFA path).
+        var found = try m.findFrom(c.input, c.from);
+        defer if (found) |*f| f.deinit(allocator);
+        try expectLeftmostFirst(c, found);
+        if (c.from == 0) {
+            var again = try regex.find(c.input);
+            defer if (again) |*f| f.deinit(allocator);
+            try expectLeftmostFirst(c, again);
+        }
+    }
+}

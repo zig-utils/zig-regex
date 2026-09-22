@@ -25,6 +25,9 @@ pub const Transition = struct {
     to: StateId,
     data: TransitionData,
     clear_captures: []const usize = &.{},
+    /// ECMAScript only: this edge starts a non-mandatory iteration of the
+    /// quantifier with this loop id (see `State.loop_exit`).
+    enters_loop: ?u32 = null,
 
     pub const TransitionData = union(TransitionType) {
         epsilon: void,
@@ -102,6 +105,11 @@ pub const State = struct {
     is_accepting: bool = false,
     capture_start: ?usize = null, // Capture group start marker
     capture_end: ?usize = null, // Capture group end marker
+    /// ECMAScript only: the end of one iteration of the quantifier with this
+    /// loop id. A path that reaches it having entered that iteration since the
+    /// last consumed byte matched the empty string, and RepeatMatcher
+    /// (22.2.2.3.1) fails such an iteration unless it is mandatory.
+    loop_exit: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator, id: StateId) State {
         return .{
@@ -178,6 +186,7 @@ pub const Compiler = struct {
     nfa: NFA,
     allocator: std.mem.Allocator,
     flags: common.CompileFlags,
+    next_loop: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Compiler {
         return initWithFlags(allocator, .{});
@@ -413,6 +422,24 @@ pub const Compiler = struct {
         const start_state = self.nfa.getState(start);
         const child_accept = self.nfa.getState(child_frag.accept);
 
+        if (self.flags.ecmascript) {
+            // Every iteration clears the atom's captures and may not match
+            // the empty string (RepeatMatcher, 22.2.2.3.1).
+            const loop = self.newLoop(child_accept);
+            if (greedy) {
+                try self.addIterationTransition(start_state, child_frag.start, child, loop);
+                try start_state.addTransition(Transition.epsilon(accept));
+                try self.addIterationTransition(child_accept, child_frag.start, child, loop);
+                try child_accept.addTransition(Transition.epsilon(accept));
+            } else {
+                try start_state.addTransition(Transition.epsilon(accept));
+                try self.addIterationTransition(start_state, child_frag.start, child, loop);
+                try child_accept.addTransition(Transition.epsilon(accept));
+                try self.addIterationTransition(child_accept, child_frag.start, child, loop);
+            }
+            return Fragment{ .start = start, .accept = accept };
+        }
+
         if (greedy) {
             // Greedy: try to match first, then skip
             // Start can go to child or skip to accept
@@ -447,6 +474,20 @@ pub const Compiler = struct {
 
         const child_accept = self.nfa.getState(child_frag.accept);
 
+        if (self.flags.ecmascript) {
+            // The first iteration is mandatory; later ones clear the atom's
+            // captures and may not match empty (RepeatMatcher, 22.2.2.3.1).
+            const loop = self.newLoop(child_accept);
+            if (greedy) {
+                try self.addIterationTransition(child_accept, child_frag.start, child, loop);
+                try child_accept.addTransition(Transition.epsilon(accept));
+            } else {
+                try child_accept.addTransition(Transition.epsilon(accept));
+                try self.addIterationTransition(child_accept, child_frag.start, child, loop);
+            }
+            return Fragment{ .start = start, .accept = accept };
+        }
+
         if (greedy) {
             // Greedy: try to loop back first, then accept
             try child_accept.addTransition(Transition.epsilon(child_frag.start));
@@ -468,6 +509,23 @@ pub const Compiler = struct {
         const accept = try self.nfa.addState();
 
         const start_state = self.nfa.getState(start);
+
+        if (self.flags.ecmascript) {
+            // `x?` is one non-mandatory iteration: entering it clears x's
+            // captures and it may not match empty; skipping it keeps the
+            // captures it found -- an expanded `x{m,n}`'s earlier copy set them
+            // (RepeatMatcher, 22.2.2.3.1).
+            const loop = self.newLoop(self.nfa.getState(child_frag.accept));
+            if (greedy) {
+                try self.addIterationTransition(start_state, child_frag.start, child, loop);
+                try start_state.addTransition(Transition.epsilon(accept));
+            } else {
+                try start_state.addTransition(Transition.epsilon(accept));
+                try self.addIterationTransition(start_state, child_frag.start, child, loop);
+            }
+            try self.nfa.getState(child_frag.accept).addTransition(Transition.epsilon(accept));
+            return Fragment{ .start = start, .accept = accept };
+        }
 
         if (greedy) {
             // Greedy: try to match first, then skip
@@ -548,7 +606,13 @@ pub const Compiler = struct {
         while (i < min) : (i += 1) {
             const next_frag = try self.compileNode(repeat.child);
             const accept_state = self.nfa.getState(current_frag.accept);
-            try accept_state.addTransition(Transition.epsilon(next_frag.start));
+            // ECMAScript clears the atom's captures at every iteration, the
+            // mandatory ones included (RepeatMatcher, 22.2.2.3.1).
+            if (self.flags.ecmascript) {
+                try self.addIterationTransition(accept_state, next_frag.start, repeat.child, null);
+            } else {
+                try accept_state.addTransition(Transition.epsilon(next_frag.start));
+            }
             current_frag.accept = next_frag.accept;
         }
 
@@ -665,6 +729,27 @@ pub const Compiler = struct {
         }
 
         return child_frag;
+    }
+
+    /// A new quantifier loop id, recorded on the state that ends one iteration.
+    fn newLoop(self: *Compiler, iteration_end: *State) u32 {
+        const loop = self.next_loop;
+        self.next_loop += 1;
+        iteration_end.loop_exit = loop;
+        return loop;
+    }
+
+    /// An epsilon edge that starts an iteration of `atom`: it clears the
+    /// atom's captures and, for a non-mandatory iteration, names its loop.
+    /// Each edge owns its own index slice (`Transition.deinit` frees it).
+    fn addIterationTransition(self: *Compiler, state: *State, to: StateId, atom: *ast.Node, loop: ?u32) !void {
+        const captures = try self.captureIndicesIn(atom);
+        var transition = if (captures.len == 0) blk: {
+            self.allocator.free(captures);
+            break :blk Transition.epsilon(to);
+        } else Transition.epsilonClearing(to, captures);
+        transition.enters_loop = loop;
+        try state.addTransition(transition);
     }
 
     fn addBranchTransition(self: *Compiler, state: *State, to: StateId, skipped: *ast.Node) !void {

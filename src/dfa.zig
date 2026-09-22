@@ -26,6 +26,16 @@
 //!
 //! Match boundaries are identical to `vm.matchAt`: from a start position it
 //! returns the end of the longest match, tracking the last accepting position.
+//!
+//! ECMAScript is leftmost-first, not leftmost-longest (`/ab|abcd/` matches
+//! "ab" in "abcd"), so a match-end DFA for an `ecmascript` pattern runs in
+//! `ordered` mode, the way RE2's DFA does for leftmost-first search: a state is
+//! the priority-ordered list of NFA states its threads resume at, each step
+//! recomputes that list's closure depth-first in transition order -- with the
+//! VM's empty-iteration rule -- and the closure stops at the first accepting
+//! state, dropping every lower-priority thread. The search DFA behind
+//! `anyMatch` only asks whether a match exists, which does not depend on
+//! priority, so it keeps the unordered sets.
 
 const std = @import("std");
 const compiler = @import("compiler.zig");
@@ -81,6 +91,9 @@ pub const LazyDfa = struct {
     // ECMAScript multiline `^`/`$`: CR, U+2028 and U+2029 end lines as '\n' does.
     ecma_lines: bool,
     unanchored: bool, // search mode: every step re-seeds the start (implicit `.*` prefix)
+    // Leftmost-first match ends (ECMAScript): states are ordered NFA-state
+    // lists keyed as [flags][u32 ids...], not bitsets.
+    ordered: bool,
     start_closure: []u8, // epsilon closure of the NFA start state (the re-seed set)
 
     // Flat tables indexed by DFA state for cache-friendly stepping:
@@ -110,6 +123,12 @@ pub const LazyDfa = struct {
     move_buf: []u8,
     closure_buf: []u8,
     stack: std.ArrayList(usize),
+    // ordered-mode scratch: the depth-first frames, the quantifier loops each
+    // path entered since the last consumed byte, and two NFA-state lists
+    ostack: std.ArrayList(OFrame),
+    ochain: std.ArrayList(OLink),
+    olist: std.ArrayList(u32),
+    onext: std.ArrayList(u32),
 
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, flags: common.CompileFlags) !LazyDfa {
         return initMode(allocator, nfa, flags, false);
@@ -146,6 +165,7 @@ pub const LazyDfa = struct {
             .word_count = word_count,
             .key_len = word_count + 1,
             .anchored = anchored,
+            .ordered = flags.ecmascript and !unanchored,
             .ecma_lines = flags.ecmascript and flags.multiline and line_anchor,
             .unanchored = unanchored,
             .start_closure = try allocator.alloc(u8, word_count),
@@ -161,6 +181,10 @@ pub const LazyDfa = struct {
             .move_buf = try allocator.alloc(u8, word_count),
             .closure_buf = try allocator.alloc(u8, word_count),
             .stack = .empty,
+            .ostack = .empty,
+            .ochain = .empty,
+            .olist = .empty,
+            .onext = .empty,
         };
         // Precompute the start state's epsilon closure (the re-seed set for
         // unanchored search). Anchor transitions are deferred to per-step masks,
@@ -190,6 +214,10 @@ pub const LazyDfa = struct {
         self.allocator.free(self.move_buf);
         self.allocator.free(self.closure_buf);
         self.stack.deinit(self.allocator);
+        self.ostack.deinit(self.allocator);
+        self.ochain.deinit(self.allocator);
+        self.olist.deinit(self.allocator);
+        self.onext.deinit(self.allocator);
     }
 
     inline fn bitSet(buf: []u8, i: usize) void {
@@ -334,6 +362,7 @@ pub const LazyDfa = struct {
     /// Compute and cache the transition and accept bit for `dfa_index` on symbol
     /// `sym` (0..=EOF). Slow path of stepping; may grow the tables.
     fn computeStep(self: *LazyDfa, dfa_index: i32, sym: usize) Error!i32 {
+        if (self.ordered) return self.computeStepOrdered(dfa_index, sym);
         const flags = self.stateFlags(dfa_index);
         const mask = self.emptyMask(flags, sym);
         // Follow enabled anchors + epsilon from the stored (epsilon-closed) set.
@@ -395,6 +424,161 @@ pub const LazyDfa = struct {
         return stored;
     }
 
+    const no_link: u32 = std.math.maxInt(u32);
+    const OLink = struct { loop: u32, parent: u32 };
+    const OFrame = struct { state: u32, chain: u32 };
+
+    /// An ordered-mode state's look-behind flags and NFA-state list.
+    inline fn orderedFlags(self: *const LazyDfa, idx: i32) u8 {
+        return self.keys.items[@intCast(idx)][0];
+    }
+    inline fn orderedIds(self: *const LazyDfa, idx: i32) []align(1) const u32 {
+        const key = self.keys.items[@intCast(idx)];
+        return std.mem.bytesAsSlice(u32, key[1..]);
+    }
+
+    /// Intern a priority-ordered NFA-state list with look-behind `flags`.
+    fn internOrdered(self: *LazyDfa, ids: []const u32, flags: u8) Error!i32 {
+        const len = 1 + ids.len * @sizeOf(u32);
+        if (len > MAX_KEY) {
+            self.overflow = true;
+            return Error.DfaOverflow;
+        }
+        var key_buf: [MAX_KEY]u8 = undefined;
+        key_buf[0] = flags;
+        @memcpy(key_buf[1..len], std.mem.sliceAsBytes(ids));
+        const key = key_buf[0..len];
+
+        if (self.map.get(key)) |idx| return idx;
+        if (self.keys.items.len >= MAX_STATES) {
+            self.overflow = true;
+            return Error.DfaOverflow;
+        }
+        const owned = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned);
+        // Whether arriving here is a match, for the anchor-free hot loop (whose
+        // closure does not depend on the next symbol).
+        const accepts = try self.closureOrdered(ids, 0, null);
+
+        const idx: i32 = @intCast(self.keys.items.len);
+        try self.trans.appendNTimes(self.allocator, UNCOMPUTED, ALPHA);
+        try self.acc.appendNTimes(self.allocator, false, ALPHA);
+        try self.acc_state.append(self.allocator, accepts);
+        try self.accel_kind.append(self.allocator, 0);
+        try self.accel_set.append(self.allocator, undefined);
+        try self.keys.append(self.allocator, owned);
+        try self.map.put(self.allocator, owned, idx);
+        return idx;
+    }
+
+    /// The closure of `seeds` in priority order: each seed's epsilon and
+    /// enabled-anchor successors depth-first in transition order, a state kept
+    /// for the first path that reaches it. The consuming states go to `out` in
+    /// that order. Returns true, and stops, at the first accepting state: every
+    /// state after it has lower priority, and leftmost-first drops them. A
+    /// path that ends a quantifier iteration it entered without consuming is
+    /// dropped without claiming the state (RepeatMatcher, 22.2.2.3.1), as in
+    /// `vm.matchAtLeftmostFirst`.
+    fn closureOrdered(self: *LazyDfa, seeds: []align(1) const u32, mask: u8, out: ?*std.ArrayList(u32)) Error!bool {
+        if (out) |o| o.clearRetainingCapacity();
+        const visited = self.closure_buf;
+        @memset(visited, 0);
+        self.ochain.clearRetainingCapacity();
+        for (seeds) |seed| {
+            self.ostack.clearRetainingCapacity();
+            try self.ostack.append(self.allocator, .{ .state = seed, .chain = no_link });
+            while (self.ostack.pop()) |frame| {
+                const id: usize = frame.state;
+                if (bitTest(visited, id)) continue;
+                const state = &self.nfa.states.items[id];
+                if (state.loop_exit) |loop| {
+                    if (self.orderedChainHas(frame.chain, loop)) continue;
+                }
+                bitSet(visited, id);
+                if (state.is_accepting) return true;
+                var consuming = false;
+                var t = state.transitions.items.len;
+                while (t > 0) {
+                    t -= 1;
+                    const tr = state.transitions.items[t];
+                    const follow = switch (tr.transition_type) {
+                        .epsilon => true,
+                        .anchor => mask & (@as(u8, 1) << @backingInt(tr.data.anchor)) != 0,
+                        else => blk: {
+                            consuming = true;
+                            break :blk false;
+                        },
+                    };
+                    if (!follow or bitTest(visited, tr.to)) continue;
+                    var chain = frame.chain;
+                    if (tr.enters_loop) |loop| {
+                        try self.ochain.append(self.allocator, .{ .loop = loop, .parent = chain });
+                        chain = @intCast(self.ochain.items.len - 1);
+                    }
+                    try self.ostack.append(self.allocator, .{ .state = @intCast(tr.to), .chain = chain });
+                }
+                if (consuming) if (out) |o| try o.append(self.allocator, @intCast(id));
+            }
+        }
+        return false;
+    }
+
+    fn orderedChainHas(self: *const LazyDfa, chain: u32, loop: u32) bool {
+        var link = chain;
+        while (link != no_link) {
+            const node = self.ochain.items[link];
+            if (node.loop == loop) return true;
+            link = node.parent;
+        }
+        return false;
+    }
+
+    /// `computeStep` for ordered mode: close the state's list at this boundary,
+    /// then move its consuming states on the byte, in order, keeping the first
+    /// arrival at each target.
+    fn computeStepOrdered(self: *LazyDfa, dfa_index: i32, sym: usize) Error!i32 {
+        const flags = self.orderedFlags(dfa_index);
+        const mask = self.emptyMask(flags, sym);
+        const accept_val = try self.closureOrdered(self.orderedIds(dfa_index), mask, &self.olist);
+
+        var result: i32 = DEAD;
+        if (sym != EOF) {
+            const c: u8 = if (sym == LT_LEAD) 0xE2 else @intCast(sym);
+            self.onext.clearRetainingCapacity();
+            @memset(self.move_buf, 0);
+            for (self.olist.items) |id| {
+                for (self.nfa.states.items[id].transitions.items) |tr| {
+                    if (!self.matchesByte(tr, c) or bitTest(self.move_buf, tr.to)) continue;
+                    bitSet(self.move_buf, tr.to);
+                    try self.onext.append(self.allocator, @intCast(tr.to));
+                }
+            }
+            if (self.onext.items.len != 0) {
+                var new_flags: u8 = 0;
+                if (isWordByte(c)) new_flags |= FLAG_PREV_WORD;
+                if (c == '\n') new_flags |= FLAG_PREV_NL;
+                if (self.ecma_lines) {
+                    if (c == '\r') {
+                        new_flags |= FLAG_PREV_NL;
+                    } else if (sym == LT_LEAD) {
+                        new_flags |= FLAG_LT2;
+                    } else if (flags & FLAG_LT2 != 0 and c == 0x80) {
+                        new_flags |= FLAG_LT1;
+                    } else if (flags & FLAG_LT1 != 0 and (c == 0xA8 or c == 0xA9)) {
+                        new_flags |= FLAG_PREV_NL;
+                    }
+                }
+                result = try self.internOrdered(self.onext.items, if (self.anchored) new_flags else 0); // may realloc
+            }
+        }
+
+        var stored = result;
+        if (result != DEAD and self.acc_state.items[@intCast(result)]) stored = result | ACCEPT_BIT;
+        self.trans.items[@as(usize, @intCast(dfa_index)) * ALPHA + sym] = stored;
+        self.acc.items[@as(usize, @intCast(dfa_index)) * ALPHA + sym] = accept_val;
+        return stored;
+    }
+
     /// Look-behind flags for a scan starting at `start` within `input`. Inert
     /// (always 0) for anchor-free patterns so the DFA isn't split by context.
     fn startFlags(self: *const LazyDfa, input: []const u8, start: usize) u8 {
@@ -430,6 +614,11 @@ pub const LazyDfa = struct {
 
     fn getStart(self: *LazyDfa, flags: u8) Error!i32 {
         if (self.start_cache[flags] != UNCOMPUTED) return self.start_cache[flags];
+        if (self.ordered) {
+            const idx = try self.internOrdered(&[_]u32{@intCast(self.nfa.start_state)}, flags);
+            self.start_cache[flags] = idx;
+            return idx;
+        }
         const seed = self.move_buf; // borrow as scratch
         @memset(seed, 0);
         bitSet(seed, self.nfa.start_state);

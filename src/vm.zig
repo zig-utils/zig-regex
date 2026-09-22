@@ -83,6 +83,15 @@ pub const VM = struct {
     /// surviving transition; pooling removes that malloc churn for capture
     /// patterns.
     cap_pool: std.ArrayList([]?usize) = .empty,
+    /// ECMAScript leftmost-first simulation (`matchAtLeftmostFirst`): the
+    /// explicit depth-first stack for the priority-ordered closure, and the
+    /// quantifier loops each path entered since the last consumed byte.
+    dfs_stack: std.ArrayList(Frame) = .empty,
+    loop_chain: std.ArrayList(LoopLink) = .empty,
+
+    const no_link: u32 = std.math.maxInt(u32);
+    const LoopLink = struct { loop: u32, parent: u32 };
+    const Frame = struct { thread: Thread, chain: u32 };
 
     pub fn init(allocator: std.mem.Allocator, nfa: *compiler.NFA, num_captures: usize, flags: common.CompileFlags) VM {
         return .{
@@ -103,6 +112,9 @@ pub const VM = struct {
         self.nxt_threads.deinit(self.allocator);
         for (self.cap_pool.items) |buf| self.allocator.free(buf);
         self.cap_pool.deinit(self.allocator);
+        for (self.dfs_stack.items) |*frame| self.freeThread(&frame.thread);
+        self.dfs_stack.deinit(self.allocator);
+        self.loop_chain.deinit(self.allocator);
     }
 
     /// Take a capture buffer from the pool, or allocate one.
@@ -194,6 +206,214 @@ pub const VM = struct {
 
     /// Check if the pattern matches at a specific position in the input
     pub fn matchAt(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
+        if (self.flags.ecmascript) return self.matchAtLeftmostFirst(input, start_pos);
+        return self.matchAtLongest(input, start_pos);
+    }
+
+    /// ECMAScript semantics: the match and captures of the highest-priority
+    /// path, as the spec's backtracking order would find them (leftmost-first;
+    /// 22.2.2.3 MatchTwoAlternatives, 22.2.2.3.1 RepeatMatcher). A Pike VM:
+    /// each step's threads are kept in priority order, each thread's closure
+    /// is explored depth-first in transition order (the compiler emits the
+    /// preferred edge first), a state belongs to the first path that reaches it
+    /// in a step, and once a thread accepts every lower-priority thread is
+    /// dropped. Only higher-priority threads keep running, so a later accept
+    /// always outranks the one it replaces.
+    fn matchAtLeftmostFirst(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
+        var current_threads = self.cur_threads;
+        var next_threads = self.nxt_threads;
+        defer {
+            self.clearThreadList(&current_threads);
+            self.clearThreadList(&next_threads);
+            self.cur_threads = current_threads;
+            self.nxt_threads = next_threads;
+            for (self.dfs_stack.items) |*frame| self.freeThread(&frame.thread);
+            self.dfs_stack.clearRetainingCapacity();
+            self.loop_chain.clearRetainingCapacity();
+        }
+
+        const num_states = self.nfa.states.items.len;
+        if (self.visited.len < num_states) {
+            if (self.visited.len != 0) self.allocator.free(self.visited);
+            self.visited = try self.allocator.alloc(bool, num_states);
+        }
+        const visited = self.visited[0..num_states];
+
+        // The best match so far: its end and its capture slots.
+        var best_end: ?usize = null;
+        var best: Thread = .{ .state = 0, .capture_starts = &.{}, .capture_ends = &.{} };
+        defer self.freeThread(&best);
+
+        var seed = try self.newThread(self.nfa.start_state);
+        const start_state = self.nfa.getState(self.nfa.start_state);
+        if (start_state.capture_start) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) seed.capture_starts[cap_idx - 1] = start_pos;
+        }
+        if (start_state.capture_end) |cap_idx| {
+            if (cap_idx > 0 and cap_idx <= self.num_captures) seed.capture_ends[cap_idx - 1] = start_pos;
+        }
+        @memset(visited, false);
+        self.loop_chain.clearRetainingCapacity();
+        try self.addThreadInPriority(&current_threads, seed, start_pos, input, visited);
+
+        var pos = start_pos;
+        while (current_threads.items.len != 0) {
+            @memset(visited, false);
+            self.loop_chain.clearRetainingCapacity();
+            var i: usize = 0;
+            while (i < current_threads.items.len) : (i += 1) {
+                const thread = &current_threads.items[i];
+                const state = self.nfa.getState(thread.state);
+                if (state.is_accepting) {
+                    // This path outranks every thread after it: keep its match
+                    // and drop them (they are freed with the list).
+                    self.freeThread(&best);
+                    best = thread.*;
+                    thread.* = .{ .state = thread.state, .capture_starts = &.{}, .capture_ends = &.{} };
+                    best_end = pos;
+                    break;
+                }
+                if (pos >= input.len) continue;
+                const c = input[pos];
+                for (state.transitions.items) |transition| {
+                    const matches = switch (transition.transition_type) {
+                        .char => self.charsMatch(transition.data.char, c),
+                        .any => if (self.flags.dot_all) true else c != '\n',
+                        .char_class => if (self.flags.case_insensitive)
+                            transition.data.char_class.matchesCI(c)
+                        else
+                            transition.data.char_class.matches(c),
+                        .anchor, .epsilon => false,
+                    };
+                    if (!matches) continue;
+                    var moved = try self.cloneThread(thread.*);
+                    moved.state = transition.to;
+                    self.applyTransitionCaptures(&moved, transition, pos + 1);
+                    try self.addThreadInPriority(&next_threads, moved, pos + 1, input, visited);
+                }
+            }
+            if (pos >= input.len) break;
+            self.clearThreadList(&current_threads);
+            const tmp = current_threads;
+            current_threads = next_threads;
+            next_threads = tmp;
+            pos += 1;
+        }
+
+        const end = best_end orelse return null;
+        var captures = try self.allocator.alloc(Capture, self.num_captures);
+        for (0..self.num_captures) |k| {
+            captures[k] = .{ .start = 0, .end = 0, .text = "", .matched = false };
+            if (best.capture_starts[k]) |cap_start| {
+                if (best.capture_ends[k]) |cap_end| {
+                    captures[k] = .{ .start = cap_start, .end = cap_end, .text = input[cap_start..cap_end], .matched = true };
+                }
+            }
+        }
+        return MatchResult{ .start = start_pos, .end = end, .captures = captures };
+    }
+
+    /// Add `seed` and its epsilon closure at `pos` to `list`, depth-first in
+    /// transition (priority) order, keeping each state for the first path that
+    /// reaches it this step. A state that ends a quantifier iteration the path
+    /// entered since the last consumed byte means the iteration matched empty,
+    /// which RepeatMatcher fails for a non-mandatory iteration (22.2.2.3.1); that
+    /// path is dropped without claiming the state, so a later path still can.
+    fn addThreadInPriority(self: *VM, list: *std.ArrayList(Thread), seed: Thread, pos: usize, input: []const u8, visited: []bool) !void {
+        const base = self.dfs_stack.items.len;
+        self.dfs_stack.append(self.allocator, .{ .thread = seed, .chain = no_link }) catch |err| {
+            var owned = seed;
+            self.freeThread(&owned);
+            return err;
+        };
+        while (self.dfs_stack.items.len > base) {
+            var frame = self.dfs_stack.pop().?;
+            const id = frame.thread.state;
+            if (visited[id]) {
+                self.freeThread(&frame.thread);
+                continue;
+            }
+            const state = self.nfa.getState(id);
+            if (state.loop_exit) |loop| {
+                if (self.chainHas(frame.chain, loop)) {
+                    self.freeThread(&frame.thread);
+                    continue;
+                }
+            }
+            visited[id] = true;
+
+            // Successors, pushed last-first so the preferred edge pops first.
+            var t = state.transitions.items.len;
+            while (t > 0) {
+                t -= 1;
+                const transition = state.transitions.items[t];
+                const follow = switch (transition.transition_type) {
+                    .epsilon => true,
+                    .anchor => self.anchorHolds(transition.data.anchor, input, pos),
+                    else => false,
+                };
+                if (!follow or visited[transition.to]) continue;
+                var next = try self.cloneThread(frame.thread);
+                next.state = transition.to;
+                self.applyTransitionCaptures(&next, transition, pos);
+                var chain = frame.chain;
+                if (transition.enters_loop) |loop| {
+                    self.loop_chain.append(self.allocator, .{ .loop = loop, .parent = chain }) catch |err| {
+                        self.freeThread(&next);
+                        self.freeThread(&frame.thread);
+                        return err;
+                    };
+                    chain = @intCast(self.loop_chain.items.len - 1);
+                }
+                self.dfs_stack.append(self.allocator, .{ .thread = next, .chain = chain }) catch |err| {
+                    self.freeThread(&next);
+                    self.freeThread(&frame.thread);
+                    return err;
+                };
+            }
+
+            if (state.is_accepting or hasConsuming(state)) {
+                list.append(self.allocator, frame.thread) catch |err| {
+                    self.freeThread(&frame.thread);
+                    return err;
+                };
+            } else {
+                self.freeThread(&frame.thread);
+            }
+        }
+    }
+
+    fn chainHas(self: *const VM, chain: u32, loop: u32) bool {
+        var link = chain;
+        while (link != no_link) {
+            const node = self.loop_chain.items[link];
+            if (node.loop == loop) return true;
+            link = node.parent;
+        }
+        return false;
+    }
+
+    fn hasConsuming(state: *const compiler.State) bool {
+        for (state.transitions.items) |transition| switch (transition.transition_type) {
+            .char, .char_class, .any => return true,
+            .epsilon, .anchor => {},
+        };
+        return false;
+    }
+
+    fn anchorHolds(self: *VM, anchor_type: ast.AnchorType, input: []const u8, pos: usize) bool {
+        return switch (anchor_type) {
+            .start_line => pos == 0 or (self.flags.multiline and common.lineTerminatorBefore(input, pos, self.flags)),
+            .end_line => pos == input.len or (self.flags.multiline and common.lineTerminatorAt(input, pos, self.flags)),
+            .start_text => pos == 0,
+            .end_text => pos == input.len,
+            .word_boundary => self.isWordBoundary(input, pos),
+            .non_word_boundary => !self.isWordBoundary(input, pos),
+        };
+    }
+
+    /// Leftmost-longest simulation used outside ECMAScript mode.
+    fn matchAtLongest(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
         // Borrow the VM's reusable thread lists (empty on entry) and hand them
         // back — threads freed, capacity retained — when done. This keeps the
         // backing buffers alive across the many matchAt calls per find/findAll.
