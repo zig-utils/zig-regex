@@ -864,10 +864,16 @@ pub const Parser = struct {
     fn checkQuantifierTarget(self: *Parser, node: *ast.Node) RegexError!void {
         if (isQuantifierNode(node)) return self.fail(RegexError.InvalidQuantifier, .nothing_to_repeat);
         // Lookbehind is never a QuantifiableAssertion in any mode; lookahead is
-        // only quantifiable in Annex B (non-unicode) web-compat mode.
+        // only quantifiable in Annex B (non-unicode) web-compat mode. Every
+        // other assertion -- `^`, `$`, `\b`, `\B` -- is an Assertion and not a
+        // Term that a Quantifier can follow (22.2.1), so ECMAScript rejects
+        // `^*` outright; other dialects keep accepting it.
         switch (node.node_type) {
-            .lookbehind => return RegexError.InvalidQuantifier,
-            .lookahead => if (self.unicode or self.unicode_sets) return RegexError.InvalidQuantifier,
+            .lookbehind => return self.fail(RegexError.InvalidQuantifier, .invalid_quantifier),
+            .lookahead => if (self.unicode or self.unicode_sets)
+                return self.fail(RegexError.InvalidQuantifier, .nothing_to_repeat),
+            .anchor => if (self.ecmascript)
+                return self.fail(RegexError.InvalidQuantifier, .nothing_to_repeat),
             else => {},
         }
     }
@@ -918,7 +924,8 @@ pub const Parser = struct {
                 },
                 .lbrace => {
                     if (!self.validBoundedQuantifierAhead()) {
-                        if (self.unicode or self.unicode_sets) return RegexError.InvalidQuantifier;
+                        if (self.unicode or self.unicode_sets)
+                            return self.fail(RegexError.InvalidQuantifier, .incomplete_quantifier_for_unicode_pattern);
                         break;
                     }
                     try self.checkQuantifierTarget(node);
@@ -1230,10 +1237,14 @@ pub const Parser = struct {
                             try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                             return ast.Node.createLookahead(self.allocator, child, false, span);
                         } else if (self.current_token.value == 'P') {
-                            // Python-style named group (?P<name>...)
+                            // Python-style named group (?P<name>...). ECMAScript
+                            // has no such form: after `(?` it allows only `:`,
+                            // `=`, `!` and `<`, so `P` is a syntax error there.
+                            if (self.ecmascript)
+                                return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                             try self.advance(); // consume P
                             if (self.current_token.token_type != .literal or self.current_token.value != '<') {
-                                return RegexError.UnexpectedCharacter;
+                                return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                             }
                             try self.advance(); // consume <
                             group_name = try self.parseGroupName();
@@ -1352,7 +1363,7 @@ pub const Parser = struct {
                                 // syntax error.
                                 if (self.ecmascript) {
                                     self.setParseFlags(saved_extended, saved_swap_greedy);
-                                    return RegexError.UnexpectedCharacter;
+                                    return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                                 }
                                 // `(?...)` directive: close its paren, then wrap the
                                 // remainder of the current alternative. Parse-time
@@ -1418,12 +1429,14 @@ pub const Parser = struct {
                 return try self.parseCharClass();
             },
             .rbracket, .rbrace => {
-                if (self.unicode or self.unicode_sets) return RegexError.UnexpectedCharacter;
+                if (self.unicode or self.unicode_sets)
+                    return self.fail(RegexError.UnexpectedCharacter, .unmatched_bracket_for_unicode_pattern);
                 try self.advance();
                 return ast.Node.createLiteral(self.allocator, if (token.token_type == .rbracket) ']' else '}', span);
             },
             .lbrace => {
-                if (self.unicode or self.unicode_sets) return RegexError.UnexpectedCharacter;
+                if (self.unicode or self.unicode_sets)
+                    return self.fail(RegexError.UnexpectedCharacter, .incomplete_quantifier_for_unicode_pattern);
                 // Annex B InvalidBracedQuantifier: a `{` that begins a well-formed
                 // braced quantifier ({n}, {n,}, {n,m}) but has no atom to bind to is
                 // a SyntaxError in ECMAScript, not a literal `{`.

@@ -62,6 +62,16 @@ pub const CompileErrorReason = enum {
     invalid_backreference_for_unicode_pattern,
     unrecognized_character_after_group_start,
     unmatched_parentheses,
+    /// A quantifier on an assertion that no mode allows to carry one -- a
+    /// lookbehind. (Annex B lets a lookahead take one outside unicode mode;
+    /// every other assertion reports `nothing_to_repeat`.)
+    invalid_quantifier,
+    /// Unicode mode: `{` that opens a quantifier the pattern never closes.
+    /// Outside unicode mode Annex B makes it a literal `{`.
+    incomplete_quantifier_for_unicode_pattern,
+    /// Unicode mode: a `]` or `}` with nothing to close. Outside unicode mode
+    /// Annex B makes it a literal.
+    unmatched_bracket_for_unicode_pattern,
 };
 
 /// Error context for better error reporting

@@ -3717,3 +3717,79 @@ test "ECMAScript patterns bound for linear engines are not refused as ReDoS risk
     // pattern needs -- there the analyzer, not a size limit, is the guard.
     try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(a{1000}){1000}", .{ .ecmascript = true }));
 }
+
+test "ECMAScript reports JavaScriptCore's reason for assertion and group-start defects" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        pattern: []const u8,
+        unicode: bool = false,
+        // null means the pattern compiles.
+        reason: ?CompileErrorReason,
+    };
+    // Every row is what JavaScriptCore reports for the same pattern (Safari
+    // 26 / home-tool), which is also where node v24.4.1 accepts and rejects.
+    const cases = [_]Case{
+        .{ .pattern = "^*", .reason = .nothing_to_repeat },
+        .{ .pattern = "^+", .reason = .nothing_to_repeat },
+        .{ .pattern = "^?", .reason = .nothing_to_repeat },
+        .{ .pattern = "^{2}", .reason = .nothing_to_repeat },
+        .{ .pattern = "$*", .reason = .nothing_to_repeat },
+        .{ .pattern = "\\b*", .reason = .nothing_to_repeat },
+        .{ .pattern = "\\B*", .reason = .nothing_to_repeat },
+        .{ .pattern = "^*", .unicode = true, .reason = .nothing_to_repeat },
+        // Annex B: a lookahead -- and only a lookahead -- is quantifiable, and
+        // only outside unicode mode.
+        .{ .pattern = "(?=a)*", .reason = null },
+        .{ .pattern = "(?!a)*", .reason = null },
+        .{ .pattern = "(?=a){2}", .reason = null },
+        .{ .pattern = "(?=a)*", .unicode = true, .reason = .nothing_to_repeat },
+        .{ .pattern = "(?<=a)*", .reason = .invalid_quantifier },
+        .{ .pattern = "(?<!a)*", .reason = .invalid_quantifier },
+        .{ .pattern = "(?<=a)*", .unicode = true, .reason = .invalid_quantifier },
+        // `(?` takes only `:`, `=`, `!` and `<` in ECMAScript.
+        .{ .pattern = "(?P<x>a)", .reason = .unrecognized_character_after_group_start },
+        .{ .pattern = "(?P=x)", .reason = .unrecognized_character_after_group_start },
+        .{ .pattern = "(?i)a", .reason = .unrecognized_character_after_group_start },
+        // Unicode mode drops Annex B's literal readings of `{`, `]` and `}`.
+        .{ .pattern = "a{", .unicode = true, .reason = .incomplete_quantifier_for_unicode_pattern },
+        .{ .pattern = "a{1", .unicode = true, .reason = .incomplete_quantifier_for_unicode_pattern },
+        .{ .pattern = "]", .unicode = true, .reason = .unmatched_bracket_for_unicode_pattern },
+        .{ .pattern = "}", .unicode = true, .reason = .unmatched_bracket_for_unicode_pattern },
+        .{ .pattern = "a{", .reason = null },
+        .{ .pattern = "]", .reason = null },
+        .{ .pattern = "}", .reason = null },
+    };
+    for (cases) |c| {
+        var diagnostic: ?CompileErrorReason = null;
+        const flags = common.CompileFlags{ .ecmascript = true, .unicode = c.unicode };
+        if (Regex.compileWithFlagsDiagnostic(allocator, c.pattern, flags, &diagnostic)) |compiled| {
+            var r = compiled;
+            defer r.deinit();
+            if (c.reason != null) {
+                std.debug.print("expected /{s}/{s} to be refused\n", .{ c.pattern, if (c.unicode) "u" else "" });
+                return error.TestUnexpectedResult;
+            }
+        } else |_| {
+            if (c.reason) |want| {
+                if (diagnostic != want) {
+                    std.debug.print("/{s}/{s}: want {s}, got {?s}\n", .{
+                        c.pattern,
+                        if (c.unicode) "u" else "",
+                        @tagName(want),
+                        if (diagnostic) |d| @tagName(d) else null,
+                    });
+                    return error.TestUnexpectedResult;
+                }
+            } else {
+                std.debug.print("expected /{s}/{s} to compile\n", .{ c.pattern, if (c.unicode) "u" else "" });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    // Other dialects keep the pre-ECMAScript readings: `^*` and Python-style
+    // named groups still compile.
+    var plain = try Regex.compile(allocator, "^*");
+    plain.deinit();
+    var named = try Regex.compile(allocator, "(?P<x>a)");
+    named.deinit();
+}
