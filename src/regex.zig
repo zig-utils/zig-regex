@@ -3680,6 +3680,33 @@ test "ECMAScript captures and match ends are leftmost-first" {
     }
 }
 
+test "ECMAScript bounded backtracking repeats retain the last accepted captures" {
+    const allocator = std.testing.allocator;
+    // Node-confirmed RepeatMatcher cases, including unsuccessful additional
+    // iterations, required empty matches, capture clearing, and direction/lazy controls.
+    const cases = [_]LeftmostFirstCase{
+        .{ .pattern = "(?=a)(a){1,3}", .case_insensitive = false, .input = "a", .from = 0, .expected = .{ .start = 0, .end = 1, .captures = &.{"a"} } },
+        .{ .pattern = "(?=a)(a|b){1,3}", .case_insensitive = false, .input = "ab", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{"b"} } },
+        .{ .pattern = "(?:((a+){2,3}|(.){3})){0,3}", .case_insensitive = false, .input = "aABBb", .from = 0, .expected = .{ .start = 0, .end = 3, .captures = &.{ "aAB", null, "B" } } },
+        .{ .pattern = "((a?){1,2}|b)", .case_insensitive = false, .input = "", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{ "", "" } } },
+        .{ .pattern = "(?=a)(?:(a)|b){1,3}", .case_insensitive = false, .input = "ab", .from = 0, .expected = .{ .start = 0, .end = 2, .captures = &.{null} } },
+        .{ .pattern = "(?=a)(a){1,3}", .case_insensitive = false, .input = "aaa", .from = 0, .expected = .{ .start = 0, .end = 3, .captures = &.{"a"} } },
+        .{ .pattern = "(?<=(a){1,3})b", .case_insensitive = false, .input = "aab", .from = 0, .expected = .{ .start = 2, .end = 3, .captures = &.{"a"} } },
+        .{ .pattern = "(?=a)(a){1,3}?", .case_insensitive = false, .input = "aaa", .from = 0, .expected = .{ .start = 0, .end = 1, .captures = &.{"a"} } },
+    };
+    for (cases) |c| {
+        var regex = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true });
+        defer regex.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, regex.engine_type);
+        var found = try regex.findFrom(c.input, c.from);
+        defer if (found) |*f| f.deinit(allocator);
+        try expectLeftmostFirst(c, found);
+        var again = try regex.find(c.input);
+        defer if (again) |*f| f.deinit(allocator);
+        try expectLeftmostFirst(c, again);
+    }
+}
+
 test "ECMAScript patterns bound for linear engines are not refused as ReDoS risks" {
     const allocator = std.testing.allocator;
     // Nested quantifiers are valid JavaScript, and the Thompson engines match

@@ -1104,13 +1104,21 @@ pub const BacktrackEngine = struct {
 
         // Match up to max times
         const max_count = max.?;
-        if (repeat.greedy) {
+        if (repeat.greedy and i < max_count) {
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            defer self.allocator.free(saved);
             // Greedy: try to match as many as possible
             while (i < max_count) : (i += 1) {
+                // ECMA-262 RepeatMatcher continues with the previous matchState
+                // when an additional iteration fails (including no progress).
+                // Clearing the trial's captures must not erase the last accepted
+                // iteration, just as in matchStarGreedy and matchReverseRepeat.
+                @memcpy(saved, self.captures);
                 self.clearCapturesIn(repeat.child);
                 if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                 } else {
+                    @memcpy(self.captures, saved);
                     break;
                 }
             }
