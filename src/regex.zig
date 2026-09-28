@@ -1042,6 +1042,10 @@ pub const Regex = struct {
     /// stays shareable). Lives no longer than the `Regex`.
     pub const Matcher = struct {
         re: *const Regex,
+        /// Persistent lazy-DFA and VM storage may outlive the allocator used
+        /// for one match result. Keeping that allocator on the matcher avoids
+        /// dangling cached scratch when callers recycle result arenas.
+        scratch_allocator: std.mem.Allocator,
         dfa_cell: ?dfa.LazyDfa = null,
         dfa_failed: bool = false,
         search_dfa_cell: ?dfa.LazyDfa = null,
@@ -1058,7 +1062,7 @@ pub const Regex = struct {
         fn searchDfaPtr(self: *Matcher) ?*dfa.LazyDfa {
             if (self.search_dfa_cell) |*d| return d;
             if (self.search_dfa_failed or !self.re.dfaEligible()) return null;
-            self.search_dfa_cell = dfa.LazyDfa.initSearch(self.re.allocator, @constCast(&self.re.nfa), self.re.flags) catch {
+            self.search_dfa_cell = dfa.LazyDfa.initSearch(self.scratch_allocator, @constCast(&self.re.nfa), self.re.flags) catch {
                 self.search_dfa_failed = true;
                 return null;
             };
@@ -1071,7 +1075,7 @@ pub const Regex = struct {
         fn dfaPtr(self: *Matcher) ?*dfa.LazyDfa {
             if (self.dfa_cell) |*d| return d;
             if (self.dfa_failed or !self.re.dfaEligible()) return null;
-            self.dfa_cell = dfa.LazyDfa.init(self.re.allocator, @constCast(&self.re.nfa), self.re.flags) catch {
+            self.dfa_cell = dfa.LazyDfa.init(self.scratch_allocator, @constCast(&self.re.nfa), self.re.flags) catch {
                 self.dfa_failed = true;
                 return null;
             };
@@ -1085,7 +1089,7 @@ pub const Regex = struct {
         fn vmPtr(self: *Matcher) ?*vm.VM {
             if (self.vm_cell) |*v| return v;
             if (self.re.engine_type != .thompson_nfa) return null;
-            self.vm_cell = vm.VM.init(self.re.allocator, @constCast(&self.re.nfa), self.re.capture_count, self.re.flags);
+            self.vm_cell = vm.VM.init(self.scratch_allocator, @constCast(&self.re.nfa), self.re.capture_count, self.re.flags);
             return &(self.vm_cell.?);
         }
 
@@ -1126,7 +1130,14 @@ pub const Regex = struct {
     /// Create a reusable `Matcher` (see its docs) — use it for hot loops that
     /// match many inputs with the same compiled pattern. Call `deinit` when done.
     pub fn matcher(self: *const Regex) Matcher {
-        return .{ .re = self };
+        return self.matcherWithScratchAllocator(self.allocator);
+    }
+
+    /// Create a reusable matcher whose persistent lazy-DFA and VM allocations
+    /// are independent from `Regex.allocator`, which remains the allocator for
+    /// per-call match results.
+    pub fn matcherWithScratchAllocator(self: *const Regex, scratch_allocator: std.mem.Allocator) Matcher {
+        return .{ .re = self, .scratch_allocator = scratch_allocator };
     }
 
     /// Check if the pattern matches the entire input string
@@ -3360,6 +3371,35 @@ test "matcher findFrom reuses VM scratch and preserves absolute context" {
     var anchored_matcher = anchored.matcher();
     defer anchored_matcher.deinit();
     try std.testing.expect((try anchored_matcher.findFrom(input, 1)) == null);
+}
+
+test "matcher scratch survives recycling the match-result allocator" {
+    var compile_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer compile_arena.deinit();
+    var scratch_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch_arena.deinit();
+    var result_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer result_arena.deinit();
+
+    var re = try Regex.compileWithFlags(compile_arena.allocator(), "(ab+)", .{ .ecmascript = true });
+    re.allocator = result_arena.allocator();
+    var matcher = re.matcherWithScratchAllocator(scratch_arena.allocator());
+    defer matcher.deinit();
+
+    // A nonzero start primes the VM, then a zero start lazily creates the DFA.
+    // Both must remain valid after each result arena reset.
+    var from_middle = (try matcher.findFrom("xxabbb", 2)).?;
+    from_middle.deinit(result_arena.allocator());
+    _ = result_arena.reset(.retain_capacity);
+
+    var first = (try matcher.find("xxabbb")).?;
+    first.deinit(result_arena.allocator());
+    _ = result_arena.reset(.retain_capacity);
+
+    var reused = (try matcher.find("xxabbb")).?;
+    defer reused.deinit(result_arena.allocator());
+    try std.testing.expectEqualStrings("abbb", reused.slice);
+    try std.testing.expectEqualStrings("abbb", reused.captures[0]);
 }
 
 test "capture spans give per-group byte offsets" {
