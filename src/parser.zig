@@ -8,7 +8,7 @@ const RegexError = @import("errors.zig").RegexError;
 const CompileErrorReason = @import("errors.zig").CompileErrorReason;
 const ErrorContext = @import("errors.zig").ErrorContext;
 
-const MAX_SAFE_QUANTIFIER: usize = 9_007_199_254_740_991;
+const MAX_SAFE_QUANTIFIER: u64 = 9_007_199_254_740_991;
 
 /// Token types for lexical analysis
 pub const TokenType = enum {
