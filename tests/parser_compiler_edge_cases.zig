@@ -736,3 +736,89 @@ test "backtrack: direct fixed repeats preserve child priority and outer captures
     try std.testing.expectEqualStrings("aa", hit.captures[0]);
     try std.testing.expect(hit.captures_present[0]);
 }
+
+test "backtrack: exact repeats backtrack while preserving final captures" {
+    const allocator = std.testing.allocator;
+    var positive = try Regex.compileWithFlags(allocator, "^(?=(a?){2}a{2}$)", .{ .ecmascript = true });
+    defer positive.deinit();
+    const found = try positive.find("aa");
+    try std.testing.expect(found != null);
+    var hit = found.?;
+    defer hit.deinit(allocator);
+    try std.testing.expect(hit.captures_present[0]);
+    try std.testing.expectEqualStrings("", hit.captures[0]);
+    var negative = try Regex.compileWithFlags(allocator, "^(?!(a?){2}a{2}$)", .{ .ecmascript = true });
+    defer negative.deinit();
+    try std.testing.expect(!try negative.isMatch("aa"));
+}
+
+test "backtrack: failed alternatives do not leak captured strings" {
+    const allocator = std.testing.allocator;
+    inline for (.{ "^(?=(a)c|(a)$)", "^(?=((a)c|(a)){2}$)" }, .{ "a", "aca" }) |pattern, input| {
+        var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
+        defer re.deinit();
+        const found = try re.find(input);
+        try std.testing.expect(found != null);
+        var hit = found.?;
+        defer hit.deinit(allocator);
+        const failed_capture: usize = if (hit.captures.len == 2) 0 else 1;
+        try std.testing.expect(!hit.captures_present[failed_capture]);
+        try std.testing.expectEqualStrings("a", hit.captures[hit.captures.len - 1]);
+    }
+}
+
+test "backtrack: capturing fixed repeats retain resource failure and recover" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "^(?=(a?){2}a{2}$)", .{ .ecmascript = true });
+    defer re.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    re.backtrack_engine.?.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, re.find("aa"));
+    re.backtrack_engine.?.allocator = allocator;
+    var hit = (try re.find("aa")).?;
+    defer hit.deinit(allocator);
+    try std.testing.expect(hit.captures_present[0]);
+    try std.testing.expectEqualStrings("", hit.captures[0]);
+
+    var empty = try Regex.compileWithFlags(allocator, "(?=(()?){1000000}b?)", .{ .ecmascript = true });
+    defer empty.deinit();
+    empty.backtrack_engine.?.max_steps = 50;
+    try std.testing.expectError(error.Timeout, empty.isMatch(""));
+}
+
+test "backtrack: fixed capture reconstruction respects greediness and nesting" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pattern: []const u8, input: []const u8, index: ?usize, captures: []const ?[]const u8 };
+    const cases = [_]Case{
+        .{ .pattern = "^(?=(a?){2}$)", .input = "a", .index = 0, .captures = &.{""} },
+        .{ .pattern = "^(?=(a??){2}$)", .input = "a", .index = 0, .captures = &.{"a"} },
+        .{ .pattern = "(?<=^(a?){2})$", .input = "a", .index = 1, .captures = &.{""} },
+        .{ .pattern = "(?<=^(a??){2})$", .input = "a", .index = 1, .captures = &.{"a"} },
+        .{ .pattern = "^(?=((a)?b){2}$)", .input = "abb", .index = 0, .captures = &.{ "b", null } },
+        .{ .pattern = "^(?=((a)|(b)){2}$)", .input = "ab", .index = 0, .captures = &.{ "b", null, "b" } },
+        .{ .pattern = "^(?=(?<part>a??){2}$)", .input = "a", .index = 0, .captures = &.{"a"} },
+        .{ .pattern = "(?<=^a(?i:(a??)){2})$", .input = "aA", .index = 2, .captures = &.{"A"} },
+        .{ .pattern = "(?<=^a(?i:(a??)){2})$", .input = "Aa", .index = null, .captures = &.{} },
+        .{ .pattern = "^(?=(()?){2}$)", .input = "", .index = 0, .captures = &.{ "", null } },
+    };
+    for (cases) |case| {
+        inline for (.{ false, true }) |unicode| {
+            var re = try Regex.compileWithFlags(allocator, case.pattern, .{ .ecmascript = true, .unicode = unicode });
+            defer re.deinit();
+            const found = try re.find(case.input);
+            if (case.index) |index| {
+                try std.testing.expect(found != null);
+                var hit = found.?;
+                defer hit.deinit(allocator);
+                try std.testing.expectEqual(index, hit.start);
+                try std.testing.expectEqual(case.captures.len, hit.captures.len);
+                for (case.captures, 0..) |expected, i| {
+                    if (expected) |text| {
+                        try std.testing.expect(hit.captures_present[i]);
+                        try std.testing.expectEqualStrings(text, hit.captures[i]);
+                    } else try std.testing.expect(!hit.captures_present[i]);
+                }
+            } else try std.testing.expect(found == null);
+        }
+    }
+}

@@ -443,8 +443,18 @@ pub const BacktrackEngine = struct {
                 return self.matchQuantifierConstrained(node, pos, target_end);
             },
             .alternation => {
-                if (self.matchNodeConstrained(node.data.alternation.left, pos, target_end)) return true;
-                return self.matchNodeConstrained(node.data.alternation.right, pos, target_end);
+                const saved = self.allocator.dupe(CaptureGroup, self.captures) catch |err| {
+                    self.match_error = err;
+                    return false;
+                };
+                defer self.allocator.free(saved);
+                const left = self.matchNodeConstrained(node.data.alternation.left, pos, target_end);
+                if (left and self.match_error == null) return true;
+                @memcpy(self.captures, saved);
+                if (self.match_error != null) return false;
+                const right = self.matchNodeConstrained(node.data.alternation.right, pos, target_end);
+                if (!right or self.match_error != null) @memcpy(self.captures, saved);
+                return right and self.match_error == null;
             },
             .backref => {
                 return if (self.matchBackreference(node.data.backref, pos)) |end| end == target_end else false;
@@ -459,11 +469,8 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchQuantifierConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_end: usize) bool {
-        if (node.node_type == .repeat and self.fixedRepeatHasUncapturedChoices(node.data.repeat)) {
-            var ends: std.ArrayList(usize) = .empty;
-            defer ends.deinit(self.allocator);
-            self.collectFixedRepeatMatches(node.data.repeat, pos, &ends, false) catch return false;
-            return std.mem.indexOfScalar(usize, ends.items, target_end) != null;
+        if (node.node_type == .repeat and self.fixedRepeatHasChoices(node.data.repeat)) {
+            return self.matchFixedRepeatConstrained(node.data.repeat, pos, target_end, false);
         }
         switch (node.node_type) {
             .star, .plus, .optional, .repeat => {
@@ -741,9 +748,10 @@ pub const BacktrackEngine = struct {
                     }
                 }
             }
-            // Out of memory leaves the remaining captures as they were, which is
-            // the same stale-capture state a failed match already tolerates.
-            self.pushNodeChildren(&pending, n) catch return;
+            self.pushNodeChildren(&pending, n) catch {
+                self.match_error = error.OutOfMemory;
+                return;
+            };
         }
     }
 
@@ -796,7 +804,7 @@ pub const BacktrackEngine = struct {
                 // ECMA-262 RepeatMatcher with min=max=1 still permits the
                 // continuation to backtrack inside its one required child.
                 // Greediness only orders optional additional iterations.
-                if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+                if (self.fixedRepeatHasChoices(repeat)) {
                     try self.collectFixedRepeatMatches(repeat, pos, positions, false);
                 } else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
                     self.clearCapturesIn(repeat.child);
@@ -950,21 +958,48 @@ pub const BacktrackEngine = struct {
         }
     }
 
-    fn fixedRepeatHasUncapturedChoices(self: *BacktrackEngine, repeat: ast.Node.Repeat) bool {
+    fn fixedRepeatHasChoices(self: *BacktrackEngine, repeat: ast.Node.Repeat) bool {
+        // Backreferences can make a continuation require a different capture
+        // state at the same ending position. Keep that case on the existing
+        // path until continuation enumeration carries those distinct states.
         return repeat.bounds.min > 1 and repeat.bounds.max != null and
             repeat.bounds.max.? == repeat.bounds.min and
-            !self.hasCapturingGroup(repeat.child) and
+            !(self.hasCapturingGroup(repeat.child) and self.hasBackreference(self.ast_root)) and
             (self.hasQuantifiers(repeat.child) or self.hasAlternation(repeat.child));
     }
 
     fn collectFixedRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), comptime reverse: bool) anyerror!void {
-        return self.collectFixedRepeatMatchesInner(repeat, pos, positions, reverse) catch |err| {
+        _ = self.collectFixedRepeatMatchesInner(repeat, pos, positions, null, reverse) catch |err| {
             self.match_error = err;
             return err;
         };
     }
 
-    fn collectFixedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), comptime reverse: bool) anyerror!void {
+    fn matchFixedRepeatConstrained(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, target: usize, comptime reverse: bool) bool {
+        const saved = self.allocator.dupe(CaptureGroup, self.captures) catch |err| {
+            self.match_error = err;
+            return false;
+        };
+        defer self.allocator.free(saved);
+        var unused: std.ArrayList(usize) = .empty;
+        defer unused.deinit(self.allocator);
+        const matched = self.collectFixedRepeatMatchesInner(repeat, pos, &unused, target, reverse) catch |err| {
+            self.match_error = err;
+            @memcpy(self.captures, saved);
+            return false;
+        };
+        if (!matched) @memcpy(self.captures, saved);
+        return matched;
+    }
+
+    fn collectFixedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), target: ?usize, comptime reverse: bool) anyerror!bool {
+        const has_captures = self.hasCapturingGroup(repeat.child);
+        if (self.match_error) |err| return err;
+        const saved: ?[]CaptureGroup = if (has_captures and target == null) try self.allocator.dupe(CaptureGroup, self.captures) else null;
+        defer if (saved) |caps| {
+            @memcpy(self.captures, caps);
+            self.allocator.free(caps);
+        };
         var frontier: std.ArrayList(usize) = .empty;
         defer frontier.deinit(self.allocator);
         var next: std.ArrayList(usize) = .empty;
@@ -985,6 +1020,8 @@ pub const BacktrackEngine = struct {
             seen.clearRetainingCapacity();
             for (frontier.items) |start| {
                 ends.clearRetainingCapacity();
+                if (has_captures) self.clearCapturesIn(repeat.child);
+                if (self.match_error) |err| return err;
                 if (reverse) {
                     try self.collectAllReverseMatches(repeat.child, start, &ends);
                 } else {
@@ -993,17 +1030,31 @@ pub const BacktrackEngine = struct {
                 if (self.match_error) |err| return err;
                 if (self.step_count > self.max_steps) return error.Timeout;
                 for (ends.items) |end| {
-                    // ECMA-262 RepeatMatcher: with no captures in the body,
-                    // paths at the same iteration/position have identical
-                    // continuations. Keep the first to preserve child priority.
+                    if (target != null and count + 1 == repeat.bounds.min) {
+                        if (end != target.?) continue;
+                        if (!has_captures) return true;
+                        self.clearCapturesIn(repeat.child);
+                        const matched = if (reverse)
+                            self.matchReverseNodeConstrained(repeat.child, start, end)
+                        else
+                            self.matchNodeConstrained(repeat.child, start, end);
+                        if (self.match_error) |err| return err;
+                        if (matched) return true;
+                        continue;
+                    }
+                    // ECMA-262 22.2.2.3.1 steps 3-4 clear captures before
+                    // each next iteration. Equal iteration/position states thus
+                    // have equal continuations; preserve the earliest path.
+                    // Targeted reconstruction above retains the final captures.
                     const entry = try seen.getOrPut(end);
                     if (!entry.found_existing) try next.append(self.allocator, end);
                 }
             }
-            if (next.items.len == 0) return;
+            if (next.items.len == 0) return false;
             std.mem.swap(std.ArrayList(usize), &frontier, &next);
         }
         try positions.appendSlice(self.allocator, frontier.items);
+        return frontier.items.len != 0;
     }
 
     fn collectGreedyRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize)) !void {
@@ -1085,12 +1136,20 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchAlternation(self: *BacktrackEngine, alt: ast.Node.Alternation, pos: usize) ?usize {
-        // Try left first
-        if (self.matchNode(alt.left, pos)) |end| {
-            return end;
-        }
-        // Try right
-        return self.matchNode(alt.right, pos);
+        // CompileSubpattern (Disjunction): a failed alternative must not leak
+        // captured strings into the next alternative's MatchState.
+        const saved = self.allocator.dupe(CaptureGroup, self.captures) catch |err| {
+            self.match_error = err;
+            return null;
+        };
+        defer self.allocator.free(saved);
+        const left = self.matchNode(alt.left, pos);
+        if (self.match_error == null) if (left) |end| return end;
+        @memcpy(self.captures, saved);
+        if (self.match_error != null) return null;
+        const right = self.matchNode(alt.right, pos);
+        if (right == null or self.match_error != null) @memcpy(self.captures, saved);
+        return if (self.match_error == null) right else null;
     }
 
     fn matchStar(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
@@ -1169,11 +1228,14 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchRepeat(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize) ?usize {
-        if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+        if (self.fixedRepeatHasChoices(repeat)) {
             var ends: std.ArrayList(usize) = .empty;
             defer ends.deinit(self.allocator);
             self.collectFixedRepeatMatches(repeat, pos, &ends, false) catch return null;
-            return if (ends.items.len != 0) ends.items[0] else null;
+            if (ends.items.len == 0) return null;
+            const target = ends.items[0];
+            if (self.hasCapturingGroup(repeat.child) and !self.matchFixedRepeatConstrained(repeat, pos, target, false)) return null;
+            return target;
         }
         const min = repeat.bounds.min;
         const max = repeat.bounds.max;
@@ -1425,8 +1487,20 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReverseAlternation(self: *BacktrackEngine, alt: ast.Node.Alternation, pos: usize) ?usize {
-        if (self.matchReverseNode(alt.left, pos)) |start| return start;
-        return self.matchReverseNode(alt.right, pos);
+        // CompileSubpattern (Disjunction): a failed alternative must not leak
+        // captured strings into the next alternative's MatchState.
+        const saved = self.allocator.dupe(CaptureGroup, self.captures) catch |err| {
+            self.match_error = err;
+            return null;
+        };
+        defer self.allocator.free(saved);
+        const left = self.matchReverseNode(alt.left, pos);
+        if (self.match_error == null) if (left) |end| return end;
+        @memcpy(self.captures, saved);
+        if (self.match_error != null) return null;
+        const right = self.matchReverseNode(alt.right, pos);
+        if (right == null or self.match_error != null) @memcpy(self.captures, saved);
+        return if (self.match_error == null) right else null;
     }
 
     fn matchReverseGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {
@@ -1505,11 +1579,14 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReverseRepeat(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize) ?usize {
-        if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+        if (self.fixedRepeatHasChoices(repeat)) {
             var starts: std.ArrayList(usize) = .empty;
             defer starts.deinit(self.allocator);
             self.collectFixedRepeatMatches(repeat, pos, &starts, true) catch return null;
-            return if (starts.items.len != 0) starts.items[0] else null;
+            if (starts.items.len == 0) return null;
+            const target = starts.items[0];
+            if (self.hasCapturingGroup(repeat.child) and !self.matchFixedRepeatConstrained(repeat, pos, target, true)) return null;
+            return target;
         }
         const min = repeat.bounds.min;
         const max = repeat.bounds.max;
@@ -1545,11 +1622,8 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReverseNodeConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_start: usize) bool {
-        if (node.node_type == .repeat and self.fixedRepeatHasUncapturedChoices(node.data.repeat)) {
-            var starts: std.ArrayList(usize) = .empty;
-            defer starts.deinit(self.allocator);
-            self.collectFixedRepeatMatches(node.data.repeat, pos, &starts, true) catch return false;
-            return std.mem.indexOfScalar(usize, starts.items, target_start) != null;
+        if (node.node_type == .repeat and self.fixedRepeatHasChoices(node.data.repeat)) {
+            return self.matchFixedRepeatConstrained(node.data.repeat, pos, target_start, true);
         }
         if (node.node_type == .repeat) {
             const repeat = node.data.repeat;
@@ -1613,8 +1687,18 @@ pub const BacktrackEngine = struct {
                 return false;
             },
             .alternation => {
-                if (self.matchReverseNodeConstrained(node.data.alternation.left, pos, target_start)) return true;
-                return self.matchReverseNodeConstrained(node.data.alternation.right, pos, target_start);
+                const saved = self.allocator.dupe(CaptureGroup, self.captures) catch |err| {
+                    self.match_error = err;
+                    return false;
+                };
+                defer self.allocator.free(saved);
+                const left = self.matchReverseNodeConstrained(node.data.alternation.left, pos, target_start);
+                if (left and self.match_error == null) return true;
+                @memcpy(self.captures, saved);
+                if (self.match_error != null) return false;
+                const right = self.matchReverseNodeConstrained(node.data.alternation.right, pos, target_start);
+                if (!right or self.match_error != null) @memcpy(self.captures, saved);
+                return right and self.match_error == null;
             },
             .backref => return if (self.matchReverseBackreference(node.data.backref, pos)) |start| start == target_start else false,
             .lookahead => return if (self.matchLookahead(node.data.lookahead, pos)) |start| start == target_start else false,
@@ -1669,7 +1753,7 @@ pub const BacktrackEngine = struct {
             },
             .repeat => {
                 const repeat = node.data.repeat;
-                if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+                if (self.fixedRepeatHasChoices(repeat)) {
                     try self.collectFixedRepeatMatches(repeat, pos, positions, true);
                 } else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
                     self.clearCapturesIn(repeat.child);
