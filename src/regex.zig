@@ -1276,7 +1276,12 @@ pub const Regex = struct {
     // from a genuine non-match at every public search/transform entry point.
     fn findBacktracking(self: *const Regex, input: []const u8, start: usize) !?backtrack.BacktrackMatch {
         const engine = @constCast(&self.backtrack_engine.?);
-        const result = engine.findFrom(input, start);
+        const prefix: ?[]const u8 = blk: {
+            const literal = self.opt_info.literal_prefix orelse break :blk null;
+            for (literal) |byte| if (!std.ascii.isAscii(byte)) break :blk null;
+            break :blk literal;
+        };
+        const result = engine.findFromWithPrefix(input, start, prefix);
         if (engine.match_error) |err| return err;
         if (engine.step_count > engine.max_steps) return error.Timeout;
         return result;

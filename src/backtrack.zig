@@ -88,6 +88,13 @@ pub const BacktrackEngine = struct {
     /// Find first match in input at or after `start`, preserving assertions that
     /// refer to the original input rather than a sliced search window.
     pub fn findFrom(self: *BacktrackEngine, input: []const u8, start: usize) ?BacktrackMatch {
+        return self.findFromWithPrefix(input, start, null);
+    }
+
+    /// `prefix`, when supplied, must be a case-sensitive ASCII literal at the
+    /// start of every match. It borrows the caller's immutable analysis. ASCII
+    /// candidate positions also preserve Unicode code-point search boundaries.
+    pub fn findFromWithPrefix(self: *BacktrackEngine, input: []const u8, start: usize, prefix: ?[]const u8) ?BacktrackMatch {
         self.input = input;
 
         const codepoint_search = self.flags.unicode or containsCodepointAtom(self.ast_root);
@@ -101,8 +108,16 @@ pub const BacktrackEngine = struct {
         // position, so the search terminates.
         self.step_count = 0;
         self.match_error = null;
-        const capture_continuations = self.flags.ecmascript and self.hasBackreference(self.ast_root);
+        const capture_continuations = self.flags.ecmascript and
+            (self.hasBackreference(self.ast_root) or self.hasLazyQuantifier(self.ast_root));
         while (pos <= input.len) {
+            if (prefix) |literal| {
+                // ECMA-262 RegExpBuiltinExec searches starts in order. A
+                // required literal rules out intervening starts without
+                // executing matching states; all real candidates still share
+                // the single budget initialized above.
+                pos += std.mem.indexOf(u8, input[pos..], literal) orelse return null;
+            }
             self.resetCaptures();
             const end = if (capture_continuations)
                 self.matchWithContinuations(self.ast_root, pos, false) catch |err| {
@@ -837,6 +852,24 @@ pub const BacktrackEngine = struct {
                 return switch (n.node_type) {
                     .backref => .matched,
                     .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
+    }
+
+    fn hasLazyQuantifier(self: *BacktrackEngine, node: *ast.Node) bool {
+        // ECMA-262 RepeatMatcher tries the continuation before extending a
+        // non-greedy match. Eagerly enumerating all endings can exhaust the
+        // budget on a long tail even when a short match already succeeds.
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    .star => if (!n.data.star.greedy) .matched else .descend,
+                    .plus => if (!n.data.plus.greedy) .matched else .descend,
+                    .optional => if (!n.data.optional.greedy) .matched else .descend,
+                    .repeat => if (!n.data.repeat.greedy) .matched else .descend,
+                    .concat, .alternation, .group, .lookahead, .lookbehind => .descend,
                     else => .skip,
                 };
             }

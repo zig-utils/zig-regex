@@ -999,3 +999,68 @@ test "backtrack: continuations preserve exhaustion errors and search recovery" {
     re.backtrack_engine.?.max_steps = 10000;
     try std.testing.expect(try re.isMatch("aaaa"));
 }
+
+test "backtrack: literal prefilter skips impossible starts without spending match budget" {
+    const allocator = std.testing.allocator;
+    const input = try allocator.alloc(u8, 4096);
+    defer allocator.free(input);
+    @memset(input, 'x');
+    var re = try Regex.compileWithFlags(allocator, "==(.+?)==", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 100;
+    try std.testing.expect((try re.find(input)) == null);
+    @memcpy(input[4000..4007], "==yes==");
+    input[4007] = '\n';
+    var found = (try re.find(input)).?;
+    defer found.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4000), found.start);
+    try std.testing.expectEqualStrings("yes", found.captures[0]);
+    try std.testing.expect((try re.findFrom(input, 4001)) == null);
+}
+
+test "backtrack: literal prefilter preserves scoped flags assertions and capture choices" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "(?i:ab)(.+?)!", "xxABok!", @as(usize, 2), "ok" },
+        .{ "ab(?i:cd)(.+?)!", "xxabCDok!", @as(usize, 2), "ok" },
+        .{ "ab(.+?)!", "xxABok!", @as(usize, 2), "ok" },
+        .{ "(?<=x)ab(.+?)!", "yabno!xabok!", @as(usize, 7), "ok" },
+        .{ "ab(a|aa){2}\\1", "xxabaaaa", @as(usize, 2), "a" },
+        .{ "ab(.+?)!|CD(.+?)!", "xxCDok!", @as(usize, 2), "" },
+        .{ "é(.+?)!", "xxéok!", @as(usize, 2), "ok" },
+    };
+    inline for (cases, 0..) |c, i| {
+        var re = try Regex.compileWithFlags(allocator, c[0], .{ .ecmascript = true, .unicode = true, .case_insensitive = i == 2 });
+        defer re.deinit();
+        var found = (try re.find(c[1])).?;
+        defer found.deinit(allocator);
+        try std.testing.expectEqual(c[2], found.start);
+        try std.testing.expectEqualStrings(c[3], found.captures[0]);
+    }
+}
+
+test "backtrack: literal prefilter retains one budget across candidate starts" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "==(.+?)==", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 100;
+    try std.testing.expectError(error.Timeout, re.find("==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n==x\n"));
+    var found = (try re.find("==yes==")).?;
+    defer found.deinit(allocator);
+    try std.testing.expectEqualStrings("yes", found.captures[0]);
+}
+
+test "backtrack: lazy captures try the continuation before enumerating the tail" {
+    const allocator = std.testing.allocator;
+    const input = try allocator.alloc(u8, 4096);
+    defer allocator.free(input);
+    @memset(input, 'x');
+    @memcpy(input[0..7], "==yes==");
+    var re = try Regex.compileWithFlags(allocator, "==(.+?)==", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 100;
+    var found = (try re.find(input)).?;
+    defer found.deinit(allocator);
+    try std.testing.expectEqualStrings("==yes==", found.slice);
+    try std.testing.expectEqualStrings("yes", found.captures[0]);
+}

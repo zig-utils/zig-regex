@@ -792,7 +792,12 @@ pub const Optimizer = struct {
                 try pending.append(self.allocator, n.data.concat.right);
                 try pending.append(self.allocator, n.data.concat.left);
             },
-            .group => try pending.append(self.allocator, n.data.group.child),
+            .group => {
+                // Scoped flags can change literal equality. Keep any prefix
+                // before the scope, but do not treat its bytes as exact.
+                if (n.data.group.mod != null) return false;
+                try pending.append(self.allocator, n.data.group.child);
+            },
             // Anchors and lookaround consume nothing, so the prefix continues.
             .anchor, .lookahead, .lookbehind, .empty => {},
             // Any of these stop prefix collection.
