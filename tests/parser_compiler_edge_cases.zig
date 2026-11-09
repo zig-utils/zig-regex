@@ -543,3 +543,24 @@ test "compiler: dot repeat" {
     try std.testing.expect(!try regex.isMatch("ab"));
     try std.testing.expect(!try regex.isMatch("abcd"));
 }
+
+test "parser: escaped hyphens stay class atoms rather than range operators" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "[+\\-!]", "+-!", "\"#$%&'()*" },
+        .{ "[a\\-z]", "a-z", "bcmny" },
+        .{ "[a\\x2dz]", "a-z", "bcmny" },
+        .{ "[a\\u002dz]", "a-z", "bcmny" },
+        .{ "[!\\-+]", "!-+", "\"#$%&'()*" },
+        .{ "[a-c]", "abc", "-dz" },
+        .{ "[\\--\\/]", "-./", "+0a" },
+    };
+    inline for (cases) |case| {
+        inline for (.{ common.CompileFlags{}, common.CompileFlags{ .ecmascript = true }, common.CompileFlags{ .ecmascript = true, .unicode = true }, common.CompileFlags{ .ecmascript = true, .unicode = true, .unicode_sets = true } }) |flags| {
+            var re = try Regex.compileWithFlags(allocator, case[0], flags);
+            defer re.deinit();
+            for (case[1]) |c| try std.testing.expect(try re.isMatch(&.{c}));
+            for (case[2]) |c| try std.testing.expect(!try re.isMatch(&.{c}));
+        }
+    }
+}

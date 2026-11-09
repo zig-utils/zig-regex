@@ -2438,7 +2438,11 @@ pub const Parser = struct {
 
             // Check for range (a-z)
             // '-' is only a range operator if there's a character after it
-            if (self.peek() == .literal and self.current_token.value == '-') {
+            // NonemptyClassRanges uses a source `-` separator. An escape that
+            // decodes to '-' is still an atom, not a range operator.
+            if (self.peek() == .literal and self.current_token.value == '-' and
+                self.lexer.input[self.current_token.span.start] == '-')
+            {
                 // Look ahead to see if there's another character (not ])
                 const saved_pos = self.lexer.pos;
                 try self.advance(); // consume -
