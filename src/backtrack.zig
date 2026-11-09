@@ -101,17 +101,29 @@ pub const BacktrackEngine = struct {
         // position, so the search terminates.
         self.step_count = 0;
         self.match_error = null;
+        const capture_continuations = self.flags.ecmascript and self.hasBackreference(self.ast_root);
         while (pos <= input.len) {
             self.resetCaptures();
-            const end = self.matchNode(self.ast_root, pos);
+            const end = if (capture_continuations)
+                self.matchWithContinuations(self.ast_root, pos, false) catch |err| {
+                    self.match_error = err;
+                    return null;
+                }
+            else
+                self.matchNode(self.ast_root, pos);
             // Exhaustion is not a failed assertion: a negative lookaround can
             // invert that failure into success. The public Regex boundary
             // reports Timeout, and must never receive an unverified match.
             if (self.match_error != null or self.step_count > self.max_steps) return null;
             if (end) |end_pos| {
-                if (end_pos > pos or (end_pos == pos and self.canMatchEmpty(self.ast_root))) {
+                // The continuation matcher has already validated every node,
+                // including an unmatched backreference that consumes nothing.
+                if (end_pos > pos or (end_pos == pos and (capture_continuations or self.canMatchEmpty(self.ast_root)))) {
                     // Found a match
-                    const captures = self.allocator.alloc(BacktrackMatch.CaptureGroup, self.captures.len) catch return null;
+                    const captures = self.allocator.alloc(BacktrackMatch.CaptureGroup, self.captures.len) catch |err| {
+                        self.match_error = err;
+                        return null;
+                    };
                     for (self.captures, 0..) |cap, i| {
                         captures[i] = .{
                             .start = cap.start,
@@ -131,6 +143,167 @@ pub const BacktrackEngine = struct {
             pos = if (codepoint_search) nextCodepointStart(input, pos) else pos + 1;
         }
         return null;
+    }
+
+    const ContinuationRepeat = struct {
+        child: *ast.Node,
+        min: usize,
+        max: ?usize,
+        greedy: bool,
+    };
+
+    const ContinuationTask = union(enum) {
+        node: *ast.Node,
+        finish_group: struct { index: ?usize, start: usize, flags: common.CompileFlags },
+        repeat: ContinuationRepeat,
+        advance: struct { next: ContinuationRepeat, start: usize, required: bool },
+        clear: *ast.Node,
+    };
+
+    const ContinuationLink = struct {
+        task: ContinuationTask,
+        next: ?*const ContinuationLink,
+    };
+
+    fn pushContinuation(allocator: std.mem.Allocator, next: ?*const ContinuationLink, task: ContinuationTask) !*const ContinuationLink {
+        const link = try allocator.create(ContinuationLink);
+        link.* = .{ .task = task, .next = next };
+        return link;
+    }
+
+    fn matchWithContinuations(self: *BacktrackEngine, root: *ast.Node, start: usize, comptime reverse: bool) anyerror!?usize {
+        // ECMA-262 CompileSubpattern passes a continuation through every choice.
+        // An ending position alone cannot represent paths whose captures differ:
+        // a later backreference must be able to reject one and accept another.
+        const Choice = struct {
+            head: ?*const ContinuationLink,
+            position: usize,
+            flags: common.CompileFlags,
+            captures: []CaptureGroup,
+        };
+        const initial = try self.allocator.dupe(CaptureGroup, self.captures);
+        defer self.allocator.free(initial);
+        var completed = false;
+        defer if (!completed) {
+            @memcpy(self.captures, initial);
+        };
+        const original_flags = self.flags;
+        defer self.flags = original_flags;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var choices: std.ArrayList(Choice) = .empty;
+        defer choices.deinit(self.allocator);
+        var head: ?*const ContinuationLink = try pushContinuation(allocator, null, .{ .node = root });
+        var position = start;
+        while (true) {
+            if (self.match_error) |err| return err;
+            if (self.step_count > self.max_steps) return error.Timeout;
+            const link = head orelse {
+                completed = true;
+                return position;
+            };
+            self.step_count += 1;
+            if (self.step_count > self.max_steps) return error.Timeout;
+            head = link.next;
+            var failed = false;
+            switch (link.task) {
+                .node => |node| switch (node.node_type) {
+                    .concat => {
+                        const pair = node.data.concat;
+                        head = try pushContinuation(allocator, head, .{ .node = if (reverse) pair.left else pair.right });
+                        head = try pushContinuation(allocator, head, .{ .node = if (reverse) pair.right else pair.left });
+                    },
+                    .alternation => {
+                        const alt = node.data.alternation;
+                        try choices.append(self.allocator, .{
+                            .head = try pushContinuation(allocator, head, .{ .node = alt.right }),
+                            .position = position,
+                            .flags = self.flags,
+                            .captures = try allocator.dupe(CaptureGroup, self.captures),
+                        });
+                        head = try pushContinuation(allocator, head, .{ .node = alt.left });
+                    },
+                    .group => {
+                        const group = node.data.group;
+                        const flags = self.enterGroupFlags(group);
+                        head = try pushContinuation(allocator, head, .{ .finish_group = .{ .index = group.capture_index, .start = position, .flags = flags } });
+                        head = try pushContinuation(allocator, head, .{ .node = group.child });
+                    },
+                    .star, .plus, .optional, .repeat => {
+                        const repeat: ContinuationRepeat = switch (node.node_type) {
+                            .star => .{ .child = node.data.star.child, .min = 0, .max = null, .greedy = node.data.star.greedy },
+                            .plus => .{ .child = node.data.plus.child, .min = 1, .max = null, .greedy = node.data.plus.greedy },
+                            .optional => .{ .child = node.data.optional.child, .min = 0, .max = 1, .greedy = node.data.optional.greedy },
+                            .repeat => .{ .child = node.data.repeat.child, .min = node.data.repeat.bounds.min, .max = node.data.repeat.bounds.max, .greedy = node.data.repeat.greedy },
+                            else => unreachable,
+                        };
+                        head = try pushContinuation(allocator, head, .{ .repeat = repeat });
+                    },
+                    .lookahead, .lookbehind => {
+                        const assertion = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
+                        const saved = if (!assertion.positive) try allocator.dupe(CaptureGroup, self.captures) else null;
+                        // Assertions are atomic: later failure cannot resume an
+                        // alternative inside an already successful assertion.
+                        const matched = if (node.node_type == .lookbehind)
+                            (try self.matchWithContinuations(assertion.child, position, true)) != null
+                        else
+                            (try self.matchWithContinuations(assertion.child, position, false)) != null;
+                        if (saved) |caps| @memcpy(self.captures, caps);
+                        failed = matched != assertion.positive;
+                    },
+                    else => {
+                        const end = if (reverse) self.matchReverseNode(node, position) else self.matchNode(node, position);
+                        if (end) |next| position = next else failed = true;
+                    },
+                },
+                .finish_group => |group| {
+                    if (group.index) |index| {
+                        if (index > 0 and index <= self.captures.len) self.captures[index - 1] = .{
+                            .start = if (reverse) position else group.start,
+                            .end = if (reverse) group.start else position,
+                            .matched = true,
+                        };
+                    }
+                    self.flags = group.flags;
+                },
+                .repeat => |repeat| {
+                    if (repeat.max == null or repeat.max.? != 0) {
+                        const next = ContinuationRepeat{ .child = repeat.child, .min = repeat.min -| 1, .max = if (repeat.max) |max| max - 1 else null, .greedy = repeat.greedy };
+                        var child = try pushContinuation(allocator, head, .{ .advance = .{ .next = next, .start = position, .required = repeat.min != 0 } });
+                        child = try pushContinuation(allocator, child, .{ .node = repeat.child });
+                        child = try pushContinuation(allocator, child, .{ .clear = repeat.child });
+                        if (repeat.min == 0) {
+                            try choices.append(self.allocator, .{
+                                .head = if (repeat.greedy) head else child,
+                                .position = position,
+                                .flags = self.flags,
+                                .captures = try allocator.dupe(CaptureGroup, self.captures),
+                            });
+                            if (repeat.greedy) head = child;
+                        } else head = child;
+                    }
+                },
+                .advance => |advance| {
+                    // RepeatMatcher rejects zero progress only after satisfying
+                    // min. Required empty iterations still consume the budget.
+                    if (!advance.required and position == advance.start) {
+                        failed = true;
+                    } else head = try pushContinuation(allocator, head, .{ .repeat = advance.next });
+                },
+                .clear => |node| {
+                    self.clearCapturesIn(node);
+                    if (self.match_error) |err| return err;
+                },
+            }
+            if (failed) {
+                const choice = choices.pop() orelse return null;
+                head = choice.head;
+                position = choice.position;
+                self.flags = choice.flags;
+                @memcpy(self.captures, choice.captures);
+            }
+        }
     }
 
     fn containsCodepointAtom(node: *ast.Node) bool {
