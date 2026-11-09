@@ -177,21 +177,59 @@ pub const BacktrackEngine = struct {
 
     const ContinuationLink = struct {
         task: ContinuationTask,
-        next: ?*const ContinuationLink,
+        next: ?*ContinuationLink,
+        references: usize,
     };
 
-    fn pushContinuation(allocator: std.mem.Allocator, next: ?*const ContinuationLink, task: ContinuationTask) !*const ContinuationLink {
-        const link = try allocator.create(ContinuationLink);
-        link.* = .{ .task = task, .next = next };
-        return link;
-    }
+    // Choice heads share immutable tails. Recycle a link only when neither the
+    // running path nor a saved alternative can reach it. A lazy scan otherwise
+    // retains every visited character's state until the whole match returns.
+    const ContinuationPool = struct {
+        allocator: std.mem.Allocator,
+        free: ?*ContinuationLink = null,
+
+        fn share(head: ?*ContinuationLink) ?*ContinuationLink {
+            if (head) |link| link.references += 1;
+            return head;
+        }
+
+        // Transfers the caller's tail reference into the new link.
+        fn push(self: *ContinuationPool, next: ?*ContinuationLink, task: ContinuationTask) !*ContinuationLink {
+            const link = if (self.free) |available| blk: {
+                self.free = available.next;
+                break :blk available;
+            } else try self.allocator.create(ContinuationLink);
+            link.* = .{ .task = task, .next = next, .references = 1 };
+            return link;
+        }
+
+        fn release(self: *ContinuationPool, head: ?*ContinuationLink) void {
+            var current = head;
+            while (current) |link| {
+                std.debug.assert(link.references != 0);
+                link.references -= 1;
+                if (link.references != 0) return;
+                current = link.next;
+                link.next = self.free;
+                self.free = link;
+            }
+        }
+
+        fn pop(self: *ContinuationPool, head: *?*ContinuationLink) ?ContinuationTask {
+            const link = head.* orelse return null;
+            const task = link.task;
+            head.* = share(link.next);
+            self.release(link);
+            return task;
+        }
+    };
 
     fn matchWithContinuations(self: *BacktrackEngine, root: *ast.Node, start: usize, comptime reverse: bool) anyerror!?usize {
         // ECMA-262 CompileSubpattern passes a continuation through every choice.
         // An ending position alone cannot represent paths whose captures differ:
         // a later backreference must be able to reject one and accept another.
         const Choice = struct {
-            head: ?*const ContinuationLink,
+            head: ?*ContinuationLink,
             position: usize,
             flags: common.CompileFlags,
             captures: []CaptureGroup,
@@ -207,43 +245,44 @@ pub const BacktrackEngine = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
+        var pool = ContinuationPool{ .allocator = allocator };
+        var retired_captures: std.ArrayList([]CaptureGroup) = .empty;
         var choices: std.ArrayList(Choice) = .empty;
         defer choices.deinit(self.allocator);
-        var head: ?*const ContinuationLink = try pushContinuation(allocator, null, .{ .node = root });
+        var head: ?*ContinuationLink = try pool.push(null, .{ .node = root });
         var position = start;
         while (true) {
             if (self.match_error) |err| return err;
             if (self.step_count > self.max_steps) return error.Timeout;
-            const link = head orelse {
+            const task = pool.pop(&head) orelse {
                 completed = true;
                 return position;
             };
             self.step_count += 1;
             if (self.step_count > self.max_steps) return error.Timeout;
-            head = link.next;
             var failed = false;
-            switch (link.task) {
+            switch (task) {
                 .node => |node| switch (node.node_type) {
                     .concat => {
                         const pair = node.data.concat;
-                        head = try pushContinuation(allocator, head, .{ .node = if (reverse) pair.left else pair.right });
-                        head = try pushContinuation(allocator, head, .{ .node = if (reverse) pair.right else pair.left });
+                        head = try pool.push(head, .{ .node = if (reverse) pair.left else pair.right });
+                        head = try pool.push(head, .{ .node = if (reverse) pair.right else pair.left });
                     },
                     .alternation => {
                         const alt = node.data.alternation;
                         try choices.append(self.allocator, .{
-                            .head = try pushContinuation(allocator, head, .{ .node = alt.right }),
+                            .head = try pool.push(ContinuationPool.share(head), .{ .node = alt.right }),
                             .position = position,
                             .flags = self.flags,
-                            .captures = try allocator.dupe(CaptureGroup, self.captures),
+                            .captures = try snapshotCaptures(allocator, &retired_captures, self.captures),
                         });
-                        head = try pushContinuation(allocator, head, .{ .node = alt.left });
+                        head = try pool.push(head, .{ .node = alt.left });
                     },
                     .group => {
                         const group = node.data.group;
                         const flags = self.enterGroupFlags(group);
-                        head = try pushContinuation(allocator, head, .{ .finish_group = .{ .index = group.capture_index, .start = position, .flags = flags } });
-                        head = try pushContinuation(allocator, head, .{ .node = group.child });
+                        head = try pool.push(head, .{ .finish_group = .{ .index = group.capture_index, .start = position, .flags = flags } });
+                        head = try pool.push(head, .{ .node = group.child });
                     },
                     .star, .plus, .optional, .repeat => {
                         const repeat: ContinuationRepeat = switch (node.node_type) {
@@ -253,7 +292,7 @@ pub const BacktrackEngine = struct {
                             .repeat => .{ .child = node.data.repeat.child, .min = node.data.repeat.bounds.min, .max = node.data.repeat.bounds.max, .greedy = node.data.repeat.greedy },
                             else => unreachable,
                         };
-                        head = try pushContinuation(allocator, head, .{ .repeat = repeat });
+                        head = try pool.push(head, .{ .repeat = repeat });
                     },
                     .lookahead, .lookbehind => {
                         const assertion = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
@@ -285,18 +324,21 @@ pub const BacktrackEngine = struct {
                 .repeat => |repeat| {
                     if (repeat.max == null or repeat.max.? != 0) {
                         const next = ContinuationRepeat{ .child = repeat.child, .min = repeat.min -| 1, .max = if (repeat.max) |max| max - 1 else null, .greedy = repeat.greedy };
-                        var child = try pushContinuation(allocator, head, .{ .advance = .{ .next = next, .start = position, .required = repeat.min != 0 } });
-                        child = try pushContinuation(allocator, child, .{ .node = repeat.child });
-                        child = try pushContinuation(allocator, child, .{ .clear = repeat.child });
+                        var child = try pool.push(ContinuationPool.share(head), .{ .advance = .{ .next = next, .start = position, .required = repeat.min != 0 } });
+                        child = try pool.push(child, .{ .node = repeat.child });
+                        child = try pool.push(child, .{ .clear = repeat.child });
                         if (repeat.min == 0) {
                             try choices.append(self.allocator, .{
                                 .head = if (repeat.greedy) head else child,
                                 .position = position,
                                 .flags = self.flags,
-                                .captures = try allocator.dupe(CaptureGroup, self.captures),
+                                .captures = try snapshotCaptures(allocator, &retired_captures, self.captures),
                             });
                             if (repeat.greedy) head = child;
-                        } else head = child;
+                        } else {
+                            pool.release(head);
+                            head = child;
+                        }
                     }
                 },
                 .advance => |advance| {
@@ -304,7 +346,7 @@ pub const BacktrackEngine = struct {
                     // min. Required empty iterations still consume the budget.
                     if (!advance.required and position == advance.start) {
                         failed = true;
-                    } else head = try pushContinuation(allocator, head, .{ .repeat = advance.next });
+                    } else head = try pool.push(head, .{ .repeat = advance.next });
                 },
                 .clear => |node| {
                     self.clearCapturesIn(node);
@@ -313,12 +355,20 @@ pub const BacktrackEngine = struct {
             }
             if (failed) {
                 const choice = choices.pop() orelse return null;
+                pool.release(head);
                 head = choice.head;
                 position = choice.position;
                 self.flags = choice.flags;
                 @memcpy(self.captures, choice.captures);
+                try retired_captures.append(allocator, choice.captures);
             }
         }
+    }
+
+    fn snapshotCaptures(allocator: std.mem.Allocator, retired: *std.ArrayList([]CaptureGroup), captures: []const CaptureGroup) ![]CaptureGroup {
+        const copy = retired.pop() orelse return allocator.dupe(CaptureGroup, captures);
+        @memcpy(copy, captures);
+        return copy;
     }
 
     fn containsCodepointAtom(node: *ast.Node) bool {
@@ -2617,6 +2667,60 @@ pub const BacktrackEngine = struct {
 // ============================================================================
 // SECURITY TESTS: ReDoS Protection
 // ============================================================================
+
+test "backtrack: lazy continuation retires unreachable scan state" {
+    const allocator = std.testing.allocator;
+    var p = try @import("parser.zig").Parser.init(allocator, "^(.+?)!$");
+    var tree = try p.parse();
+    defer tree.deinit();
+    const input = try allocator.alloc(u8, 65537);
+    defer allocator.free(input);
+    @memset(input, 'a');
+    input[input.len - 1] = '!';
+    const scratch = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(scratch);
+    var fixed = std.heap.FixedBufferAllocator.init(scratch);
+    var engine = try BacktrackEngine.init(fixed.allocator(), tree.root, tree.capture_count, .{ .ecmascript = true });
+    defer engine.deinit();
+    var found = engine.find(input) orelse return engine.match_error orelse error.ExpectedMatch;
+    defer found.deinit(fixed.allocator());
+    try std.testing.expectEqual(input.len, found.end);
+    try std.testing.expectEqual(@as(usize, 0), found.captures[0].start);
+    try std.testing.expectEqual(input.len - 1, found.captures[0].end);
+}
+
+test "backtrack: continuation pool preserves shared tails while recycling dead heads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var pool = BacktrackEngine.ContinuationPool{ .allocator = arena.allocator() };
+    const tail = try pool.push(null, .{ .finish_group = .{ .index = null, .start = 42, .flags = .{} } });
+    var left: ?*BacktrackEngine.ContinuationLink = try pool.push(tail, .{ .finish_group = .{ .index = null, .start = 1, .flags = .{} } });
+    var right: ?*BacktrackEngine.ContinuationLink = try pool.push(BacktrackEngine.ContinuationPool.share(tail), .{ .finish_group = .{ .index = null, .start = 2, .flags = .{} } });
+    try std.testing.expectEqual(@as(usize, 1), pool.pop(&left).?.finish_group.start);
+    try std.testing.expectEqual(@as(usize, 42), pool.pop(&left).?.finish_group.start);
+    try std.testing.expect(left == null);
+    // The retired left head can be overwritten; the shared tail stays live.
+    var reused: ?*BacktrackEngine.ContinuationLink = try pool.push(null, .{ .finish_group = .{ .index = null, .start = 3, .flags = .{} } });
+    try std.testing.expectEqual(@as(usize, 2), pool.pop(&right).?.finish_group.start);
+    try std.testing.expectEqual(@as(usize, 42), pool.pop(&right).?.finish_group.start);
+    try std.testing.expectEqual(@as(usize, 3), pool.pop(&reused).?.finish_group.start);
+    try std.testing.expect(right == null and reused == null);
+}
+
+test "backtrack: pooled continuations propagate every allocation failure" {
+    var p = try @import("parser.zig").Parser.init(std.testing.allocator, "^(a|aa)+?b$");
+    var tree = try p.parse();
+    defer tree.deinit();
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, root: *ast.Node, capture_count: usize) !void {
+            var engine = try BacktrackEngine.init(allocator, root, capture_count, .{ .ecmascript = true });
+            defer engine.deinit();
+            var found = engine.find("aaaab") orelse return engine.match_error orelse error.ExpectedMatch;
+            defer found.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 5), found.end);
+        }
+    }.run, .{ tree.root, tree.capture_count });
+}
 
 test "backtrack: ReDoS protection - nested quantifiers (a+)+b" {
     const allocator = std.testing.allocator;
