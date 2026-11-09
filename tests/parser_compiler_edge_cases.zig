@@ -687,3 +687,52 @@ test "backtrack: single repeats preserve reverse captures and modifier scopes" {
         }
     }
 }
+
+test "backtrack: fixed required repeats retain noncapturing choices" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "^(?!(?:a?){2}a{2}$)", "aa", false },
+        .{ "^(?=(?:a?){2}a{2}$)", "aa", true },
+        .{ "^(?=(?:aa|a){2}a$)", "aaa", true },
+        .{ "(?<=^a(?:a?){2})$", "a", true },
+        .{ "(?<!^a(?:a?){2})$", "a", false },
+        .{ "(?:(?=a)(?:aa|a)){2}", "aa", true },
+        .{ "(?<=(?:(?:aa|a)(?<=a)){2})$", "aa", true },
+    };
+    inline for (cases) |case| {
+        var re = try Regex.compileWithFlags(allocator, case[0], .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(case[2], try re.isMatch(case[1]));
+    }
+}
+
+test "backtrack: fixed choices report allocation failure and reset search state" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "^(?=(?:a?){2}a{2}$)", .{ .ecmascript = true });
+    defer re.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    re.backtrack_engine.?.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, re.isMatch("aa"));
+    re.backtrack_engine.?.allocator = allocator;
+    try std.testing.expect(try re.isMatch("aa"));
+    try std.testing.expect(re.backtrack_engine.?.match_error == null);
+}
+
+test "backtrack: fixed empty iterations still consume the search budget" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "(?=(?:a{0}){1000000}b?)", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 50;
+    try std.testing.expectError(error.Timeout, re.isMatch(""));
+}
+
+test "backtrack: direct fixed repeats preserve child priority and outer captures" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "((?:(?=a)(?:a|aa)){2})", .{ .ecmascript = true });
+    defer re.deinit();
+    var hit = (try re.find("aaaa")).?;
+    defer hit.deinit(allocator);
+    try std.testing.expectEqualStrings("aa", hit.slice);
+    try std.testing.expectEqualStrings("aa", hit.captures[0]);
+    try std.testing.expect(hit.captures_present[0]);
+}

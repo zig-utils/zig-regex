@@ -1277,6 +1277,7 @@ pub const Regex = struct {
     fn findBacktracking(self: *const Regex, input: []const u8, start: usize) !?backtrack.BacktrackMatch {
         const engine = @constCast(&self.backtrack_engine.?);
         const result = engine.findFrom(input, start);
+        if (engine.match_error) |err| return err;
         if (engine.step_count > engine.max_steps) return error.Timeout;
         return result;
     }

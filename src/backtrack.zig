@@ -35,6 +35,10 @@ pub const BacktrackEngine = struct {
     step_count: usize,
     /// Maximum steps before aborting (prevents catastrophic backtracking)
     max_steps: usize,
+    /// Search-local, with the same serialized matcher ownership as input,
+    /// captures and step_count. Reset at findFrom entry; no process-global state.
+    /// Choice traversal must not turn allocation failures into ordinary misses.
+    match_error: ?anyerror = null,
 
     pub const CaptureGroup = struct {
         start: usize,
@@ -96,13 +100,14 @@ pub const BacktrackEngine = struct {
         // single budget, once it is spent matchNode fail-fasts at every remaining
         // position, so the search terminates.
         self.step_count = 0;
+        self.match_error = null;
         while (pos <= input.len) {
             self.resetCaptures();
             const end = self.matchNode(self.ast_root, pos);
             // Exhaustion is not a failed assertion: a negative lookaround can
             // invert that failure into success. The public Regex boundary
             // reports Timeout, and must never receive an unverified match.
-            if (self.step_count > self.max_steps) return null;
+            if (self.match_error != null or self.step_count > self.max_steps) return null;
             if (end) |end_pos| {
                 if (end_pos > pos or (end_pos == pos and self.canMatchEmpty(self.ast_root))) {
                     // Found a match
@@ -177,7 +182,7 @@ pub const BacktrackEngine = struct {
     pub fn matchNode(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
         // ReDoS protection: increment step counter and check limit
         self.step_count += 1;
-        if (self.step_count > self.max_steps) {
+        if (self.match_error != null or self.step_count > self.max_steps) {
             return null; // Abort matching to prevent catastrophic backtracking
         }
 
@@ -274,7 +279,7 @@ pub const BacktrackEngine = struct {
 
             // The capture-fixup re-match below is only needed when the left side
             // actually has groups; skipping it keeps `\p{…}+`-style scans linear.
-            const left_has_groups = self.hasGroups(concat.left);
+            const left_has_groups = self.hasCapturingGroup(concat.left);
             for (left_positions.items) |left_end| {
                 // Restore clean captures before each attempt
                 @memcpy(self.captures, clean_captures);
@@ -454,6 +459,12 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchQuantifierConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_end: usize) bool {
+        if (node.node_type == .repeat and self.fixedRepeatHasUncapturedChoices(node.data.repeat)) {
+            var ends: std.ArrayList(usize) = .empty;
+            defer ends.deinit(self.allocator);
+            self.collectFixedRepeatMatches(node.data.repeat, pos, &ends, false) catch return false;
+            return std.mem.indexOfScalar(usize, ends.items, target_end) != null;
+        }
         switch (node.node_type) {
             .star, .plus, .optional, .repeat => {
                 const child = switch (node.node_type) {
@@ -571,8 +582,8 @@ pub const BacktrackEngine = struct {
     /// A pattern's spine is as deep as the pattern is long, so these checks
     /// cannot recurse: `/aaaa…a/` with 30,000 elements is an ordinary pattern
     /// that other engines run, and one native frame per element overflowed the
-    /// stack (#23). Allocation failure answers true, which routes matching to
-    /// the general path rather than a faster specialised one.
+    /// stack (#23). Allocation failure answers conservatively and records OOM
+    /// so the public search cannot export a result from incomplete analysis.
     fn anyNodeMatches(self: *BacktrackEngine, root: *ast.Node, comptime decide: fn (*BacktrackEngine, *ast.Node) NodeVerdict) bool {
         var pending: std.ArrayList(*ast.Node) = .empty;
         defer pending.deinit(self.allocator);
@@ -581,7 +592,10 @@ pub const BacktrackEngine = struct {
             switch (decide(self, node)) {
                 .matched => return true,
                 .skip => {},
-                .descend => self.pushNodeChildren(&pending, node) catch return true,
+                .descend => self.pushNodeChildren(&pending, node) catch {
+                    self.match_error = error.OutOfMemory;
+                    return true;
+                },
             }
         }
         return false;
@@ -782,7 +796,9 @@ pub const BacktrackEngine = struct {
                 // ECMA-262 RepeatMatcher with min=max=1 still permits the
                 // continuation to backtrack inside its one required child.
                 // Greediness only orders optional additional iterations.
-                if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
+                if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+                    try self.collectFixedRepeatMatches(repeat, pos, positions, false);
+                } else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
                     self.clearCapturesIn(repeat.child);
                     try self.collectAllMatches(repeat.child, pos, positions);
                 } else if (repeat.greedy) {
@@ -816,7 +832,7 @@ pub const BacktrackEngine = struct {
                     }
 
                     // For each left ending, set captures and try right side
-                    const left_has_groups = self.hasGroups(c.left);
+                    const left_has_groups = self.hasCapturingGroup(c.left);
                     for (left_positions.items) |left_end| {
                         // Save captures, set them for this left position, try right
                         const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
@@ -932,6 +948,62 @@ pub const BacktrackEngine = struct {
             current_pos = next_pos;
             try positions.append(self.allocator, current_pos);
         }
+    }
+
+    fn fixedRepeatHasUncapturedChoices(self: *BacktrackEngine, repeat: ast.Node.Repeat) bool {
+        return repeat.bounds.min > 1 and repeat.bounds.max != null and
+            repeat.bounds.max.? == repeat.bounds.min and
+            !self.hasCapturingGroup(repeat.child) and
+            (self.hasQuantifiers(repeat.child) or self.hasAlternation(repeat.child));
+    }
+
+    fn collectFixedRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), comptime reverse: bool) anyerror!void {
+        return self.collectFixedRepeatMatchesInner(repeat, pos, positions, reverse) catch |err| {
+            self.match_error = err;
+            return err;
+        };
+    }
+
+    fn collectFixedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), comptime reverse: bool) anyerror!void {
+        var frontier: std.ArrayList(usize) = .empty;
+        defer frontier.deinit(self.allocator);
+        var next: std.ArrayList(usize) = .empty;
+        defer next.deinit(self.allocator);
+        var ends: std.ArrayList(usize) = .empty;
+        defer ends.deinit(self.allocator);
+        var seen = std.AutoHashMap(usize, void).init(self.allocator);
+        defer seen.deinit();
+        try frontier.append(self.allocator, pos);
+
+        var count: usize = 0;
+        while (count < repeat.bounds.min) : (count += 1) {
+            // A nullable child may enumerate endings without matching an atom.
+            // Charge the iteration too so even enormous empty repeats stop.
+            self.step_count += 1;
+            if (self.step_count > self.max_steps) return error.Timeout;
+            next.clearRetainingCapacity();
+            seen.clearRetainingCapacity();
+            for (frontier.items) |start| {
+                ends.clearRetainingCapacity();
+                if (reverse) {
+                    try self.collectAllReverseMatches(repeat.child, start, &ends);
+                } else {
+                    try self.collectAllMatches(repeat.child, start, &ends);
+                }
+                if (self.match_error) |err| return err;
+                if (self.step_count > self.max_steps) return error.Timeout;
+                for (ends.items) |end| {
+                    // ECMA-262 RepeatMatcher: with no captures in the body,
+                    // paths at the same iteration/position have identical
+                    // continuations. Keep the first to preserve child priority.
+                    const entry = try seen.getOrPut(end);
+                    if (!entry.found_existing) try next.append(self.allocator, end);
+                }
+            }
+            if (next.items.len == 0) return;
+            std.mem.swap(std.ArrayList(usize), &frontier, &next);
+        }
+        try positions.appendSlice(self.allocator, frontier.items);
     }
 
     fn collectGreedyRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize)) !void {
@@ -1097,6 +1169,12 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchRepeat(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize) ?usize {
+        if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+            var ends: std.ArrayList(usize) = .empty;
+            defer ends.deinit(self.allocator);
+            self.collectFixedRepeatMatches(repeat, pos, &ends, false) catch return null;
+            return if (ends.items.len != 0) ends.items[0] else null;
+        }
         const min = repeat.bounds.min;
         const max = repeat.bounds.max;
 
@@ -1297,7 +1375,7 @@ pub const BacktrackEngine = struct {
 
     fn matchReverseNode(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
         self.step_count += 1;
-        if (self.step_count > self.max_steps) return null;
+        if (self.match_error != null or self.step_count > self.max_steps) return null;
 
         return switch (node.node_type) {
             .literal => self.matchReverseLiteral(node.data.literal, pos),
@@ -1427,6 +1505,12 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReverseRepeat(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize) ?usize {
+        if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+            var starts: std.ArrayList(usize) = .empty;
+            defer starts.deinit(self.allocator);
+            self.collectFixedRepeatMatches(repeat, pos, &starts, true) catch return null;
+            return if (starts.items.len != 0) starts.items[0] else null;
+        }
         const min = repeat.bounds.min;
         const max = repeat.bounds.max;
 
@@ -1461,6 +1545,12 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReverseNodeConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_start: usize) bool {
+        if (node.node_type == .repeat and self.fixedRepeatHasUncapturedChoices(node.data.repeat)) {
+            var starts: std.ArrayList(usize) = .empty;
+            defer starts.deinit(self.allocator);
+            self.collectFixedRepeatMatches(node.data.repeat, pos, &starts, true) catch return false;
+            return std.mem.indexOfScalar(usize, starts.items, target_start) != null;
+        }
         if (node.node_type == .repeat) {
             const repeat = node.data.repeat;
             if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
@@ -1579,7 +1669,9 @@ pub const BacktrackEngine = struct {
             },
             .repeat => {
                 const repeat = node.data.repeat;
-                if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
+                if (self.fixedRepeatHasUncapturedChoices(repeat)) {
+                    try self.collectFixedRepeatMatches(repeat, pos, positions, true);
+                } else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
                     self.clearCapturesIn(repeat.child);
                     try self.collectAllReverseMatches(repeat.child, pos, positions);
                 } else try self.collectReverseRepeatMatches(repeat, pos, positions);
