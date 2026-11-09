@@ -1262,9 +1262,23 @@ pub const Regex = struct {
             },
             .backtracking => {
                 const engine_mut = @constCast(&self.backtrack_engine.?);
-                return engine_mut.isMatch(input);
+                if (try self.findBacktracking(input, 0)) |result| {
+                    var hit = result;
+                    hit.deinit(engine_mut.allocator);
+                    return true;
+                }
+                return false;
             },
         }
+    }
+
+    // Keep the existing search-wide budget, but distinguish exhausted work
+    // from a genuine non-match at every public search/transform entry point.
+    fn findBacktracking(self: *const Regex, input: []const u8, start: usize) !?backtrack.BacktrackMatch {
+        const engine = @constCast(&self.backtrack_engine.?);
+        const result = engine.findFrom(input, start);
+        if (engine.step_count > engine.max_steps) return error.Timeout;
+        return result;
     }
 
     /// Helper to build a Match from a VM MatchResult
@@ -1507,8 +1521,7 @@ pub const Regex = struct {
                 return null;
             },
             .backtracking => {
-                const engine_mut = @constCast(&self.backtrack_engine.?);
-                if (engine_mut.find(input)) |result| {
+                if (try self.findBacktracking(input, 0)) |result| {
                     var mut_result = result;
                     defer mut_result.deinit(self.allocator);
                     return try self.buildBacktrackMatch(input, result);
@@ -1655,8 +1668,7 @@ pub const Regex = struct {
                 return null;
             },
             .backtracking => {
-                const engine_mut = @constCast(&self.backtrack_engine.?);
-                if (engine_mut.findFrom(input, start)) |result| {
+                if (try self.findBacktracking(input, start)) |result| {
                     var mut_result = result;
                     defer mut_result.deinit(self.allocator);
                     return try self.buildBacktrackMatch(input, result);
@@ -1673,7 +1685,10 @@ pub const Regex = struct {
 
     fn findAllInner(self: *const Regex, allocator: std.mem.Allocator, input: []const u8, reuse_dfa: ?*dfa.LazyDfa, reuse_vm: ?*vm.VM) ![]Match {
         var matches: std.ArrayList(Match) = .empty;
-        errdefer matches.deinit(allocator);
+        errdefer {
+            for (matches.items) |*hit| hit.deinit(allocator);
+            matches.deinit(allocator);
+        }
 
         var pos: usize = 0;
 
@@ -1871,8 +1886,7 @@ pub const Regex = struct {
             switch (self.engine_type) {
                 .thompson_nfa => unreachable, // handled above
                 .backtracking => {
-                    const engine_mut = @constCast(&self.backtrack_engine.?);
-                    if (engine_mut.find(input[pos..])) |result| {
+                    if (try self.findBacktracking(input[pos..], 0)) |result| {
                         var mut_result = result;
                         defer mut_result.deinit(self.allocator);
 
@@ -2294,11 +2308,10 @@ pub const Regex = struct {
                 return n;
             },
             .backtracking => {
-                const engine_mut = @constCast(&self.backtrack_engine.?);
                 // `<= input.len` so a zero-width match at end of input is counted,
                 // matching the Thompson path and find()/isMatch().
                 while (pos <= input.len) {
-                    if (engine_mut.find(input[pos..])) |result| {
+                    if (try self.findBacktracking(input[pos..], 0)) |result| {
                         var mut_result = result;
                         mut_result.deinit(self.allocator);
                         const adjusted_start = pos + result.start;
@@ -2505,39 +2518,28 @@ pub const Regex = struct {
                         }
                     },
                     .backtracking => {
-                        const engine_mut = @constCast(&self.regex.backtrack_engine.?);
-
-                        // Try matching at current position
-                        engine_mut.resetCaptures();
-                        if (engine_mut.matchNode(engine_mut.ast_root, self.pos)) |end_pos| {
-                            if (end_pos > self.pos or (end_pos == self.pos and engine_mut.canMatchEmpty(engine_mut.ast_root))) {
-                                // Build match result
-                                var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, engine_mut.captures.len);
-                                errdefer captures_list.deinit(allocator);
-
-                                for (engine_mut.captures) |cap| {
-                                    if (cap.matched) {
-                                        try captures_list.append(allocator, self.input[cap.start..cap.end]);
-                                    } else {
-                                        try captures_list.append(allocator, "");
-                                    }
-                                }
-
-                                const captures = try captures_list.toOwnedSlice(allocator);
-
-                                const match_result = Match{
-                                    .slice = self.input[self.pos..end_pos],
-                                    .start = self.pos,
-                                    .end = end_pos,
-                                    .captures = captures,
-                                };
-
-                                // Move past this match
-                                self.pos = if (end_pos > self.pos) end_pos else end_pos + 1;
-
-                                return match_result;
+                        // Search initializes the input and one budget for all
+                        // candidate positions. Do not reuse stale search state
+                        // or reset the budget independently at each position.
+                        if (try self.regex.findBacktracking(self.input, self.pos)) |result| {
+                            var hit = result;
+                            defer hit.deinit(self.regex.allocator);
+                            var captures_list = try std.ArrayList([]const u8).initCapacity(allocator, result.captures.len);
+                            errdefer captures_list.deinit(allocator);
+                            for (result.captures) |cap| {
+                                try captures_list.append(allocator, if (cap.matched) self.input[cap.start..cap.end] else "");
                             }
+                            const captures = try captures_list.toOwnedSlice(allocator);
+                            self.pos = if (result.end > result.start) result.end else result.end + 1;
+                            return Match{
+                                .slice = self.input[result.start..result.end],
+                                .start = result.start,
+                                .end = result.end,
+                                .captures = captures,
+                            };
                         }
+                        self.done = true;
+                        return null;
                     },
                 }
 

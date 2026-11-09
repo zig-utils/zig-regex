@@ -564,3 +564,87 @@ test "parser: escaped hyphens stay class atoms rather than range operators" {
         }
     }
 }
+
+test "backtrack: exhausted budget is an error across public searches" {
+    const allocator = std.testing.allocator;
+    const input = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX";
+    var re = try Regex.compileWithFlags(allocator, "^(?!.+X)", .{ .ecmascript = true });
+    defer re.deinit();
+    try std.testing.expect(re.backtrack_engine != null);
+    re.backtrack_engine.?.max_steps = 25;
+    try std.testing.expectError(error.Timeout, re.isMatch(input));
+    try std.testing.expectError(error.Timeout, re.find(input));
+    try std.testing.expectError(error.Timeout, re.findFrom(input, 0));
+    try std.testing.expectError(error.Timeout, re.findAll(allocator, input));
+    try std.testing.expectError(error.Timeout, re.count(input));
+    try std.testing.expectError(error.Timeout, re.countMatchingLines(input));
+    var matcher = re.matcher();
+    defer matcher.deinit();
+    try std.testing.expectError(error.Timeout, matcher.isMatch(input));
+    try std.testing.expectError(error.Timeout, matcher.find(input));
+    try std.testing.expectError(error.Timeout, matcher.findAll(allocator, input));
+    try std.testing.expectError(error.Timeout, matcher.count(input));
+    try std.testing.expectError(error.Timeout, re.replace(allocator, input, "BAD"));
+    try std.testing.expectError(error.Timeout, re.replaceAll(allocator, input, "BAD"));
+    try std.testing.expectError(error.Timeout, re.split(allocator, input));
+    var iter = re.iterator(input);
+    try std.testing.expectError(error.Timeout, iter.next(allocator));
+
+    re.backtrack_engine.?.max_steps = 10000;
+    try std.testing.expect(!try re.isMatch(input));
+    try std.testing.expect((try re.find(input)) == null);
+    iter.reset();
+    try std.testing.expect((try iter.next(allocator)) == null);
+    try std.testing.expect(try re.isMatch("aaaa"));
+}
+
+test "backtrack: budget exhaustion preserves partial cleanup and offset searches" {
+    const allocator = std.testing.allocator;
+    const input = "zaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX";
+    var re = try Regex.compileWithFlags(allocator, "(z)|(?!.+X)", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 25;
+    // A capture-bearing first match must be freed when a later search times out.
+    try std.testing.expectError(error.Timeout, re.findAll(allocator, input));
+    try std.testing.expectError(error.Timeout, re.findFrom(input, 1));
+    var matcher = re.matcher();
+    defer matcher.deinit();
+    try std.testing.expectError(error.Timeout, matcher.findFrom(input, 1));
+
+    var positive = try Regex.compileWithFlags(allocator, "(?=a+X)", .{ .ecmascript = true });
+    defer positive.deinit();
+    positive.backtrack_engine.?.max_steps = 25;
+    try std.testing.expectError(error.Timeout, positive.isMatch(input));
+    positive.backtrack_engine.?.max_steps = 10000;
+    try std.testing.expect(try positive.isMatch(input));
+}
+
+test "backtrack: exact budget succeeds and iterator initializes its own input" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "(?!a)", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 2;
+    try std.testing.expect(try re.isMatch("b"));
+    try std.testing.expectEqual(@as(usize, 2), re.backtrack_engine.?.step_count);
+    re.backtrack_engine.?.max_steps = 1;
+    try std.testing.expectError(error.Timeout, re.isMatch("b"));
+
+    var capture = try Regex.compileWithFlags(allocator, "(a)(?=b)", .{ .ecmascript = true });
+    defer capture.deinit();
+    var prior = (try capture.find("ab")).?;
+    prior.deinit(allocator);
+    var iter = capture.iterator("zab");
+    var hit = (try iter.next(allocator)).?;
+    defer hit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), hit.start);
+    try std.testing.expectEqual(@as(usize, 2), hit.end);
+    try std.testing.expectEqualStrings("a", hit.slice);
+    try std.testing.expectEqualStrings("a", hit.captures[0]);
+    try std.testing.expect((try iter.next(allocator)) == null);
+}
+
+test "backtrack: runtime budget fix retains critical compilation guards" {
+    inline for (.{ "(a+)+\\1", "(a*)*\\1" }) |pattern| {
+        try std.testing.expectError(error.PatternTooComplex, Regex.compileWithFlags(std.testing.allocator, pattern, .{ .ecmascript = true }));
+    }
+}

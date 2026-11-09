@@ -98,7 +98,12 @@ pub const BacktrackEngine = struct {
         self.step_count = 0;
         while (pos <= input.len) {
             self.resetCaptures();
-            if (self.matchNode(self.ast_root, pos)) |end_pos| {
+            const end = self.matchNode(self.ast_root, pos);
+            // Exhaustion is not a failed assertion: a negative lookaround can
+            // invert that failure into success. The public Regex boundary
+            // reports Timeout, and must never receive an unverified match.
+            if (self.step_count > self.max_steps) return null;
+            if (end) |end_pos| {
                 if (end_pos > pos or (end_pos == pos and self.canMatchEmpty(self.ast_root))) {
                     // Found a match
                     const captures = self.allocator.alloc(BacktrackMatch.CaptureGroup, self.captures.len) catch return null;
