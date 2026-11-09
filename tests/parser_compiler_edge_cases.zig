@@ -648,3 +648,42 @@ test "backtrack: runtime budget fix retains critical compilation guards" {
         try std.testing.expectError(error.PatternTooComplex, Regex.compileWithFlags(std.testing.allocator, pattern, .{ .ecmascript = true }));
     }
 }
+
+test "backtrack: a single required repetition preserves inner choices" {
+    const allocator = std.testing.allocator;
+    var negative = try Regex.compileWithFlags(allocator, "^(?!(?:a?){1}a$)", .{ .ecmascript = true });
+    defer negative.deinit();
+    try std.testing.expect(!try negative.isMatch("a"));
+    var positive = try Regex.compileWithFlags(allocator, "^(?=(?:a?){1}a$)", .{ .ecmascript = true });
+    defer positive.deinit();
+    try std.testing.expect(try positive.isMatch("a"));
+}
+
+test "backtrack: single repeats preserve reverse captures and modifier scopes" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pattern: []const u8, input: []const u8, index: usize, captures: []const []const u8 };
+    const cases = [_]Case{
+        .{ .pattern = "^(?=(a?){1}(a)$)", .input = "a", .index = 0, .captures = &.{ "", "a" } },
+        .{ .pattern = "^(?=(aa|a){1}?(a)$)", .input = "aa", .index = 0, .captures = &.{ "a", "a" } },
+        .{ .pattern = "(?<=a(a?){1})$", .input = "a", .index = 1, .captures = &.{""} },
+        .{ .pattern = "(?<=a(a??){1})$", .input = "a", .index = 1, .captures = &.{""} },
+        .{ .pattern = "(?<=a(aa|a){1})$", .input = "aa", .index = 2, .captures = &.{"a"} },
+        .{ .pattern = "^(a?){1}a\\1$", .input = "a", .index = 0, .captures = &.{""} },
+        .{ .pattern = "^(?=(?i:a?){1}a$)", .input = "Aa", .index = 0, .captures = &.{} },
+        .{ .pattern = "(?<=a(?i:a?){1})$", .input = "aA", .index = 2, .captures = &.{} },
+    };
+    for (cases) |case| {
+        inline for (.{ false, true }) |unicode| {
+            var re = try Regex.compileWithFlags(allocator, case.pattern, .{ .ecmascript = true, .unicode = unicode });
+            defer re.deinit();
+            var hit = (try re.find(case.input)).?;
+            defer hit.deinit(allocator);
+            try std.testing.expectEqual(case.index, hit.start);
+            try std.testing.expectEqual(case.captures.len, hit.captures.len);
+            for (case.captures, 0..) |expected, i| {
+                try std.testing.expect(hit.captures_present[i]);
+                try std.testing.expectEqualStrings(expected, hit.captures[i]);
+            }
+        }
+    }
+}

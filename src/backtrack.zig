@@ -377,6 +377,8 @@ pub const BacktrackEngine = struct {
             .empty => return pos == target_end,
             .group => {
                 const group = node.data.group;
+                const saved_flags = self.enterGroupFlags(group);
+                defer self.flags = saved_flags;
                 if (self.matchNodeConstrained(group.child, pos, target_end)) {
                     if (group.capture_index) |index| {
                         if (index > 0 and index <= self.captures.len) {
@@ -777,7 +779,13 @@ pub const BacktrackEngine = struct {
             },
             .repeat => {
                 const repeat = node.data.repeat;
-                if (repeat.greedy) {
+                // ECMA-262 RepeatMatcher with min=max=1 still permits the
+                // continuation to backtrack inside its one required child.
+                // Greediness only orders optional additional iterations.
+                if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
+                    self.clearCapturesIn(repeat.child);
+                    try self.collectAllMatches(repeat.child, pos, positions);
+                } else if (repeat.greedy) {
                     try self.collectGreedyRepeatMatches(repeat, pos, positions);
                 } else {
                     try self.collectLazyRepeatMatches(repeat, pos, positions);
@@ -866,6 +874,8 @@ pub const BacktrackEngine = struct {
                 // NOTE: Don't set captures here - they'll be set by matchNodeConstrained
                 // when matchConcat picks a specific position
                 const group = node.data.group;
+                const saved_flags = self.enterGroupFlags(group);
+                defer self.flags = saved_flags;
                 if (self.hasQuantifiers(group.child) or self.hasAlternation(group.child)) {
                     try self.collectAllMatches(group.child, pos, positions);
                 } else {
@@ -1158,6 +1168,18 @@ pub const BacktrackEngine = struct {
         return set.matchLongestMode(self.input, pos, self.classSetCaseFoldMode());
     }
 
+    // Endpoint collection and constrained capture reconstruction must execute
+    // a group's child under the same lexical modifiers as an ordinary match.
+    fn enterGroupFlags(self: *BacktrackEngine, group: ast.Node.Group) common.CompileFlags {
+        const saved = self.flags;
+        if (group.mod) |m| {
+            if (m.i) |v| self.flags.case_insensitive = v;
+            if (m.m) |v| self.flags.multiline = v;
+            if (m.s) |v| self.flags.dot_all = v;
+        }
+        return saved;
+    }
+
     fn matchGroup(self: *BacktrackEngine, group: ast.Node.Group, pos: usize) ?usize {
         const start_pos = pos;
 
@@ -1439,6 +1461,13 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReverseNodeConstrained(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_start: usize) bool {
+        if (node.node_type == .repeat) {
+            const repeat = node.data.repeat;
+            if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
+                self.clearCapturesIn(repeat.child);
+                return self.matchReverseNodeConstrained(repeat.child, pos, target_start);
+            }
+        }
         switch (node.node_type) {
             .literal => return if (self.matchReverseLiteral(node.data.literal, pos)) |start| start == target_start else false,
             .any => return if (self.matchReverseAny(pos)) |start| start == target_start else false,
@@ -1449,6 +1478,8 @@ pub const BacktrackEngine = struct {
             .empty => return pos == target_start,
             .group => {
                 const group = node.data.group;
+                const saved_flags = self.enterGroupFlags(group);
+                defer self.flags = saved_flags;
                 if (self.matchReverseNodeConstrained(group.child, pos, target_start)) {
                     if (group.capture_index) |index| {
                         if (index > 0 and index <= self.captures.len) {
@@ -1546,7 +1577,13 @@ pub const BacktrackEngine = struct {
                     try self.collectAllReverseMatches(quant.child, pos, positions);
                 }
             },
-            .repeat => try self.collectReverseRepeatMatches(node.data.repeat, pos, positions),
+            .repeat => {
+                const repeat = node.data.repeat;
+                if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
+                    self.clearCapturesIn(repeat.child);
+                    try self.collectAllReverseMatches(repeat.child, pos, positions);
+                } else try self.collectReverseRepeatMatches(repeat, pos, positions);
+            },
             .concat => {
                 const c = node.data.concat;
                 var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
@@ -1566,6 +1603,8 @@ pub const BacktrackEngine = struct {
             },
             .group => {
                 const group = node.data.group;
+                const saved_flags = self.enterGroupFlags(group);
+                defer self.flags = saved_flags;
                 if (self.hasQuantifiers(group.child) or self.hasAlternation(group.child)) {
                     try self.collectAllReverseMatches(group.child, pos, positions);
                 } else if (self.matchReverseNode(node, pos)) |start| {
