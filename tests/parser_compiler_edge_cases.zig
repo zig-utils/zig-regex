@@ -822,3 +822,90 @@ test "backtrack: fixed capture reconstruction respects greediness and nesting" {
         }
     }
 }
+
+test "backtrack: bounded required repeats preserve ordered alternatives" {
+    const allocator = std.testing.allocator;
+    const cases = .{
+        .{ "^(?=(?:a?){2,3}a{2}$)", "aa", true },
+        .{ "^(?!(?:a?){2,3}a{2}$)", "aa", false },
+        .{ "^(?=(a?){2,3}a{2}$)", "aa", true },
+        .{ "(?<=^a(?:a?){2,3})$", "a", true },
+    };
+    inline for (cases) |case| {
+        var re = try Regex.compileWithFlags(allocator, case[0], .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(case[2], try re.isMatch(case[1]));
+    }
+}
+
+test "backtrack: bounded repeats preserve depth first priority and final spans" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pattern: []const u8, input: []const u8, index: usize = 0, text: []const u8 = "", captures: []const ?[]const u8, spans: []const ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(abc|a|bcXYZ){1,3}(?=)", .input = "abcXYZ", .text = "abc", .captures = &.{"abc"}, .spans = &.{.{ 0, 3 }} },
+        .{ .pattern = "^(a|aa){1,3}?$", .input = "aaa", .text = "aaa", .captures = &.{"a"}, .spans = &.{.{ 2, 3 }} },
+        .{ .pattern = "^(a?){0,2}$", .input = "a", .text = "a", .captures = &.{"a"}, .spans = &.{.{ 0, 1 }} },
+        .{ .pattern = "(?<=a(?:(a)|(b)){0,2})$", .input = "aa", .index = 2, .captures = &.{ "a", null }, .spans = &.{ .{ 1, 2 }, null } },
+        .{ .pattern = "^(?=((a)?b){1,3}$)", .input = "abb", .captures = &.{ "b", null }, .spans = &.{ .{ 2, 3 }, null } },
+        .{ .pattern = "^(a??){0,2}?", .input = "", .captures = &.{null}, .spans = &.{null} },
+        .{ .pattern = "^(a?){2,3}$", .input = "", .captures = &.{""}, .spans = &.{.{ 0, 0 }} },
+        .{ .pattern = "^(?=(?i:(a?)){1,3}aa$)", .input = "AAaa", .captures = &.{"A"}, .spans = &.{.{ 1, 2 }} },
+        .{ .pattern = "(?<=^a(?i:(a??)){1,3})$", .input = "aAA", .index = 3, .captures = &.{"A"}, .spans = &.{.{ 1, 2 }} },
+    };
+    for (cases) |case| {
+        inline for (.{ false, true }) |unicode| {
+            var re = try Regex.compileWithFlags(allocator, case.pattern, .{ .ecmascript = true, .unicode = unicode });
+            defer re.deinit();
+            const found = try re.find(case.input);
+            try std.testing.expect(found != null);
+            var hit = found.?;
+            defer hit.deinit(allocator);
+            try std.testing.expectEqual(case.index, hit.start);
+            try std.testing.expectEqualStrings(case.text, hit.slice);
+            try std.testing.expectEqual(case.captures.len, hit.captures.len);
+            for (case.captures, case.spans, 0..) |expected, span, i| {
+                if (expected) |text| {
+                    try std.testing.expect(hit.captures_present[i]);
+                    try std.testing.expectEqualStrings(text, hit.captures[i]);
+                    try std.testing.expectEqual(span.?, hit.capture_spans[i]);
+                } else try std.testing.expect(!hit.captures_present[i]);
+            }
+        }
+    }
+}
+
+test "backtrack: bounded repeat failures clean up and preserve resource errors" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "^(?=(a?){2,3}a{2}$)", .{ .ecmascript = true });
+    defer re.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    re.backtrack_engine.?.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, re.find("aa"));
+    re.backtrack_engine.?.allocator = allocator;
+    const found = try re.find("aa");
+    try std.testing.expect(found != null);
+    var hit = found.?;
+    defer hit.deinit(allocator);
+    try std.testing.expect(hit.captures_present[0]);
+    try std.testing.expectEqualStrings("", hit.captures[0]);
+    inline for (.{ "(?=(()?){1000000,1000001}b?)", "(?<=(()?){1000000,1000001})" }) |pattern| {
+        var empty = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
+        defer empty.deinit();
+        empty.backtrack_engine.?.max_steps = 50;
+        try std.testing.expectError(error.Timeout, empty.isMatch(""));
+    }
+}
+
+test "backtrack: bounded repeats match long input within an unchanged budget" {
+    const allocator = std.testing.allocator;
+    const input: [200]u8 = @splat('a');
+    var re = try Regex.compileWithFlags(allocator, "(a|aa){1,1000}(?=)", .{ .ecmascript = true });
+    defer re.deinit();
+    re.backtrack_engine.?.max_steps = 5000;
+    const found = try re.find(&input);
+    try std.testing.expect(found != null);
+    var hit = found.?;
+    defer hit.deinit(allocator);
+    try std.testing.expectEqualStrings(&input, hit.slice);
+    try std.testing.expectEqualStrings("a", hit.captures[0]);
+}
