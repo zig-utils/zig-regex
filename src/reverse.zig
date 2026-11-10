@@ -46,6 +46,7 @@ fn reverseTransition(allocator: std.mem.Allocator, t: Transition, from: StateId)
         .char => Transition.char(t.data.char, from),
         .any => Transition.any(from),
         .anchor => Transition.anchor(swapAnchor(t.data.anchor), from),
+        .literal_assertion => error.NotImplemented,
         .char_class => try Transition.charClass(allocator, t.data.char_class, from),
     };
 }
@@ -162,4 +163,10 @@ test "reverse NFA: longest match from end locates the start" {
     const back_len = sc.end.? - (input.len - end_pos);
     try std.testing.expectEqual(@as(usize, 3), back_len); // "123" has length 3
     try std.testing.expectEqual(@as(usize, 2), end_pos - back_len); // start offset
+}
+
+test "reverse DFA construction refuses literal assertion predicates" {
+    var re = try Regex.compileWithFlags(std.testing.allocator, "(?<=pre)a", .{ .ecmascript = true });
+    defer re.deinit();
+    try std.testing.expectError(error.NotImplemented, buildReverse(std.testing.allocator, &re.nfa));
 }

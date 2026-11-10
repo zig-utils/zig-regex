@@ -151,6 +151,7 @@ pub const LazyDfa = struct {
         var line_anchor = false;
         for (nfa.states.items) |st| {
             for (st.transitions.items) |t| {
+                if (t.transition_type == .literal_assertion) return error.NotImplemented;
                 if (t.transition_type == .anchor) {
                     anchored = true;
                     if (t.data.anchor == .start_line or t.data.anchor == .end_line) line_anchor = true;

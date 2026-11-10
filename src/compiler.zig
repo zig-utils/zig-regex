@@ -17,7 +17,62 @@ pub const TransitionType = enum {
     char_class, // Match a character class
     any, // Match any character (.)
     anchor, // Anchor (^, $, \b, \B)
+    literal_assertion, // Bounded ASCII lookahead/lookbehind, without captures
 };
+
+/// A small literal predicate owns its bytes after the parse tree is freed.
+/// Restricting admission to ASCII without folding keeps byte/code-point
+/// direction and Canonicalize out of this path; other assertions backtrack.
+pub const LiteralAssertion = struct {
+    bytes: [32]u8 = undefined,
+    len: u8 = 0,
+    behind: bool = false,
+    positive: bool = true,
+
+    // ECMA-262 22.2.2.4 CompileAssertion: test at the current position
+    // (backwards for lookbehind), invert negative predicates, consume nothing.
+    pub fn matches(self: LiteralAssertion, input: []const u8, pos: usize) bool {
+        if (pos > input.len) return false;
+        const text = self.bytes[0..self.len];
+        const matched = if (self.behind)
+            pos >= text.len and std.mem.eql(u8, input[pos - text.len .. pos], text)
+        else
+            input.len - pos >= text.len and std.mem.eql(u8, input[pos..][0..text.len], text);
+        return matched == self.positive;
+    }
+};
+
+pub fn fixedAsciiLiteral(root: *ast.Node) ?LiteralAssertion {
+    var result = LiteralAssertion{};
+    var pending: [128]*ast.Node = undefined;
+    pending[0] = root;
+    var count: usize = 1;
+    while (count != 0) {
+        count -= 1;
+        const node = pending[count];
+        switch (node.node_type) {
+            .empty => {},
+            .literal => {
+                if (node.data.literal >= 0x80 or result.len == result.bytes.len) return null;
+                result.bytes[result.len] = node.data.literal;
+                result.len += 1;
+            },
+            .concat => {
+                if (count + 2 > pending.len) return null;
+                pending[count] = node.data.concat.right;
+                pending[count + 1] = node.data.concat.left;
+                count += 2;
+            },
+            .group => {
+                if (node.data.group.capture_index != null or node.data.group.mod != null) return null;
+                pending[count] = node.data.group.child;
+                count += 1;
+            },
+            else => return null,
+        }
+    }
+    return result;
+}
 
 /// Transition in the NFA
 pub const Transition = struct {
@@ -35,6 +90,7 @@ pub const Transition = struct {
         char_class: common.CharClass,
         any: void,
         anchor: ast.AnchorType,
+        literal_assertion: LiteralAssertion,
     };
 
     pub fn epsilon(to: StateId) Transition {
@@ -158,6 +214,7 @@ pub const NFA = struct {
     accept_states: std.ArrayList(StateId),
     allocator: std.mem.Allocator,
     max_states: usize = std.math.maxInt(usize),
+    has_literal_assertions: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) NFA {
         return .{
@@ -252,8 +309,27 @@ pub const Compiler = struct {
             // `requiresBacktracking`, so this only fires when lowerable.
             .class_set => try self.compileClassSet(node.data.class_set),
             // These features require backtracking engine
-            .lookahead, .lookbehind, .backref, .unicode_property => @import("errors.zig").RegexError.NotImplemented,
+            .lookahead => try self.compileLiteralAssertion(node.data.lookahead, false),
+            .lookbehind => try self.compileLiteralAssertion(node.data.lookbehind, true),
+            .backref, .unicode_property => @import("errors.zig").RegexError.NotImplemented,
         };
+    }
+
+    fn compileLiteralAssertion(self: *Compiler, assertion: ast.Node.Assertion, behind: bool) !Fragment {
+        if (!self.flags.ecmascript or self.flags.case_insensitive or self.flags.unicode or self.flags.unicode_sets)
+            return RegexError.NotImplemented;
+        var literal = fixedAsciiLiteral(assertion.child) orelse return RegexError.NotImplemented;
+        literal.behind = behind;
+        literal.positive = assertion.positive;
+        const start = try self.nfa.addState();
+        const accept = try self.nfa.addState();
+        try self.nfa.getState(start).addTransition(.{
+            .transition_type = .literal_assertion,
+            .to = accept,
+            .data = .{ .literal_assertion = literal },
+        });
+        self.nfa.has_literal_assertions = true;
+        return .{ .start = start, .accept = accept };
     }
 
     /// Compile a literal character

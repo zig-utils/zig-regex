@@ -201,6 +201,12 @@ pub const NFAOptimizer = struct {
                 return true;
             },
             .anchor => trans1.data.anchor == trans2.data.anchor,
+            .literal_assertion => blk: {
+                const a = trans1.data.literal_assertion;
+                const b = trans2.data.literal_assertion;
+                break :blk a.behind == b.behind and a.positive == b.positive and
+                    std.mem.eql(u8, a.bytes[0..a.len], b.bytes[0..b.len]);
+            },
         };
     }
 
@@ -254,6 +260,12 @@ pub const NFAOptimizer = struct {
                 }
             },
             .anchor => std.hash.autoHash(&hasher, @backingInt(trans.data.anchor)),
+            .literal_assertion => {
+                const a = trans.data.literal_assertion;
+                std.hash.autoHash(&hasher, a.behind);
+                std.hash.autoHash(&hasher, a.positive);
+                hasher.update(a.bytes[0..a.len]);
+            },
         }
 
         return hasher.final();
@@ -316,6 +328,10 @@ pub const NFAVisualizer = struct {
             .char_class => try std.fmt.allocPrint(self.allocator, "[class]", .{}),
             .any => try self.allocator.dupe(u8, "."),
             .anchor => try std.fmt.allocPrint(self.allocator, "{s}", .{@tagName(trans.data.anchor)}),
+            .literal_assertion => try std.fmt.allocPrint(self.allocator, "literal {s} {s}", .{
+                if (trans.data.literal_assertion.behind) "lookbehind" else "lookahead",
+                if (trans.data.literal_assertion.positive) "positive" else "negative",
+            }),
         };
     }
 
@@ -326,6 +342,7 @@ pub const NFAVisualizer = struct {
         var class_count: usize = 0;
         var any_count: usize = 0;
         var anchor_count: usize = 0;
+        var literal_assertion_count: usize = 0;
         var accepting_count: usize = 0;
 
         for (self.nfa.states.items) |state| {
@@ -338,6 +355,7 @@ pub const NFAVisualizer = struct {
                     .char_class => class_count += 1,
                     .any => any_count += 1,
                     .anchor => anchor_count += 1,
+                    .literal_assertion => literal_assertion_count += 1,
                 }
             }
         }
@@ -351,7 +369,8 @@ pub const NFAVisualizer = struct {
         try writer.print("    CharClass: {d}\n", .{class_count});
         try writer.print("    Any: {d}\n", .{any_count});
         try writer.print("    Anchor: {d}\n", .{anchor_count});
-        try writer.print("  Total Transitions: {d}\n", .{epsilon_count + char_count + class_count + any_count + anchor_count});
+        try writer.print("    Literal Assertions: {d}\n", .{literal_assertion_count});
+        try writer.print("  Total Transitions: {d}\n", .{epsilon_count + char_count + class_count + any_count + anchor_count + literal_assertion_count});
     }
 };
 

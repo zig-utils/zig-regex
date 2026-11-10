@@ -165,7 +165,7 @@ pub const Regex = struct {
         // quantified capture boundaries overlap, ECMAScript capture precedence
         // needs the capture-aware backtracker.
         var onepass_plan: ?*onepass.Plan = null;
-        var needs_backtracking = requiresBacktracking(tree.root, flags, flags.ecmascript and tree.capture_count == 0);
+        var needs_backtracking = requiresBacktracking(tree.root, flags, flags.ecmascript and (tree.capture_count == 0 or (tree.capture_count == 1 and hasSpanningAssertionCapture(tree.root))));
         if (!needs_backtracking and tree.capture_count > 0) {
             onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
             if (onepass_plan == null and hasAmbiguousCaptureBoundary(tree.root, flags))
@@ -595,10 +595,10 @@ pub const Regex = struct {
         // Empty-width assertions (`^` `$` `\A` `\z` `\b` `\B`, incl. multiline)
         // are now evaluated inside the lazy DFA, so anchored patterns are
         // eligible. Lazy quantifiers still keep NFA semantics (longest-match
-        // would differ), and lookaround/backref/unicode-property patterns never
-        // reach here (they compile to the backtracking engine).
+        // would differ). Literal lookarounds need input at the current position
+        // and stay on the VM; other lookarounds/backrefs/properties backtrack.
         return self.engine_type == .thompson_nfa and
-            !self.opt_info.has_lazy;
+            !self.nfa.has_literal_assertions and !self.opt_info.has_lazy;
     }
 
     /// Whether the DFA loops have any candidate prefilter to apply. Under `i`,
@@ -2658,13 +2658,55 @@ fn detectBoundedLiteral(allocator: std.mem.Allocator, root: *ast.Node, flags: co
     return bl;
 }
 
+// One consuming capture spanning the pattern has no competing capture
+// histories at an NFA state. Boundary assertions consume nothing, so this
+// shape preserves the capture while the ordered VM chooses the match end.
+fn hasSpanningAssertionCapture(root: *ast.Node) bool {
+    var pending: [128]*ast.Node = undefined;
+    pending[0] = root;
+    var count: usize = 1;
+    var captured = false;
+    var asserted = false;
+    while (count != 0) {
+        count -= 1;
+        const node = pending[count];
+        switch (node.node_type) {
+            .empty, .anchor => {},
+            .lookahead, .lookbehind => asserted = true,
+            .group => {
+                if (node.data.group.mod != null) return false;
+                if (node.data.group.capture_index != null) {
+                    if (captured) return false;
+                    captured = true;
+                } else {
+                    pending[count] = node.data.group.child;
+                    count += 1;
+                }
+            },
+            .concat => {
+                if (count + 2 > pending.len) return false;
+                pending[count] = node.data.concat.right;
+                pending[count + 1] = node.data.concat.left;
+                count += 2;
+            },
+            else => return false,
+        }
+    }
+    return captured and asserted;
+}
+
 // The ECMAScript priority-ordered VM honors lazy edges and alternation order.
-// Admit those constructs only when the complete pattern has no captures;
-// capture clearing/precedence still uses the existing backtracking decision.
-fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_capture_free: bool) bool {
+// Admit them without captures or with one spanning capture and boundary
+// assertions; competing capture histories retain the backtracking decision.
+fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_quantifiers: bool) bool {
     switch (node.node_type) {
         // These features require backtracking
-        .lookahead, .lookbehind, .backref, .unicode_property => return true,
+        .lookahead, .lookbehind => {
+            const a = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
+            return !flags.ecmascript or flags.case_insensitive or flags.unicode or flags.unicode_sets or
+                compiler.fixedAsciiLiteral(a.child) == null;
+        },
+        .backref, .unicode_property => return true,
 
         // Under `/iu`, ECMAScript word-boundary assertions treat characters
         // that canonicalize to ASCII word characters (U+017F, U+212A) as word
@@ -2692,7 +2734,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_cap
                 .optional => node.data.optional.greedy,
                 else => unreachable,
             };
-            if (!greedy and !ordered_capture_free) return true;
+            if (!greedy and !ordered_quantifiers) return true;
 
             // Recursively check child
             const child = switch (node.node_type) {
@@ -2701,32 +2743,32 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_cap
                 .optional => node.data.optional.child,
                 else => unreachable,
             };
-            if (!ordered_capture_free and containsAlternation(child)) return true;
-            return requiresBacktracking(child, flags, ordered_capture_free);
+            if (!ordered_quantifiers and containsAlternation(child)) return true;
+            return requiresBacktracking(child, flags, ordered_quantifiers);
         },
         .repeat => {
-            if (!node.data.repeat.greedy and !ordered_capture_free) return true;
+            if (!node.data.repeat.greedy and !ordered_quantifiers) return true;
             if (node.data.repeat.bounds.min > MAX_NFA_REPEAT_EXPANSION) return true;
             if (node.data.repeat.bounds.max) |max| {
                 if (max > MAX_NFA_REPEAT_EXPANSION) return true;
             }
-            if (!ordered_capture_free and containsAlternation(node.data.repeat.child)) return true;
-            return requiresBacktracking(node.data.repeat.child, flags, ordered_capture_free);
+            if (!ordered_quantifiers and containsAlternation(node.data.repeat.child)) return true;
+            return requiresBacktracking(node.data.repeat.child, flags, ordered_quantifiers);
         },
 
         // Recursively check compound nodes
         .concat => {
-            return requiresBacktracking(node.data.concat.left, flags, ordered_capture_free) or
-                requiresBacktracking(node.data.concat.right, flags, ordered_capture_free);
+            return requiresBacktracking(node.data.concat.left, flags, ordered_quantifiers) or
+                requiresBacktracking(node.data.concat.right, flags, ordered_quantifiers);
         },
         .alternation => {
             if (containsCapture(node)) return true;
-            return requiresBacktracking(node.data.alternation.left, flags, ordered_capture_free) or
-                requiresBacktracking(node.data.alternation.right, flags, ordered_capture_free);
+            return requiresBacktracking(node.data.alternation.left, flags, ordered_quantifiers) or
+                requiresBacktracking(node.data.alternation.right, flags, ordered_quantifiers);
         },
         // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
         // which only the backtracking engine honors.
-        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags, ordered_capture_free),
+        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags, ordered_quantifiers),
 
         // The byte NFA can lower ordinary UTF-8 code points directly. In
         // ECMAScript Unicode mode, however, adjacent WTF-8 high/low surrogate
@@ -3748,7 +3790,10 @@ test "ECMAScript bounded backtracking repeats retain the last accepted captures"
     for (cases) |c| {
         var regex = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true });
         defer regex.deinit();
-        try std.testing.expectEqual(EngineType.backtracking, regex.engine_type);
+        // A fixed ASCII assertion can now use the NFA with a simple
+        // bounded capture; the other histories still need the backtracker.
+        const expected_engine: EngineType = if (std.mem.eql(u8, c.pattern, "(?=a)(a){1,3}")) .thompson_nfa else .backtracking;
+        try std.testing.expectEqual(expected_engine, regex.engine_type);
         var found = try regex.findFrom(c.input, c.from);
         defer if (found) |*f| f.deinit(allocator);
         try expectLeftmostFirst(c, found);
@@ -3982,7 +4027,7 @@ test "ECMAScript capture-free ordered quantifiers use the NFA" {
 
 test "ECMAScript capture-free ordered dispatch preserves backtracking guards" {
     const allocator = std.testing.allocator;
-    for ([_][]const u8{ "(a*?)", "a*?(?=b)", "(a)\\1", "(?i:a*?)" }) |pattern| {
+    for ([_][]const u8{ "(a*?)", "a*?(?=b+)", "(a)\\1", "(?i:a*?)" }) |pattern| {
         var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
         defer re.deinit();
         try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
@@ -3990,4 +4035,122 @@ test "ECMAScript capture-free ordered dispatch preserves backtracking guards" {
     try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(a+)+\\1", .{ .ecmascript = true }));
     try std.testing.expectError(RegexError.PatternTooComplex, Regex.compile(allocator, "(a*)*"));
     try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(?:a{1000}){1000}", .{ .ecmascript = true }));
+}
+
+test "ECMAScript literal assertions retain ordered spans and a spanning capture" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pattern: []const u8, input: []const u8, from: usize, span: ?[2]usize, capture: ?[]const u8 };
+    // Node spans converted from UTF-16 indices to the library's byte offsets.
+    const cases = [_]Case{
+        .{ .pattern = "(?<=image-set\\()((?:[\\w-]{1,256}\\([^)]*\\)|[^)])*)(?=\\))", .input = "image-set(foo(a), bar(b))", .from = 0, .span = .{ 10, 24 }, .capture = "foo(a), bar(b)" },
+        .{ .pattern = "(?<=image-set\\()((?:[\\w-]{1,256}\\([^)]*\\)|[^)])*)(?=\\))", .input = "image-set(foo(a), bar(b))", .from = 1, .span = .{ 10, 24 }, .capture = "foo(a), bar(b)" },
+        .{ .pattern = "(?<=image-set\\()((?:[\\w-]{1,256}\\([^)]*\\)|[^)])*)(?=\\))", .input = "image-set(foo(a), bar(b))", .from = 10, .span = .{ 10, 24 }, .capture = "foo(a), bar(b)" },
+        .{ .pattern = "(?<=image-set\\()((?:[\\w-]{1,256}\\([^)]*\\)|[^)])*)(?=\\))", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=pre)(?:ab|a)*?b(?=!)", .input = "preaaab!", .from = 0, .span = .{ 3, 7 }, .capture = null },
+        .{ .pattern = "(?<=pre)(?:ab|a)*?b(?=!)", .input = "preaaab!", .from = 1, .span = .{ 3, 7 }, .capture = null },
+        .{ .pattern = "(?<=pre)(?:ab|a)*?b(?=!)", .input = "zpreaaab!q", .from = 0, .span = .{ 4, 8 }, .capture = null },
+        .{ .pattern = "(?<=pre)(?:ab|a)*?b(?=!)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<!pre)(?:ab|a)*b(?!x)", .input = "b", .from = 0, .span = .{ 0, 1 }, .capture = null },
+        .{ .pattern = "(?<!pre)(?:ab|a)*b(?!x)", .input = "ab", .from = 0, .span = .{ 0, 2 }, .capture = null },
+        .{ .pattern = "(?<!pre)(?:ab|a)*b(?!x)", .input = "ab", .from = 1, .span = .{ 1, 2 }, .capture = null },
+        .{ .pattern = "(?<!pre)(?:ab|a)*b(?!x)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=pre)((?:ab|a)*?b)(?=!)", .input = "preaaab!", .from = 0, .span = .{ 3, 7 }, .capture = "aaab" },
+        .{ .pattern = "(?<=pre)((?:ab|a)*?b)(?=!)", .input = "preaaab!", .from = 1, .span = .{ 3, 7 }, .capture = "aaab" },
+        .{ .pattern = "(?<=pre)((?:ab|a)*?b)(?=!)", .input = "zpreaaab!q", .from = 0, .span = .{ 4, 8 }, .capture = "aaab" },
+        .{ .pattern = "(?<=pre)((?:ab|a)*?b)(?=!)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=pre)(?<body>(?:ab|a)*b)(?!x)", .input = "preaaab!", .from = 0, .span = .{ 3, 7 }, .capture = "aaab" },
+        .{ .pattern = "(?<=pre)(?<body>(?:ab|a)*b)(?!x)", .input = "preaaab!", .from = 1, .span = .{ 3, 7 }, .capture = "aaab" },
+        .{ .pattern = "(?<=pre)(?<body>(?:ab|a)*b)(?!x)", .input = "zpreaaab!q", .from = 0, .span = .{ 4, 8 }, .capture = "aaab" },
+        .{ .pattern = "(?<=pre)(?<body>(?:ab|a)*b)(?!x)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "a(?=b)b", .input = "ab", .from = 0, .span = .{ 0, 2 }, .capture = null },
+        .{ .pattern = "a(?=b)b", .input = "abc", .from = 0, .span = .{ 0, 2 }, .capture = null },
+        .{ .pattern = "a(?=b)b", .input = "baabc", .from = 0, .span = .{ 2, 4 }, .capture = null },
+        .{ .pattern = "a(?=b)b", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "a(?!b)c", .input = "ac", .from = 0, .span = .{ 0, 2 }, .capture = null },
+        .{ .pattern = "a(?!b)c", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=a)b", .input = "ab", .from = 0, .span = .{ 1, 2 }, .capture = null },
+        .{ .pattern = "(?<=a)b", .input = "ab", .from = 1, .span = .{ 1, 2 }, .capture = null },
+        .{ .pattern = "(?<=a)b", .input = "abc", .from = 0, .span = .{ 1, 2 }, .capture = null },
+        .{ .pattern = "(?<=a)b", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<!a)b", .input = "b", .from = 0, .span = .{ 0, 1 }, .capture = null },
+        .{ .pattern = "(?<!a)b", .input = "baabc", .from = 0, .span = .{ 0, 1 }, .capture = null },
+        .{ .pattern = "(?<!a)b", .input = "preb!", .from = 0, .span = .{ 3, 4 }, .capture = null },
+        .{ .pattern = "(?<!a)b", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?=)a*?", .input = "", .from = 0, .span = .{ 0, 0 }, .capture = null },
+        .{ .pattern = "(?=)a*?", .input = "a", .from = 0, .span = .{ 0, 0 }, .capture = null },
+        .{ .pattern = "(?=)a*?", .input = "a", .from = 1, .span = .{ 1, 1 }, .capture = null },
+        .{ .pattern = "(?!)a", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=)a+", .input = "a", .from = 0, .span = .{ 0, 1 }, .capture = null },
+        .{ .pattern = "(?<=)a+", .input = "ab", .from = 0, .span = .{ 0, 1 }, .capture = null },
+        .{ .pattern = "(?<=)a+", .input = "ac", .from = 0, .span = .{ 0, 1 }, .capture = null },
+        .{ .pattern = "(?<=)a+", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<!)a", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?:(?<=a)b|a)*?c", .input = "ac", .from = 0, .span = .{ 0, 2 }, .capture = null },
+        .{ .pattern = "(?:(?<=a)b|a)*?c", .input = "ac", .from = 1, .span = .{ 1, 2 }, .capture = null },
+        .{ .pattern = "(?:(?<=a)b|a)*?c", .input = "abc", .from = 0, .span = .{ 0, 3 }, .capture = null },
+        .{ .pattern = "(?:(?<=a)b|a)*?c", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=pre)(a*?)(?=b)", .input = "preaaab!", .from = 0, .span = .{ 3, 6 }, .capture = "aaa" },
+        .{ .pattern = "(?<=pre)(a*?)(?=b)", .input = "preaaab!", .from = 1, .span = .{ 3, 6 }, .capture = "aaa" },
+        .{ .pattern = "(?<=pre)(a*?)(?=b)", .input = "xpreabx", .from = 0, .span = .{ 4, 5 }, .capture = "a" },
+        .{ .pattern = "(?<=pre)(a*?)(?=b)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=pre)(a*)(?=a)", .input = "preaaab!", .from = 0, .span = .{ 3, 5 }, .capture = "aa" },
+        .{ .pattern = "(?<=pre)(a*)(?=a)", .input = "preaaab!", .from = 1, .span = .{ 3, 5 }, .capture = "aa" },
+        .{ .pattern = "(?<=pre)(a*)(?=a)", .input = "xpreabx", .from = 0, .span = .{ 4, 4 }, .capture = "" },
+        .{ .pattern = "(?<=pre)(a*)(?=a)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=pre)(a*?)(?=a)", .input = "preaaab!", .from = 0, .span = .{ 3, 3 }, .capture = "" },
+        .{ .pattern = "(?<=pre)(a*?)(?=a)", .input = "preaaab!", .from = 1, .span = .{ 3, 3 }, .capture = "" },
+        .{ .pattern = "(?<=pre)(a*?)(?=a)", .input = "xpreabx", .from = 0, .span = .{ 4, 4 }, .capture = "" },
+        .{ .pattern = "(?<=pre)(a*?)(?=a)", .input = "", .from = 0, .span = null, .capture = null },
+        .{ .pattern = "(?<=(?:pre))(a+)(?!b)", .input = "preaaab!", .from = 0, .span = .{ 3, 5 }, .capture = "aa" },
+        .{ .pattern = "(?<=(?:pre))(a+)(?!b)", .input = "preaaab!", .from = 1, .span = .{ 3, 5 }, .capture = "aa" },
+        .{ .pattern = "(?<=(?:pre))(a+)(?!b)", .input = "preaaaa", .from = 0, .span = .{ 3, 7 }, .capture = "aaaa" },
+        .{ .pattern = "(?<=(?:pre))(a+)(?!b)", .input = "", .from = 0, .span = null, .capture = null },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.thompson_nfa, re.engine_type);
+        try std.testing.expect(!re.dfaEligible());
+        var matcher = re.matcher();
+        defer matcher.deinit();
+        var m = try matcher.findFrom(c.input, c.from);
+        defer if (m) |*found| found.deinit(allocator);
+        if (c.span) |span| {
+            const found = m orelse return error.TestExpectedMatch;
+            try std.testing.expectEqual(span, [2]usize{ found.start, found.end });
+            if (c.capture) |capture| {
+                try std.testing.expectEqual(@as(usize, 1), found.captures.len);
+                try std.testing.expect(found.captures_present[0]);
+                try std.testing.expectEqualStrings(capture, found.captures[0]);
+            } else try std.testing.expectEqual(@as(usize, 0), found.captures.len);
+        } else try std.testing.expect(m == null);
+    }
+}
+
+test "ECMAScript literal assertions preserve searches and dispatch limits" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "(?<=pre)a+(?=!)", .{ .ecmascript = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("preaa! x prea!"));
+    try std.testing.expect(!try re.isMatch("praaaa!"));
+    try std.testing.expectEqual(@as(usize, 2), try re.count("preaa! x prea!"));
+    const all = try re.findAll(allocator, "preaa! x prea!");
+    defer {
+        for (all) |*m| m.deinit(allocator);
+        allocator.free(all);
+    }
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+    try std.testing.expectEqualStrings("aa", all[0].slice);
+    try std.testing.expectEqualStrings("a", all[1].slice);
+    try std.testing.expectError(error.NotImplemented, dfa.LazyDfa.init(allocator, &re.nfa, re.flags));
+    for ([_][]const u8{ "(?<=(a))b", "(?<=a+)b", "(?<=a|bc)d", "(?<=é)a", "(?<=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)b" }) |pattern| {
+        var control = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
+        defer control.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, control.engine_type);
+    }
+    for ([_]common.CompileFlags{ .{ .ecmascript = true, .unicode = true }, .{ .ecmascript = true, .case_insensitive = true } }) |flags| {
+        var control = try Regex.compileWithFlags(allocator, "(?<=pre)a", flags);
+        defer control.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, control.engine_type);
+    }
 }

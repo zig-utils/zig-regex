@@ -283,7 +283,7 @@ pub const VM = struct {
                             transition.data.char_class.matchesCI(c)
                         else
                             transition.data.char_class.matches(c),
-                        .anchor, .epsilon => false,
+                        .anchor, .epsilon, .literal_assertion => false,
                     };
                     if (!matches) continue;
                     var moved = try self.cloneThread(thread.*);
@@ -350,6 +350,7 @@ pub const VM = struct {
                 const follow = switch (transition.transition_type) {
                     .epsilon => true,
                     .anchor => self.anchorHolds(transition.data.anchor, input, pos),
+                    .literal_assertion => transition.data.literal_assertion.matches(input, pos),
                     else => false,
                 };
                 if (!follow or visited[transition.to]) continue;
@@ -396,7 +397,7 @@ pub const VM = struct {
     fn hasConsuming(state: *const compiler.State) bool {
         for (state.transitions.items) |transition| switch (transition.transition_type) {
             .char, .char_class, .any => return true,
-            .epsilon, .anchor => {},
+            .epsilon, .anchor, .literal_assertion => {},
         };
         return false;
     }
@@ -516,7 +517,7 @@ pub const VM = struct {
                             transition.data.char_class.matchesCI(c)
                         else
                             transition.data.char_class.matches(c),
-                        .anchor => false, // Anchors don't consume input
+                        .anchor, .literal_assertion => false, // Assertions do not consume input
                         .epsilon => false, // Already handled in epsilon closure
                     };
 
@@ -623,6 +624,13 @@ pub const VM = struct {
 
                     try threads.append(self.allocator, new_thread);
                     // Don't recurse immediately - let addEpsilonClosure handle it iteratively
+                },
+                .literal_assertion => {
+                    if (!transition.data.literal_assertion.matches(input, pos) or visited[transition.to]) continue;
+                    var next = try self.cloneThread(thread);
+                    next.state = transition.to;
+                    self.applyTransitionCaptures(&next, transition, pos);
+                    try threads.append(self.allocator, next);
                 },
                 .anchor => {
                     const anchor_type = transition.data.anchor;
