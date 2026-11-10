@@ -293,7 +293,29 @@ pub const PatternAnalyzer = struct {
             .literal, .char_class, .class_set, .unicode_property, .anchor => true,
             .group => self.leadingLiteral(node.data.group.child),
             .concat => self.leadingLiteral(node.data.concat.left),
+            // A disjoint choice of single ASCII literals consumes exactly one
+            // byte, just like a character class. Capturing separator choices
+            // such as `(-|_)` must not change the nesting classification of the
+            // equivalent `[-_]` prefix. Do not admit overlapping or multi-byte
+            // branches through this rule.
+            .alternation => singleByteChoice(node) != null,
             else => false,
+        };
+    }
+
+    fn singleByteChoice(node: *ast.Node) ?u128 {
+        return switch (node.node_type) {
+            .literal => if (node.data.literal < 128)
+                @as(u128, 1) << @as(u7, @intCast(node.data.literal))
+            else
+                null,
+            .group => singleByteChoice(node.data.group.child),
+            .alternation => blk: {
+                const left = singleByteChoice(node.data.alternation.left) orelse return null;
+                const right = singleByteChoice(node.data.alternation.right) orelse return null;
+                break :blk if (left & right == 0) left | right else null;
+            },
+            else => null,
         };
     }
 
@@ -822,5 +844,34 @@ test "analyzer: unicode-property delimited quantifier is not critical" {
         var result = try analyzePattern(allocator, tree.root);
         defer result.deinit(allocator);
         try std.testing.expectEqual(RiskLevel.critical, result.risk_level);
+    }
+}
+
+test "analyzer: disjoint literal separator choices match character-class prefixes" {
+    const allocator = std.testing.allocator;
+    const parser = @import("parser.zig");
+    for ([_][]const u8{
+        "^((-|_)(a(-[a-z]{2,8})+))*$",
+        "^([-_](a(-[a-z]{2,8})+))*$",
+        "^(((-)|(_)|/)(a(-[a-z]{2,8})+))*$",
+    }) |pattern| {
+        var p = try parser.Parser.init(allocator, pattern);
+        var tree = try p.parse();
+        defer tree.deinit();
+        try analyzeAndValidate(allocator, tree.root, .high);
+    }
+
+    // This recognition rule is only a deterministic single-byte choice; it
+    // must not classify overlapping or variable-length branches as atoms.
+    for ([_][]const u8{
+        "^((a|a)(a+))*$",
+        "^((a|aa)(a+))*$",
+        "^((a+|b+)(a+))*$",
+        "^((a|b|a)(a+))*$",
+    }) |pattern| {
+        var p = try parser.Parser.init(allocator, pattern);
+        var tree = try p.parse();
+        defer tree.deinit();
+        try std.testing.expectError(RegexError.PatternTooComplex, analyzeAndValidate(allocator, tree.root, .high));
     }
 }

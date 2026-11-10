@@ -4154,3 +4154,19 @@ test "ECMAScript literal assertions preserve searches and dispatch limits" {
         try std.testing.expectEqual(EngineType.backtracking, control.engine_type);
     }
 }
+
+test "compile BCP47 grammar with captured separator choices" {
+    const allocator = std.testing.allocator;
+    const pattern = "(^(x(-[A-Za-z0-9]{1,8})+)$)|(^(((en-GB-oed)|(i-ami)|(i-bnn)|(i-default)|(i-enochian)|(i-hak)|(i-klingon)|(i-lux)|(i-mingo)|(i-navajo)|(i-pwn)|(i-tao)|(i-tay)|(i-tsu)|(sgn-BE-FR)|(sgn-BE-NL)|(sgn-CH-DE))|((art-lojban)|(cel-gaulish)|(no-bok)|(no-nyn)|(zh-guoyu)|(zh-hakka)|(zh-min)|(zh-min-nan)|(zh-xiang)))$)|(^(([a-zA-Z]{2,3}(-([A-Za-z]{3}(-[A-Za-z]{3}){0,2}))?)|([a-zA-Z]{5,8}))((-|_)([A-Za-z]{4}))?((-|_)([A-Za-z]{2}|\\d{3}))?((-|_)([A-Za-z0-9]{5,8}|(\\d[A-Z-a-z0-9]{3})))*((-|_)((\\d|[A-W]|[Y-Z]|[a-w]|[y-z])(-[A-Za-z0-9]{2,8})+))*((-|_)(x(-[A-Za-z0-9]{1,8})+))?$)";
+    for ([_]bool{ false, true }) |unicode_mode| {
+        var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true, .unicode = unicode_mode });
+        defer re.deinit();
+        try std.testing.expectEqual(@as(usize, 59), re.capture_count);
+        for ([_][]const u8{ "en", "en-US", "en-GB-oed", "x-private", "en-a-foobar", "en_a-foobar", "zh-Hans-CN", "de-CH-1901" }) |input| {
+            try std.testing.expect(try re.isMatch(input));
+        }
+        for ([_][]const u8{ "", "en-", "en--US", "en-a", "en-a-b", "_en", "en-abcdefghi", "x-" }) |input| {
+            try std.testing.expect(!try re.isMatch(input));
+        }
+    }
+}
