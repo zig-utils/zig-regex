@@ -165,7 +165,7 @@ pub const Regex = struct {
         // quantified capture boundaries overlap, ECMAScript capture precedence
         // needs the capture-aware backtracker.
         var onepass_plan: ?*onepass.Plan = null;
-        var needs_backtracking = requiresBacktracking(tree.root, flags);
+        var needs_backtracking = requiresBacktracking(tree.root, flags, flags.ecmascript and tree.capture_count == 0);
         if (!needs_backtracking and tree.capture_count > 0) {
             onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
             if (onepass_plan == null and hasAmbiguousCaptureBoundary(tree.root, flags))
@@ -2658,7 +2658,10 @@ fn detectBoundedLiteral(allocator: std.mem.Allocator, root: *ast.Node, flags: co
     return bl;
 }
 
-fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
+// The ECMAScript priority-ordered VM honors lazy edges and alternation order.
+// Admit those constructs only when the complete pattern has no captures;
+// capture clearing/precedence still uses the existing backtracking decision.
+fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_capture_free: bool) bool {
     switch (node.node_type) {
         // These features require backtracking
         .lookahead, .lookbehind, .backref, .unicode_property => return true,
@@ -2689,7 +2692,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
                 .optional => node.data.optional.greedy,
                 else => unreachable,
             };
-            if (!greedy) return true; // Lazy quantifiers need backtracking
+            if (!greedy and !ordered_capture_free) return true;
 
             // Recursively check child
             const child = switch (node.node_type) {
@@ -2698,32 +2701,32 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags) bool {
                 .optional => node.data.optional.child,
                 else => unreachable,
             };
-            if (containsAlternation(child)) return true;
-            return requiresBacktracking(child, flags);
+            if (!ordered_capture_free and containsAlternation(child)) return true;
+            return requiresBacktracking(child, flags, ordered_capture_free);
         },
         .repeat => {
-            if (!node.data.repeat.greedy) return true;
+            if (!node.data.repeat.greedy and !ordered_capture_free) return true;
             if (node.data.repeat.bounds.min > MAX_NFA_REPEAT_EXPANSION) return true;
             if (node.data.repeat.bounds.max) |max| {
                 if (max > MAX_NFA_REPEAT_EXPANSION) return true;
             }
-            if (containsAlternation(node.data.repeat.child)) return true;
-            return requiresBacktracking(node.data.repeat.child, flags);
+            if (!ordered_capture_free and containsAlternation(node.data.repeat.child)) return true;
+            return requiresBacktracking(node.data.repeat.child, flags, ordered_capture_free);
         },
 
         // Recursively check compound nodes
         .concat => {
-            return requiresBacktracking(node.data.concat.left, flags) or
-                requiresBacktracking(node.data.concat.right, flags);
+            return requiresBacktracking(node.data.concat.left, flags, ordered_capture_free) or
+                requiresBacktracking(node.data.concat.right, flags, ordered_capture_free);
         },
         .alternation => {
             if (containsCapture(node)) return true;
-            return requiresBacktracking(node.data.alternation.left, flags) or
-                requiresBacktracking(node.data.alternation.right, flags);
+            return requiresBacktracking(node.data.alternation.left, flags, ordered_capture_free) or
+                requiresBacktracking(node.data.alternation.right, flags, ordered_capture_free);
         },
         // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
         // which only the backtracking engine honors.
-        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags),
+        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags, ordered_capture_free),
 
         // The byte NFA can lower ordinary UTF-8 code points directly. In
         // ECMAScript Unicode mode, however, adjacent WTF-8 high/low surrogate
@@ -3867,4 +3870,124 @@ test "ECMAScript reports JavaScriptCore's reason for assertion and group-start d
     plain.deinit();
     var named = try Regex.compile(allocator, "(?P<x>a)");
     named.deinit();
+}
+
+test "ECMAScript capture-free ordered quantifiers use the NFA" {
+    const allocator = std.testing.allocator;
+    // Node-generated spans exercise leftmost branch priority, greedy/lazy
+    // boundaries, empty iterations and repeated comment scanners. Captures,
+    // backreferences and Unicode-only constructs keep their existing dispatch.
+    const Case = struct { pattern: []const u8, input: []const u8, from: usize, span: ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(?:\\s|\\/\\/.*|\\/\\*[^]*?\\*\\/)*", .input = "baabc", .from = 1, .span = .{ 1, 1 } },
+        .{ .pattern = "(?:\\s|\\/\\/.*|\\/\\*[^]*?\\*\\/)*", .input = " /*comment*/ //line\n ", .from = 0, .span = .{ 0, 21 } },
+        .{ .pattern = "(?:\\s|\\/\\/.*|\\/\\*[^]*?\\*\\/)*", .input = "/*first*/ /*second*/ !", .from = 0, .span = .{ 0, 21 } },
+        .{ .pattern = "(?:\\s|\\/\\/.*|\\/\\*[^]*?\\*\\/)*", .input = "/*unterminated", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a*?", .input = "", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a*?", .input = "aaab", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a*?", .input = "ababac", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a*?", .input = "baabc", .from = 1, .span = .{ 1, 1 } },
+        .{ .pattern = "a+?", .input = "", .from = 0, .span = null },
+        .{ .pattern = "a+?", .input = "aaab", .from = 0, .span = .{ 0, 1 } },
+        .{ .pattern = "a+?", .input = "ababac", .from = 0, .span = .{ 0, 1 } },
+        .{ .pattern = "a+?", .input = "baabc", .from = 1, .span = .{ 1, 2 } },
+        .{ .pattern = "a??", .input = "", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a??", .input = "aaab", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a??", .input = "ababac", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "a??", .input = "baabc", .from = 1, .span = .{ 1, 1 } },
+        .{ .pattern = "a{1,3}?", .input = "", .from = 0, .span = null },
+        .{ .pattern = "a{1,3}?", .input = "aaab", .from = 0, .span = .{ 0, 1 } },
+        .{ .pattern = "a{1,3}?", .input = "ababac", .from = 0, .span = .{ 0, 1 } },
+        .{ .pattern = "a{1,3}?", .input = "baabc", .from = 1, .span = .{ 1, 2 } },
+        .{ .pattern = "(?:a|ab)*", .input = "", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "(?:a|ab)*", .input = "aaab", .from = 0, .span = .{ 0, 3 } },
+        .{ .pattern = "(?:a|ab)*", .input = "ababac", .from = 0, .span = .{ 0, 1 } },
+        .{ .pattern = "(?:a|ab)*", .input = "baabc", .from = 1, .span = .{ 1, 3 } },
+        .{ .pattern = "(?:ab|a)*", .input = "", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "(?:ab|a)*", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:ab|a)*", .input = "ababac", .from = 0, .span = .{ 0, 5 } },
+        .{ .pattern = "(?:ab|a)*", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:a|ab)+?b", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:a|ab)+?b", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a|ab)+?b", .input = "ababac", .from = 0, .span = .{ 0, 2 } },
+        .{ .pattern = "(?:a|ab)+?b", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:a|ab)*?b", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:a|ab)*?b", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a|ab)*?b", .input = "ababac", .from = 0, .span = .{ 0, 2 } },
+        .{ .pattern = "(?:a|ab)*?b", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:a?|b)*", .input = "", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "(?:a?|b)*", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a?|b)*", .input = "ababac", .from = 0, .span = .{ 0, 5 } },
+        .{ .pattern = "(?:a?|b)*", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:a*|b)*", .input = "", .from = 0, .span = .{ 0, 0 } },
+        .{ .pattern = "(?:a*|b)*", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a*|b)*", .input = "ababac", .from = 0, .span = .{ 0, 5 } },
+        .{ .pattern = "(?:a*|b)*", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:a*?)*b", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:a*?)*b", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a*?)*b", .input = "ababac", .from = 0, .span = .{ 0, 2 } },
+        .{ .pattern = "(?:a*?)*b", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:a*?)*?b", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:a*?)*?b", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a*?)*?b", .input = "ababac", .from = 0, .span = .{ 0, 2 } },
+        .{ .pattern = "(?:a*?)*?b", .input = "baabc", .from = 1, .span = .{ 1, 4 } },
+        .{ .pattern = "(?:ab|a){1,3}?", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:ab|a){1,3}?", .input = "aaab", .from = 0, .span = .{ 0, 1 } },
+        .{ .pattern = "(?:ab|a){1,3}?", .input = "ababac", .from = 0, .span = .{ 0, 2 } },
+        .{ .pattern = "(?:ab|a){1,3}?", .input = "baabc", .from = 1, .span = .{ 1, 2 } },
+        .{ .pattern = "^(?:a|aa)*b$", .input = "", .from = 0, .span = null },
+        .{ .pattern = "^(?:a|aa)*b$", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "^(?:a|aa)*b$", .input = "ababac", .from = 0, .span = null },
+        .{ .pattern = "^(?:a|aa)*b$", .input = "baabc", .from = 1, .span = null },
+        .{ .pattern = "^(?:a|aa)*?b$", .input = "", .from = 0, .span = null },
+        .{ .pattern = "^(?:a|aa)*?b$", .input = "aaab", .from = 0, .span = .{ 0, 4 } },
+        .{ .pattern = "^(?:a|aa)*?b$", .input = "ababac", .from = 0, .span = null },
+        .{ .pattern = "^(?:a|aa)*?b$", .input = "baabc", .from = 1, .span = null },
+        .{ .pattern = "(?:ab|a)*?c", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:ab|a)*?c", .input = "aaab", .from = 0, .span = null },
+        .{ .pattern = "(?:ab|a)*?c", .input = "ababac", .from = 0, .span = .{ 0, 6 } },
+        .{ .pattern = "(?:ab|a)*?c", .input = "baabc", .from = 1, .span = .{ 1, 5 } },
+        .{ .pattern = "(?:a*|b)+?c", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:a*|b)+?c", .input = "aaab", .from = 0, .span = null },
+        .{ .pattern = "(?:a*|b)+?c", .input = "ababac", .from = 0, .span = .{ 0, 6 } },
+        .{ .pattern = "(?:a*|b)+?c", .input = "baabc", .from = 1, .span = .{ 1, 5 } },
+        .{ .pattern = "(?:ab|a){0,3}c", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:ab|a){0,3}c", .input = "aaab", .from = 0, .span = null },
+        .{ .pattern = "(?:ab|a){0,3}c", .input = "ababac", .from = 0, .span = .{ 0, 6 } },
+        .{ .pattern = "(?:ab|a){0,3}c", .input = "baabc", .from = 1, .span = .{ 1, 5 } },
+        .{ .pattern = "(?:a??|b)*c", .input = "", .from = 0, .span = null },
+        .{ .pattern = "(?:a??|b)*c", .input = "aaab", .from = 0, .span = null },
+        .{ .pattern = "(?:a??|b)*c", .input = "ababac", .from = 0, .span = .{ 0, 6 } },
+        .{ .pattern = "(?:a??|b)*c", .input = "baabc", .from = 1, .span = .{ 1, 5 } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.thompson_nfa, re.engine_type);
+        var matcher = re.matcher();
+        defer matcher.deinit();
+        var found = try matcher.findFrom(c.input, c.from);
+        defer if (found) |*m| m.deinit(allocator);
+        if (c.span) |want| {
+            const m = found orelse {
+                std.debug.print("missing match: {s} input={any} from={d}\n", .{ c.pattern, c.input, c.from });
+                return error.TestExpectedMatch;
+            };
+            if (!std.meta.eql(want, [2]usize{ m.start, m.end }))
+                std.debug.print("span mismatch: {s} input={any} from={d}\n", .{ c.pattern, c.input, c.from });
+            try std.testing.expectEqual(want, [2]usize{ m.start, m.end });
+        } else try std.testing.expect(found == null);
+    }
+}
+
+test "ECMAScript capture-free ordered dispatch preserves backtracking guards" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "(a*?)", "a*?(?=b)", "(a)\\1", "(?i:a*?)" }) |pattern| {
+        var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
+    }
+    try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(a+)+\\1", .{ .ecmascript = true }));
+    try std.testing.expectError(RegexError.PatternTooComplex, Regex.compile(allocator, "(a*)*"));
+    try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, "(?:a{1000}){1000}", .{ .ecmascript = true }));
 }
