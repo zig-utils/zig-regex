@@ -31,7 +31,7 @@ pub const LiteralAssertion = struct {
 
     // ECMA-262 22.2.2.4 CompileAssertion: test at the current position
     // (backwards for lookbehind), invert negative predicates, consume nothing.
-    pub fn matches(self: LiteralAssertion, input: []const u8, pos: usize) bool {
+    pub fn matches(self: *const LiteralAssertion, input: []const u8, pos: usize) bool {
         if (pos > input.len) return false;
         const text = self.bytes[0..self.len];
         const matched = if (self.behind)
@@ -90,7 +90,7 @@ pub const Transition = struct {
         char_class: common.CharClass,
         any: void,
         anchor: ast.AnchorType,
-        literal_assertion: LiteralAssertion,
+        literal_assertion: *const LiteralAssertion,
     };
 
     pub fn epsilon(to: StateId) Transition {
@@ -215,6 +215,9 @@ pub const NFA = struct {
     allocator: std.mem.Allocator,
     max_states: usize = std.math.maxInt(usize),
     has_literal_assertions: bool = false,
+    // Transition payloads borrow these immutable predicates. Keeping them out
+    // of the union avoids enlarging every consuming/epsilon transition.
+    literal_assertions: std.ArrayList(*LiteralAssertion) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) NFA {
         return .{
@@ -231,6 +234,8 @@ pub const NFA = struct {
         }
         self.states.deinit(self.allocator);
         self.accept_states.deinit(self.allocator);
+        for (self.literal_assertions.items) |predicate| self.allocator.destroy(predicate);
+        self.literal_assertions.deinit(self.allocator);
     }
 
     pub fn addState(self: *NFA) !StateId {
@@ -323,10 +328,16 @@ pub const Compiler = struct {
         literal.positive = assertion.positive;
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
+        const owned = try self.allocator.create(LiteralAssertion);
+        owned.* = literal;
+        self.nfa.literal_assertions.append(self.allocator, owned) catch |err| {
+            self.allocator.destroy(owned);
+            return err;
+        };
         try self.nfa.getState(start).addTransition(.{
             .transition_type = .literal_assertion,
             .to = accept,
-            .data = .{ .literal_assertion = literal },
+            .data = .{ .literal_assertion = owned },
         });
         self.nfa.has_literal_assertions = true;
         return .{ .start = start, .accept = accept };
@@ -999,4 +1010,19 @@ test "compiler: acceptable repeat expansion" {
 
     _ = try compiler.compile(&tree);
     try std.testing.expect(compiler.nfa.states.items.len > 0);
+}
+
+fn literalPredicateAllocationWitness(allocator: std.mem.Allocator) !void {
+    var parser = try @import("parser.zig").Parser.init(allocator, "(?<=pre)(a+)(?=!)");
+    var tree = try parser.parse();
+    defer tree.deinit();
+    var compiled = Compiler.initWithFlags(allocator, .{ .ecmascript = true });
+    defer compiled.deinit();
+    _ = try compiled.compile(&tree);
+    try std.testing.expectEqual(@as(usize, 2), compiled.nfa.literal_assertions.items.len);
+}
+
+test "compiler: literal predicates retain compact transitions and free failed allocations" {
+    try std.testing.expect(@sizeOf(Transition) <= 72);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, literalPredicateAllocationWitness, .{});
 }
