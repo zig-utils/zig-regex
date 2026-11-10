@@ -305,10 +305,18 @@ pub const PatternAnalyzer = struct {
 
     fn singleByteChoice(node: *ast.Node) ?u128 {
         return switch (node.node_type) {
-            .literal => if (node.data.literal < 128)
-                @as(u128, 1) << @as(u7, @intCast(node.data.literal))
-            else
-                null,
+            .literal => asciiChoice(node.data.literal),
+            // Unicode ignoreCase parsing stores even punctuation literals in
+            // singleton class sets. Recognize that representation without
+            // treating string-valued, negated or compound sets as one byte.
+            .class_set => blk: {
+                const set = node.data.class_set;
+                if (set.negated or set.op != .union_ or set.items.len != 1) return null;
+                break :blk switch (set.items[0]) {
+                    .range => |r| if (r.lo == r.hi) asciiChoice(r.lo) else null,
+                    else => null,
+                };
+            },
             .group => singleByteChoice(node.data.group.child),
             .alternation => blk: {
                 const left = singleByteChoice(node.data.alternation.left) orelse return null;
@@ -317,6 +325,15 @@ pub const PatternAnalyzer = struct {
             },
             else => null,
         };
+    }
+
+    fn asciiChoice(cp: u21) ?u128 {
+        if (cp >= 128) return null;
+        const byte: u8 = @intCast(cp);
+        // Analysis does not receive the compile flags. Include both ASCII
+        // cases so `a|A` is never claimed disjoint under ignoreCase.
+        return (@as(u128, 1) << @as(u7, @intCast(std.ascii.toLower(byte)))) |
+            (@as(u128, 1) << @as(u7, @intCast(std.ascii.toUpper(byte))));
     }
 
     /// Whether `node`'s subtree contains any unbounded quantifier.
@@ -865,6 +882,7 @@ test "analyzer: disjoint literal separator choices match character-class prefixe
     // must not classify overlapping or variable-length branches as atoms.
     for ([_][]const u8{
         "^((a|a)(a+))*$",
+        "^((a|A)(a+))*$",
         "^((a|aa)(a+))*$",
         "^((a+|b+)(a+))*$",
         "^((a|b|a)(a+))*$",
