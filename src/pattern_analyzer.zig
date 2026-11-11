@@ -52,6 +52,7 @@ pub const PatternAnalyzer = struct {
     explosion_factor: f64,
     can_use_thompson: bool,
     max_explosion_factor: f64,
+    quantifier_depth: usize = 0,
 
     pub const DEFAULT_MAX_EXPLOSION_FACTOR: f64 = 1000.0;
 
@@ -77,6 +78,7 @@ pub const PatternAnalyzer = struct {
         // Reset state
         self.explosion_factor = 1.0;
         self.can_use_thompson = true;
+        self.quantifier_depth = 0;
 
         // Perform analysis
         try self.analyzeNode(root, false);
@@ -108,6 +110,8 @@ pub const PatternAnalyzer = struct {
     fn analyzeNode(self: *PatternAnalyzer, node: *ast.Node, inside_quantifier: bool) std.mem.Allocator.Error!void {
         switch (node.node_type) {
             .star, .plus, .optional, .repeat => {
+                self.quantifier_depth += 1;
+                defer self.quantifier_depth -= 1;
                 try self.analyzeQuantifier(node, inside_quantifier);
             },
             .alternation => {
@@ -126,6 +130,18 @@ pub const PatternAnalyzer = struct {
                 // Lookarounds require backtracking
                 self.can_use_thompson = false;
                 const lookaround = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
+                if (node.node_type == .lookahead and lookaround.positive and self.quantifier_depth == 0) {
+                    if (unconditionalAssertionStar(lookaround.child)) |body| {
+                        // ECMA-262 Assertion :: (?= Disjunction ), Note3:
+                        // the assertion commits its first successful result.
+                        // A terminal zero-minimum star has no failing sequel,
+                        // so it cannot repartition earlier iterations. Analyze
+                        // the body itself: a failed body attempt can still be
+                        // catastrophic. The native step counter stays active.
+                        try self.analyzeNode(body, false);
+                        return;
+                    }
+                }
                 try self.analyzeNode(lookaround.child, inside_quantifier);
             },
             .backref => {
@@ -135,6 +151,15 @@ pub const PatternAnalyzer = struct {
             },
             else => {},
         }
+    }
+
+    fn unconditionalAssertionStar(root: *ast.Node) ?*ast.Node {
+        var node = root;
+        while (node.node_type == .group) {
+            if (node.data.group.mod != null) return null;
+            node = node.data.group.child;
+        }
+        return if (node.node_type == .star and node.data.star.greedy) node.data.star.child else null;
     }
 
     fn analyzeQuantifier(self: *PatternAnalyzer, node: *ast.Node, inside_quantifier: bool) std.mem.Allocator.Error!void {

@@ -4258,3 +4258,56 @@ test "single-entry lazy capture retains its empty participating group" {
     defer if (found) |*m| m.deinit(allocator);
     try expectLeftmostFirst(.{ .pattern = "(a*?)", .case_insensitive = false, .input = "aaa", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{""} } }, found);
 }
+
+test "atomic positive assertion tails retain acorn captures and do not retry" {
+    const Case = struct { source: []const u8, input: []const u8, match: ?[]const ?[]const u8, index: ?usize, lastIndex: usize, start: ?usize, end: ?usize };
+    const Fixture = struct { checks: usize, output: []const Case };
+    const allocator = std.testing.allocator;
+    const fixture = try std.json.parseFromSlice(Fixture, allocator, @embedFile("testdata/atomic_assertion_tail.json"), .{});
+    defer fixture.deinit();
+    try std.testing.expectEqual(@as(usize, 19), fixture.value.checks);
+    for (fixture.value.output) |c| {
+        // Anchoring reproduces sticky exec at lastIndex0 for the native API.
+        const pattern = try std.mem.concat(allocator, u8, &.{ "^", c.source });
+        defer allocator.free(pattern);
+        var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
+        var found = try re.findFrom(c.input, 0);
+        defer if (found) |*m| m.deinit(allocator);
+        const want: ?struct { start: usize, end: usize, captures: []const ?[]const u8 } = if (c.match) |groups|
+            .{ .start = c.start.?, .end = c.end.?, .captures = groups[1..] }
+        else
+            null;
+        try expectLeftmostFirst(.{ .pattern = pattern, .case_insensitive = false, .input = c.input, .from = 0, .expected = if (want) |w| .{ .start = w.start, .end = w.end, .captures = w.captures } else null }, found);
+        if (c.match) |groups| try std.testing.expectEqualStrings(groups[0].?, found.?.slice);
+    }
+}
+
+test "atomic assertion classification retains dangerous bodies and forced sequels" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{
+        "(?=(((a+)+b)*))\\1", // the body itself can fail exponentially
+        "(?=((?:a+)*b))\\1", // a required sequel inside the assertion
+        "(?!(?:a+)*)", // negative assertions are outside this rule
+        "(?<=(a+)*)", // reverse matching is outside this rule
+        "(?:x(?:(?=((?:a+)*))|y))*", // a quantified ancestor through alternation
+        "(a+)+\\1", // the existing critical backreference refusal
+    }) |pattern| try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true }));
+}
+
+test "atomic assertion tail execution retains the native search step limit" {
+    const allocator = std.testing.allocator;
+    const fixture = try std.json.parseFromSlice(struct { checks: usize, output: []const struct { source: []const u8 } }, allocator, @embedFile("testdata/atomic_assertion_tail.json"), .{ .ignore_unknown_fields = true });
+    defer fixture.deinit();
+    const pattern = try std.mem.concat(allocator, u8, &.{ "^", fixture.value.output[0].source });
+    defer allocator.free(pattern);
+    var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
+    defer re.deinit();
+    try std.testing.expectEqual(@as(usize, 10_000_000), re.backtrack_engine.?.max_steps);
+    re.backtrack_engine.?.max_steps = 64;
+    var input: [512]u8 = undefined;
+    @memset(&input, ' ');
+    try std.testing.expectError(error.Timeout, re.findFrom(&input, 0));
+    try std.testing.expect(re.backtrack_engine.?.step_count > 64);
+}
