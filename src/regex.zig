@@ -165,7 +165,10 @@ pub const Regex = struct {
         // quantified capture boundaries overlap, ECMAScript capture precedence
         // needs the capture-aware backtracker.
         var onepass_plan: ?*onepass.Plan = null;
-        var needs_backtracking = requiresBacktracking(tree.root, flags, flags.ecmascript and (tree.capture_count == 0 or (tree.capture_count == 1 and hasSpanningAssertionCapture(tree.root))));
+        const ordered_captures = flags.ecmascript and
+            (tree.capture_count == 0 or hasSingleEntryCaptures(tree.root, false) or
+                (tree.capture_count == 1 and hasSpanningAssertionCapture(tree.root)));
+        var needs_backtracking = requiresBacktracking(tree.root, flags, ordered_captures);
         if (!needs_backtracking and tree.capture_count > 0) {
             onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
             if (onepass_plan == null and hasAmbiguousCaptureBoundary(tree.root, flags))
@@ -2695,9 +2698,31 @@ fn hasSpanningAssertionCapture(root: *ast.Node) bool {
     return captured and asserted;
 }
 
+// A capture outside every quantifier is entered at most once on any path.
+// Prioritized Thompson threads can merge at the same state/offset by retaining
+// the first capture history: later continuations cannot observe it (backrefs
+// and capture-bearing assertions still require the backtracker). Repeated
+// captures need separate empty-iteration/reset reasoning and stay excluded.
+fn hasSingleEntryCaptures(node: *ast.Node, repeated: bool) bool {
+    return switch (node.node_type) {
+        .group => (node.data.group.capture_index == null or !repeated) and
+            node.data.group.mod == null and hasSingleEntryCaptures(node.data.group.child, repeated),
+        .concat => hasSingleEntryCaptures(node.data.concat.left, repeated) and
+            hasSingleEntryCaptures(node.data.concat.right, repeated),
+        .alternation => hasSingleEntryCaptures(node.data.alternation.left, repeated) and
+            hasSingleEntryCaptures(node.data.alternation.right, repeated),
+        .star => hasSingleEntryCaptures(node.data.star.child, true),
+        .plus => hasSingleEntryCaptures(node.data.plus.child, true),
+        .optional => hasSingleEntryCaptures(node.data.optional.child, true),
+        .repeat => hasSingleEntryCaptures(node.data.repeat.child, true),
+        .lookahead, .lookbehind, .backref => false,
+        else => true,
+    };
+}
+
 // The ECMAScript priority-ordered VM honors lazy edges and alternation order.
-// Admit them without captures or with one spanning capture and boundary
-// assertions; competing capture histories retain the backtracking decision.
+// Admit capture-free and single-entry capture paths, or one spanning capture
+// with boundary assertions. Repeated capture histories retain the fallback.
 fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_quantifiers: bool) bool {
     switch (node.node_type) {
         // These features require backtracking
@@ -2723,7 +2748,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_qua
         // a single WTF-8 surrogate code unit from an astral pair, while
         // ECMAScript `/u` classes consume the whole code point.
         .class_set => return flags.case_insensitive or
-            ((flags.unicode or flags.unicode_sets) and node.data.class_set.negated) or
+            ((flags.unicode or flags.unicode_sets) and @import("utf8_class.zig").containsComplement(node.data.class_set)) or
             !@import("utf8_class.zig").compilable(node.data.class_set),
 
         // Check for lazy quantifiers
@@ -2762,7 +2787,7 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_qua
                 requiresBacktracking(node.data.concat.right, flags, ordered_quantifiers);
         },
         .alternation => {
-            if (containsCapture(node)) return true;
+            if (containsCapture(node) and !ordered_quantifiers) return true;
             return requiresBacktracking(node.data.alternation.left, flags, ordered_quantifiers) or
                 requiresBacktracking(node.data.alternation.right, flags, ordered_quantifiers);
         },
@@ -4027,7 +4052,7 @@ test "ECMAScript capture-free ordered quantifiers use the NFA" {
 
 test "ECMAScript capture-free ordered dispatch preserves backtracking guards" {
     const allocator = std.testing.allocator;
-    for ([_][]const u8{ "(a*?)", "a*?(?=b+)", "(a)\\1", "(?i:a*?)" }) |pattern| {
+    for ([_][]const u8{ "(a)*?", "a*?(?=b+)", "(a)\\1", "(?i:a*?)" }) |pattern| {
         var re = try Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true });
         defer re.deinit();
         try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
@@ -4174,4 +4199,62 @@ test "compile BCP47 grammar with captured separator choices" {
             try std.testing.expect(!try re.isMatch(input));
         }
     }
+}
+
+test "ECMAScript single-entry captures preserve actual Svelte ordered matches" {
+    const Case = struct {
+        pattern: usize,
+        input: []const u8,
+        matches: []const struct { start: usize, end: usize, groups: []const ?[]const u8 },
+    };
+    const Fixture = struct { patterns: []const []const u8, cases: []const Case };
+    const allocator = std.testing.allocator;
+    const fixture = try std.json.parseFromSlice(Fixture, allocator, @embedFile("testdata/single_entry_captures.json"), .{});
+    defer fixture.deinit();
+    // Node26.10/Bun1.4.4 agree on all34 cases. ECMA-26222.2.2.3:
+    // alternation priority and lazy captures must survive the NFA dispatch.
+    for (fixture.value.cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, fixture.value.patterns[c.pattern], .{ .ecmascript = true });
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.thompson_nfa, re.engine_type);
+        var from: usize = 0;
+        for (c.matches) |expected| {
+            var found = try re.findFrom(c.input, from);
+            defer if (found) |*m| m.deinit(allocator);
+            try expectLeftmostFirst(.{
+                .pattern = fixture.value.patterns[c.pattern],
+                .case_insensitive = false,
+                .input = c.input,
+                .from = from,
+                .expected = .{ .start = expected.start, .end = expected.end, .captures = expected.groups[1..] },
+            }, found);
+            try std.testing.expectEqualStrings(expected.groups[0].?, found.?.slice);
+            from = expected.end;
+        }
+        var trailing = try re.findFrom(c.input, from);
+        defer if (trailing) |*m| m.deinit(allocator);
+        try std.testing.expect(trailing == null);
+    }
+}
+
+test "single-entry capture dispatch preserves backtracking and size guards" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "(a+)+\\1", "(?:a{1000}){1000}" }) |pattern|
+        try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(allocator, pattern, .{ .ecmascript = true }));
+    var repeated = try Regex.compileWithFlags(allocator, "(?:(a)|b)*", .{ .ecmascript = true });
+    defer repeated.deinit();
+    try std.testing.expectEqual(EngineType.backtracking, repeated.engine_type);
+    var unicode_complement = try Regex.compileWithFlags(allocator, "([\\S\\s])", .{ .ecmascript = true, .unicode = true });
+    defer unicode_complement.deinit();
+    try std.testing.expectEqual(EngineType.backtracking, unicode_complement.engine_type);
+}
+
+test "single-entry lazy capture retains its empty participating group" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "(a*?)", .{ .ecmascript = true });
+    defer re.deinit();
+    try std.testing.expectEqual(EngineType.thompson_nfa, re.engine_type);
+    var found = try re.find("aaa");
+    defer if (found) |*m| m.deinit(allocator);
+    try expectLeftmostFirst(.{ .pattern = "(a*?)", .case_insensitive = false, .input = "aaa", .from = 0, .expected = .{ .start = 0, .end = 0, .captures = &.{""} } }, found);
 }

@@ -1,0 +1,356 @@
+{
+  "patterns": [
+    "<!--[^]*?-->|<script((?:\\s+[^=>'\"/\\s]+=(?:\"[^\"]*\"|'[^']*'|[^>\\s]+)|\\s+[^=>'\"/\\s]+)*\\s*)(?:\\/>|>([\\S\\s]*?)<\\/script>)",
+    "<!--[^]*?-->|<style((?:\\s+[^=>'\"/\\s]+=(?:\"[^\"]*\"|'[^']*'|[^>\\s]+)|\\s+[^=>'\"/\\s]+)*\\s*)(?:\\/>|>([\\S\\s]*?)<\\/style>)"
+  ],
+  "cases": [
+    {
+      "pattern": 0,
+      "input": "",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<!-- comment -->",
+      "matches": [
+        {
+          "start": 0,
+          "end": 16,
+          "groups": [
+            "<!-- comment -->",
+            null,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<!-- <script>hidden</script> -->",
+      "matches": [
+        {
+          "start": 0,
+          "end": 32,
+          "groups": [
+            "<!-- <script>hidden</script> -->",
+            null,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<script/>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 9,
+          "groups": [
+            "<script/>",
+            "",
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<style/>",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<script></script>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 17,
+          "groups": [
+            "<script></script>",
+            "",
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<style></style>",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<script lang=\"ts\">let x=1;</script>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 35,
+          "groups": [
+            "<script lang=\"ts\">let x=1;</script>",
+            " lang=\"ts\"",
+            "let x=1;"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<style media=\"screen\">a{color:red}</style>",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<script\n a='x y' b=unquoted c >one\ntwo</script>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 47,
+          "groups": [
+            "<script\n a='x y' b=unquoted c >one\ntwo</script>",
+            "\n a='x y' b=unquoted c ",
+            "one\ntwo"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<style\n a='x y' b=unquoted c >a{}\nb{}</style>",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<script type=\"x\" async>first</script><script>second</script>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 37,
+          "groups": [
+            "<script type=\"x\" async>first</script>",
+            " type=\"x\" async",
+            "first"
+          ]
+        },
+        {
+          "start": 37,
+          "end": 60,
+          "groups": [
+            "<script>second</script>",
+            "",
+            "second"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<style x=\"a b\" disabled>first</style><style>second</style>",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<script no-close>abc",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<style no-close>abc",
+      "matches": []
+    },
+    {
+      "pattern": 0,
+      "input": "<script lang=\"ts\">x</script>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 30,
+          "groups": [
+            "<script lang=\"ts\">x</script>",
+            " lang=\"ts\"",
+            "x"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 0,
+      "input": "<style media=\"all\">x</style>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<!-- comment -->",
+      "matches": [
+        {
+          "start": 0,
+          "end": 16,
+          "groups": [
+            "<!-- comment -->",
+            null,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<!-- <script>hidden</script> -->",
+      "matches": [
+        {
+          "start": 0,
+          "end": 32,
+          "groups": [
+            "<!-- <script>hidden</script> -->",
+            null,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<script/>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style/>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 8,
+          "groups": [
+            "<style/>",
+            "",
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<script></script>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style></style>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 15,
+          "groups": [
+            "<style></style>",
+            "",
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<script lang=\"ts\">let x=1;</script>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style media=\"screen\">a{color:red}</style>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 42,
+          "groups": [
+            "<style media=\"screen\">a{color:red}</style>",
+            " media=\"screen\"",
+            "a{color:red}"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<script\n a='x y' b=unquoted c >one\ntwo</script>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style\n a='x y' b=unquoted c >a{}\nb{}</style>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 45,
+          "groups": [
+            "<style\n a='x y' b=unquoted c >a{}\nb{}</style>",
+            "\n a='x y' b=unquoted c ",
+            "a{}\nb{}"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<script type=\"x\" async>first</script><script>second</script>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style x=\"a b\" disabled>first</style><style>second</style>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 37,
+          "groups": [
+            "<style x=\"a b\" disabled>first</style>",
+            " x=\"a b\" disabled",
+            "first"
+          ]
+        },
+        {
+          "start": 37,
+          "end": 58,
+          "groups": [
+            "<style>second</style>",
+            "",
+            "second"
+          ]
+        }
+      ]
+    },
+    {
+      "pattern": 1,
+      "input": "<script no-close>abc",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style no-close>abc",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<script lang=\"ts\">x</script>",
+      "matches": []
+    },
+    {
+      "pattern": 1,
+      "input": "<style media=\"all\">x</style>",
+      "matches": [
+        {
+          "start": 0,
+          "end": 30,
+          "groups": [
+            "<style media=\"all\">x</style>",
+            " media=\"all\"",
+            "x"
+          ]
+        }
+      ]
+    }
+  ]
+}

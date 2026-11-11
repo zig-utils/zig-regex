@@ -50,23 +50,38 @@ pub fn compilable(set: *const ClassSet) bool {
             .string => |s| if (s.len != 1) return false,
             .property => return false,
             .nested => |n| {
-                // Nested complements would need set-difference; keep those on
-                // the backtracker. Plain nested unions are fine.
-                if (n.negated or !compilable(n)) return false;
+                if (!compilable(n)) return false;
             },
         }
     }
     return true;
 }
 
+/// Unicode-mode dispatch must still exclude complements at every nesting
+/// level: its input can contain WTF-8 surrogate code units from an astral pair.
+pub fn containsComplement(set: *const ClassSet) bool {
+    if (set.negated) return true;
+    for (set.items) |item| switch (item) {
+        .nested => |nested| if (containsComplement(nested)) return true,
+        else => {},
+    };
+    return false;
+}
+
 /// Collect every code-point range a `union_` set (and its nested unions)
 /// contributes, appending to `out`. Caller guarantees `compilable(set)`.
-fn collectUnion(set: *const ClassSet, out: *std.ArrayList(CpRange), allocator: std.mem.Allocator) !void {
+fn collectUnion(set: *const ClassSet, out: *std.ArrayList(CpRange), allocator: std.mem.Allocator, fold_ascii: bool) std.mem.Allocator.Error!void {
     for (set.items) |it| {
         switch (it) {
             .range => |r| try out.append(allocator, r),
             .string => |s| try out.append(allocator, .{ .lo = @intCast(s[0]), .hi = @intCast(s[0]) }),
-            .nested => |n| try collectUnion(n, out, allocator),
+            .nested => |n| {
+                // Materialize a nested operand's complement before unioning it
+                // with its siblings; flattening first loses [\S\s] semantics.
+                const ranges = (try toCodepointRanges(allocator, n, fold_ascii)).?;
+                defer allocator.free(ranges);
+                try out.appendSlice(allocator, ranges);
+            },
             .property => unreachable, // excluded by compilable()
         }
     }
@@ -144,12 +159,12 @@ fn caseFoldAscii(list: *std.ArrayList(CpRange), allocator: std.mem.Allocator) !v
 /// the set isn't a lowerable shape. With `fold_ascii`, both ASCII cases are
 /// added to the positive set before any complement (correct for negated sets).
 /// Caller owns the returned slice.
-pub fn toCodepointRanges(allocator: std.mem.Allocator, set: *const ClassSet, fold_ascii: bool) !?[]CpRange {
+pub fn toCodepointRanges(allocator: std.mem.Allocator, set: *const ClassSet, fold_ascii: bool) std.mem.Allocator.Error!?[]CpRange {
     if (!compilable(set)) return null;
 
     var raw: std.ArrayList(CpRange) = .empty;
     defer raw.deinit(allocator);
-    try collectUnion(set, &raw, allocator);
+    try collectUnion(set, &raw, allocator, fold_ascii);
     if (fold_ascii) try caseFoldAscii(&raw, allocator);
 
     const positive = try normalize(allocator, raw.items);
@@ -353,4 +368,33 @@ test "ranges merge and normalize" {
     try testing.expectEqual(@as(u21, 0x12), norm[0].hi);
     try testing.expectEqual(@as(u21, 0x30), norm[1].lo);
     try testing.expectEqual(@as(u21, 0x40), norm[1].hi);
+}
+
+test "nested complements are unioned after complement and remain allocation safe" {
+    var inner: ClassSet = .{ .op = .union_, .negated = true, .items = &.{ .{ .range = .{ .lo = 'a', .hi = 'c' } }, .{ .range = .{ .lo = 0xa0, .hi = 0xa0 } } } };
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, set: *const ClassSet) !void {
+            const ranges = (try toCodepointRanges(allocator, set, true)).?;
+            defer allocator.free(ranges);
+        }
+    };
+    for ([_]bool{ false, true }) |negated| {
+        const outer: ClassSet = .{ .op = .union_, .negated = negated, .items = &.{ .{ .nested = &inner }, .{ .range = .{ .lo = 'b', .hi = 'b' } } } };
+        try testing.expect(compilable(&outer));
+        try testing.expect(containsComplement(&outer));
+        for ([_]bool{ false, true }) |fold_ascii| {
+            const ranges = (try toCodepointRanges(testing.allocator, &outer, fold_ascii)).?;
+            defer testing.allocator.free(ranges);
+            var cp: u21 = 0;
+            while (cp <= MAX_CP) : (cp += 1) {
+                var actual = false;
+                for (ranges) |range| if (cp >= range.lo and cp <= range.hi) {
+                    actual = true;
+                    break;
+                };
+                try testing.expectEqual(outer.matchesMode(cp, if (fold_ascii) .legacy else .none), actual);
+            }
+        }
+        try testing.checkAllAllocationFailures(testing.allocator, Probe.run, .{&outer});
+    }
 }
