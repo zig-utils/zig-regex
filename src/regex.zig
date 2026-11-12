@@ -2747,7 +2747,11 @@ fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_qua
         // Unicode sets must stay code-point based: the byte automaton can match
         // a single WTF-8 surrogate code unit from an astral pair, while
         // ECMAScript `/u` classes consume the whole code point.
-        .class_set => return flags.case_insensitive or
+        // Case-invariant sets (including \s) need no extra folding. Keep
+        // case-sensitive membership on the NFA rather than rejecting valid
+        // nested quantifiers through the backtracking risk policy.
+        .class_set => return (flags.case_insensitive and
+            (!flags.ecmascript or !@import("utf8_class.zig").caseInvariant(node.data.class_set))) or
             ((flags.unicode or flags.unicode_sets) and @import("utf8_class.zig").containsComplement(node.data.class_set)) or
             !@import("utf8_class.zig").compilable(node.data.class_set),
 
@@ -4310,4 +4314,64 @@ test "atomic assertion tail execution retains the native search step limit" {
     @memset(&input, ' ');
     try std.testing.expectError(error.Timeout, re.findFrom(&input, 0));
     try std.testing.expect(re.backtrack_engine.?.step_count > 64);
+}
+
+test "case invariant class sets preserve Node matches and capture boundaries" {
+    const allocator = std.testing.allocator;
+    const fixture = try std.json.parseFromSlice(struct {
+        node: []const u8,
+        checks: usize,
+        output: []const struct {
+            source: []const u8,
+            flags: []const u8,
+            nfa: bool,
+            cases: []const struct {
+                input: []const u8,
+                from: usize,
+                match: ?struct { start: usize, end: usize, captures: []const ?[]const u8 },
+            },
+        },
+    }, allocator, @embedFile("testdata/case_invariant_sets.json"), .{});
+    defer fixture.deinit();
+    try std.testing.expectEqualStrings("v26.10.0", fixture.value.node);
+    var checks: usize = 0;
+    for (fixture.value.output) |spec| {
+        var re = try Regex.compileWithFlags(allocator, spec.source, .{
+            .ecmascript = true,
+            .case_insensitive = std.mem.indexOfScalar(u8, spec.flags, 'i') != null,
+            .dot_all = std.mem.indexOfScalar(u8, spec.flags, 's') != null,
+            .multiline = std.mem.indexOfScalar(u8, spec.flags, 'm') != null,
+            .unicode = std.mem.indexOfScalar(u8, spec.flags, 'u') != null,
+            .unicode_sets = std.mem.indexOfScalar(u8, spec.flags, 'v') != null,
+        });
+        defer re.deinit();
+        try std.testing.expectEqual(spec.nfa, re.engine_type != .backtracking);
+        for (spec.cases) |c| {
+            var found = try re.findFrom(c.input, c.from);
+            defer if (found) |*m| m.deinit(allocator);
+            try expectLeftmostFirst(.{
+                .pattern = spec.source,
+                .case_insensitive = true,
+                .input = c.input,
+                .from = c.from,
+                .expected = if (c.match) |m| .{ .start = m.start, .end = m.end, .captures = m.captures } else null,
+            }, found);
+            if (found) |m| try std.testing.expectEqual(re.capture_count, m.captures.len);
+            checks += 1;
+        }
+    }
+    try std.testing.expectEqual(fixture.value.checks, checks);
+}
+
+test "case invariant class sets retain nested operand and Unicode guards" {
+    const utf8_class = @import("utf8_class.zig");
+    var one_case: ast.Node.ClassSet = .{ .op = .union_, .items = &.{.{ .range = .{ .lo = 'A', .hi = 'A' } }} };
+    // The complete outer set is universal, but folding an unclosed nested
+    // complement before the union is not justified by the outer closure.
+    const nested: ast.Node.ClassSet = .{ .op = .union_, .items = &.{ .{ .nested = &one_case }, .{ .range = .{ .lo = 0, .hi = 0x10ffff } } } };
+    try std.testing.expect(!utf8_class.caseInvariant(&nested));
+    one_case.negated = true;
+    try std.testing.expect(!utf8_class.caseInvariant(&nested));
+    for ([_][]const u8{ "(a+)+\\1", "(?=(((a+)+b)*))\\1" }) |pattern|
+        try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(std.testing.allocator, pattern, .{ .ecmascript = true, .case_insensitive = true }));
 }

@@ -57,6 +57,31 @@ pub fn compilable(set: *const ClassSet) bool {
     return true;
 }
 
+/// ECMA-262 Canonicalize (22.2.2.7.3) leaves a class unchanged exactly when
+/// membership agrees across every simple-fold edge. The generated table also
+/// covers incoming edges (Kelvin sign -> k), which checking only members misses.
+/// Require closure of nested operands too: ASCII folding precedes their
+/// complements during lowering. Legacy mode is a subset of these fold edges.
+pub fn caseInvariant(set: *const ClassSet) bool {
+    if (!compilable(set)) return false;
+    for (set.items) |item| switch (item) {
+        .nested => |nested| if (!caseInvariant(nested)) return false,
+        else => {},
+    };
+    const folds = @import("unicode_casefold_data.zig");
+    for (folds.fold_ranges) |range| {
+        var cp = range.start;
+        while (cp <= range.end) : (cp += 1) {
+            const folded = ast.Node.canonicalizeKey(cp, .unicode);
+            if (set.matchesMode(cp, .none) != set.matchesMode(folded, .none)) return false;
+        }
+    }
+    for (folds.fold_specials) |entry| {
+        if (set.matchesMode(entry.cp, .none) != set.matchesMode(entry.folded, .none)) return false;
+    }
+    return true;
+}
+
 /// Unicode-mode dispatch must still exclude complements at every nesting
 /// level: its input can contain WTF-8 surrogate code units from an astral pair.
 pub fn containsComplement(set: *const ClassSet) bool {

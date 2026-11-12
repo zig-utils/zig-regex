@@ -727,7 +727,9 @@ pub const Optimizer = struct {
             switch (it) {
                 .range => |r| markRangeLeadBytes(r.lo, r.hi, out),
                 .string => |s| if (s.len == 1) markRangeLeadBytes(@intCast(s[0]), @intCast(s[0]), out),
-                .nested => |n| markUnionLeadBytes(n, out),
+                // A nested complement contributes the complement's bytes,
+                // not the ranges it excludes (e.g. [\s\S] must admit 'a').
+                .nested => |n| markClassSetLeadBytes(n, out),
                 .property => {},
             }
         }
