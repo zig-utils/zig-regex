@@ -109,10 +109,8 @@ fn vmFindFrom(machine: *regex.vm.VM, input: []const u8, from: usize) !?[2]usize 
 }
 
 /// Compare every program entry point with the engines `Regex` uses for the
-/// same pattern: `Regex.isMatch` and the start of `Regex.find` must agree
-/// exactly, and spans must equal the NFA VM's. (`Regex.find` takes a
-/// literal-alternation fast path that reports the first alternative in
-/// source order, so its match end can be shorter than the VM's for `a|ab`.)
+/// same pattern: `Regex.isMatch` and `Regex.find` must agree exactly, and
+/// spans must equal the NFA VM's.
 /// Matching runs while the allocator that built the program and scratch
 /// refuses any allocation.
 fn compareOne(pattern: []const u8, flags: CompileFlags, inputs: []const []const u8) !Outcome {
@@ -133,10 +131,10 @@ fn compareOne(pattern: []const u8, flags: CompileFlags, inputs: []const []const 
     for (inputs) |input| {
         // Reference results first: Regex and the VM allocate.
         const want_match = try re.isMatch(input);
-        const regex_start: ?usize = if (try re.find(input)) |m| blk: {
+        const regex_find: ?[2]usize = if (try re.find(input)) |m| blk: {
             var owned = m;
             defer owned.deinit(testing.allocator);
-            break :blk m.start;
+            break :blk .{ m.start, m.end };
         } else null;
         const want_find = try vmFindFrom(&machine, input, 0);
         var want_all: [64][2]usize = undefined;
@@ -167,7 +165,7 @@ fn compareOne(pattern: []const u8, flags: CompileFlags, inputs: []const []const 
 
         errdefer std.debug.print("pattern \"{s}\" flags {any} input {any}\n", .{ pattern, flags, input });
         try testing.expectEqual(want_match, got_match);
-        try testing.expectEqual(regex_start, if (got_find) |m| m.start else null);
+        try expectSpan(regex_find, got_find);
         try expectSpan(want_find, got_find);
         try testing.expectEqual(want_count, got_count);
         try testing.expectEqual(want_count, counted);

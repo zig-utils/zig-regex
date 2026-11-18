@@ -276,9 +276,9 @@ _ = n;
   forms: they only change which match end a backtracker reports, and program
   ends are leftmost-longest anyway.
 - Results are spans without capture groups. Match ends follow the Thompson
-  engine (the leftmost match, extended as far as possible). `Regex.find`
-  agrees, except on its literal-alternation fast path, which reports the
-  first alternative in source order (`a|ab` finds `a`).
+  engine (the leftmost match, extended as far as possible), and `Regex.find`
+  agrees on every path, its literal-alternation fast path included (`a|ab`
+  finds `ab`).
 - One scratch can serve several programs: size it with
   `Scratch.initCapacity(allocator, a.capacity().max(b.capacity()))`. A
   program larger than the scratch returns `error.ScratchTooSmall`.

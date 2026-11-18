@@ -273,9 +273,10 @@ test "stress: nested alternation" {
     try std.testing.expect(!try regex.isMatch("abg"));
 }
 
-test "stress: alternation preserves source order" {
+test "stress: alternation order matters only under ECMAScript" {
     const allocator = std.testing.allocator;
-    var short_first = try Regex.compile(allocator, "cat|catfish");
+    // ECMAScript alternation is ordered: the first alternative that matches.
+    var short_first = try Regex.compileWithFlags(allocator, "cat|catfish", .{ .ecmascript = true });
     defer short_first.deinit();
 
     if (try short_first.find("catfish")) |match| {
@@ -286,15 +287,18 @@ test "stress: alternation preserves source order" {
         return error.TestExpectedMatch;
     }
 
-    var long_first = try Regex.compile(allocator, "catfish|cat");
-    defer long_first.deinit();
-
-    if (try long_first.find("catfish")) |match| {
-        var mut_match = match;
-        defer mut_match.deinit(allocator);
-        try std.testing.expectEqualStrings("catfish", match.slice);
-    } else {
-        return error.TestExpectedMatch;
+    // Otherwise the leftmost match is extended as far as possible, whatever
+    // the order (#50).
+    for ([_][]const u8{ "cat|catfish", "catfish|cat" }) |pattern| {
+        var re = try Regex.compile(allocator, pattern);
+        defer re.deinit();
+        if (try re.find("catfish")) |match| {
+            var mut_match = match;
+            defer mut_match.deinit(allocator);
+            try std.testing.expectEqualStrings("catfish", match.slice);
+        } else {
+            return error.TestExpectedMatch;
+        }
     }
 }
 

@@ -912,17 +912,28 @@ pub const Regex = struct {
 
     /// First source-order literal in `set` that matches at `input[pos..]`, or 0
     /// if none. ECMAScript alternation is ordered (`a|ab` matches `a`).
-    fn firstLiteralAt(set: []const []const u8, input: []const u8, pos: usize) usize {
+    /// The length of the literal of `set` that matches at `pos` (0 when none
+    /// does), as the engine's semantics pick it: the first in source order
+    /// for ECMAScript (leftmost-first), otherwise the longest, which is what
+    /// the Thompson engines report for the same alternation (`a|ab` finds
+    /// `ab`).
+    fn literalAt(self: *const Regex, set: []const []const u8, input: []const u8, pos: usize) usize {
+        var best: usize = 0;
         for (set) |s| {
             if (pos + s.len <= input.len and
-                std.mem.eql(u8, input[pos .. pos + s.len], s)) return s.len;
+                std.mem.eql(u8, input[pos .. pos + s.len], s))
+            {
+                if (self.flags.ecmascript) return s.len;
+                best = @max(best, s.len);
+            }
         }
-        return 0;
+        return best;
     }
 
-    /// Candidate-position scanner for a literal alternation (`foo|bar|baz`). A
-    /// DFA can't run these (ECMAScript alternation is leftmost-*first*, not
-    /// longest), so the set path confirms each candidate with `firstLiteralAt`.
+    /// Candidate-position scanner for a literal alternation (`foo|bar|baz`).
+    /// The set path confirms each candidate with `literalAt`, which follows
+    /// ECMAScript's leftmost-first order or the Thompson engines' longest
+    /// match.
     /// When every literal is >= 2 bytes (and the first/second byte sets are
     /// small), this uses a vectorized **two-byte** filter — the simplified-Teddy
     /// idea: a position is a candidate only if `input[p]` is some literal's first
@@ -1268,7 +1279,7 @@ pub const Regex = struct {
                 const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
                 var p: usize = 0;
                 while (scanner.next(input, p)) |cand| {
-                    if (firstLiteralAt(set, input, cand) > 0) return true;
+                    if (self.literalAt(set, input, cand) > 0) return true;
                     p = cand + 1;
                 }
                 return false;
@@ -1485,13 +1496,13 @@ pub const Regex = struct {
             }
             return null;
         };
-        // Literal-alternation fast path: leftmost position, first source-order literal.
+        // Literal-alternation fast path: leftmost position, then `literalAt`.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
                 const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
                 var p: usize = 0;
                 while (scanner.next(input, p)) |cand| {
-                    const best = firstLiteralAt(set, input, cand);
+                    const best = self.literalAt(set, input, cand);
                     if (best > 0) return Match{ .slice = input[cand .. cand + best], .start = cand, .end = cand + best };
                     p = cand + 1;
                 }
@@ -1811,12 +1822,12 @@ pub const Regex = struct {
             }
             return matches.toOwnedSlice(allocator);
         };
-        // Literal-alternation fast path: each leftmost source-order literal match.
+        // Literal-alternation fast path: each leftmost match, ended by `literalAt`.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
                 const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
                 while (scanner.next(input, pos)) |cand| {
-                    const best = firstLiteralAt(set, input, cand);
+                    const best = self.literalAt(set, input, cand);
                     if (best > 0) {
                         try matches.append(allocator, Match{ .slice = input[cand .. cand + best], .start = cand, .end = cand + best });
                         pos = cand + best;
@@ -2284,12 +2295,12 @@ pub const Regex = struct {
             }
             return n;
         };
-        // Literal-alternation: leftmost source-order literal at each candidate.
+        // Literal-alternation: the `literalAt` match at each candidate.
         if (self.opt_info.literal_set) |set| {
             if (!self.flags.case_insensitive) {
                 const scanner = LiteralSetScanner.init(set, self.opt_info.first_bytes);
                 while (scanner.next(input, pos)) |cand| {
-                    const best = firstLiteralAt(set, input, cand);
+                    const best = self.literalAt(set, input, cand);
                     if (best > 0) {
                         n += 1;
                         pos = cand + best;

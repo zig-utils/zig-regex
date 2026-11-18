@@ -643,18 +643,25 @@ test "regression: `//.*` stays on the byte engine (not the backtracker)" {
     try std.testing.expectEqual(@as(usize, 40_000), try re.count(list.items));
 }
 
-test "regression: literal alternation preserves source order" {
+test "regression: literal alternation keeps source order under ECMAScript only" {
     const allocator = std.testing.allocator;
 
-    var short_first = try Regex.compile(allocator, "a|ab");
+    // ECMAScript alternation is ordered: the first alternative that matches.
+    var short_first = try Regex.compileWithFlags(allocator, "a|ab", .{ .ecmascript = true });
     defer short_first.deinit();
-    const short_match = (try short_first.find("abc")).?;
+    var short_match = (try short_first.find("abc")).?;
+    defer short_match.deinit(allocator);
     try std.testing.expectEqualStrings("a", short_match.slice);
 
-    var long_first = try Regex.compile(allocator, "ab|a");
-    defer long_first.deinit();
-    const long_match = (try long_first.find("abc")).?;
-    try std.testing.expectEqualStrings("ab", long_match.slice);
+    // Elsewhere the Thompson engines' leftmost-longest rule holds whichever
+    // alternative comes first (#50).
+    for ([_][]const u8{ "a|ab", "ab|a" }) |pattern| {
+        var re = try Regex.compile(allocator, pattern);
+        defer re.deinit();
+        var m = (try re.find("abc")).?;
+        defer m.deinit(allocator);
+        try std.testing.expectEqualStrings("ab", m.slice);
+    }
 }
 
 // --- `\bfn\b`-style bounded-literal fast path ---
@@ -1781,9 +1788,9 @@ test "regression: test262 language tag extensions with optional privateuse suffi
 // --- literal-alternation two-byte (Teddy-lite) prefilter ---
 //
 // Literal alternations use a vectorized two-byte-prefix filter to find
-// candidate positions, then `firstLiteralAt` confirms in source order. Guard
+// candidate positions, then `Regex.literalAt` confirms them. Guard
 // correctness: matches found at any position, near-miss prefixes rejected
-// (`er` without `ror`), source order preserved, and the len-1 fallback.
+// (`er` without `ror`), the longest literal chosen, and the len-1 fallback.
 
 test "regression: literal-alternation two-byte prefilter finds and rejects correctly" {
     const allocator = std.testing.allocator;
@@ -1801,8 +1808,14 @@ test "regression: literal-alternation two-byte prefilter finds and rejects corre
     defer f2.deinit();
     try std.testing.expectEqual(@as(usize, 2), try f2.count("zzz pub yyy var"));
 
-    // Source order preserved (ECMAScript ordered alternation).
-    var ord = try Regex.compile(allocator, "ab|abc");
+    // The longest literal at the leftmost position, as the Thompson engines
+    // report it (#50); ECMAScript keeps its ordered alternation.
+    var longest = try Regex.compile(allocator, "ab|abc");
+    defer longest.deinit();
+    var lm = (try longest.find("xabc")).?;
+    defer lm.deinit(allocator);
+    try std.testing.expectEqualStrings("abc", lm.slice);
+    var ord = try Regex.compileWithFlags(allocator, "ab|abc", .{ .ecmascript = true });
     defer ord.deinit();
     const om = (try ord.find("xabc")).?;
     try std.testing.expectEqualStrings("ab", om.slice);
@@ -1811,4 +1824,56 @@ test "regression: literal-alternation two-byte prefilter finds and rejects corre
     var mixed = try Regex.compile(allocator, "x|foo");
     defer mixed.deinit();
     try std.testing.expectEqual(@as(usize, 2), try mixed.count("a foo b x c"));
+}
+
+// `Regex` follows one rule on every path for a literal alternation outside
+// ECMAScript: the leftmost match, extended as far as possible, which the DFA
+// and the NFA VM report for `a|ab` too. Its literal-set fast path used to
+// take the first alternative in source order instead (#50).
+test "regression: literal alternations are leftmost-longest on the fast path" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, want: []const []const u8 }{
+        .{ .pattern = "a|ab", .input = "ab xab a", .want = &.{ "ab", "ab", "a" } },
+        .{ .pattern = "foo|foobar|fo", .input = "foobar foo fo f", .want = &.{ "foobar", "foo", "fo" } },
+        .{ .pattern = "ab|abc|abcd", .input = "abcd abc ab", .want = &.{ "abcd", "abc", "ab" } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pattern);
+        defer re.deinit();
+        try std.testing.expect(re.opt_info.literal_set != null);
+        var first = (try re.find(c.input)).?;
+        defer first.deinit(allocator);
+        try std.testing.expectEqualStrings(c.want[0], first.slice);
+        const all = try re.findAll(allocator, c.input);
+        defer {
+            for (all) |*m| m.deinit(allocator);
+            allocator.free(all);
+        }
+        try std.testing.expectEqual(c.want.len, all.len);
+        for (c.want, all) |w, m| try std.testing.expectEqualStrings(w, m.slice);
+        try std.testing.expectEqual(c.want.len, try re.count(c.input));
+        var it = re.iterator(c.input);
+        for (c.want) |w| {
+            var m = (try it.next(allocator)).?;
+            defer m.deinit(allocator);
+            try std.testing.expectEqualStrings(w, m.slice);
+        }
+
+        // The same alternation without the fast path (a capture-free group
+        // around it reaches the DFA) agrees.
+        const wrapped = try std.fmt.allocPrint(allocator, "(?:{s})", .{c.pattern});
+        defer allocator.free(wrapped);
+        var slow = try Regex.compile(allocator, wrapped);
+        defer slow.deinit();
+        try std.testing.expect(slow.opt_info.literal_set == null);
+        var slow_first = (try slow.find(c.input)).?;
+        defer slow_first.deinit(allocator);
+        try std.testing.expectEqualStrings(c.want[0], slow_first.slice);
+
+        var ecma = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = true });
+        defer ecma.deinit();
+        var em = (try ecma.find(c.input)).?;
+        defer em.deinit(allocator);
+        try std.testing.expectEqualStrings(c.pattern[0..std.mem.indexOfScalar(u8, c.pattern, '|').?], em.slice);
+    }
 }
