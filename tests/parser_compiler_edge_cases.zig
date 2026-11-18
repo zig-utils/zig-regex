@@ -1113,3 +1113,62 @@ test "parser: long flat patterns compile on every path" {
         factors.deinit(allocator);
     }
 }
+
+// `{,n}` is `{0,n}` in Perl 5.34+, PCRE2 10.43+ and YARA, and literal text
+// in ECMAScript (Annex B) and older PCRE2. zig-regex's default dialect
+// follows PCRE2 and YARA; `{,}` stays literal everywhere (#51).
+test "parser: {,n} is {0,n} outside ECMAScript" {
+    const allocator = std.testing.allocator;
+    const regex = @import("regex");
+    const Case = struct { pattern: []const u8, input: []const u8, default: ?[2]usize, ecma: ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "xa{,2}y", .input = "xaay", .default = .{ 0, 4 }, .ecma = null },
+        .{ .pattern = "xa{,2}y", .input = "xaaay", .default = null, .ecma = null },
+        .{ .pattern = "xa{,2}y", .input = "xa{,2}y", .default = null, .ecma = .{ 0, 7 } },
+        .{ .pattern = "xa{,0}y", .input = "xy", .default = .{ 0, 2 }, .ecma = null },
+        .{ .pattern = "xa{,2}?", .input = "xaa", .default = .{ 0, 1 }, .ecma = null },
+        .{ .pattern = "xa{,}y", .input = "xa{,}y", .default = .{ 0, 6 }, .ecma = .{ 0, 6 } },
+        .{ .pattern = "x{,2", .input = "x{,2", .default = .{ 0, 4 }, .ecma = .{ 0, 4 } },
+        .{ .pattern = "\\/gate\\.php\\?token=.{,10}&host=", .input = "GET /gate.php?token=abc&host=x", .default = .{ 4, 29 }, .ecma = null },
+    };
+    for (cases) |c| {
+        for ([_]common.CompileFlags{ .{}, .{ .bytes = true }, .{ .ecmascript = true } }) |flags| {
+            var re = try Regex.compileWithFlags(allocator, c.pattern, flags);
+            defer re.deinit();
+            const want = if (flags.ecmascript) c.ecma else c.default;
+            var found = try re.find(c.input);
+            defer if (found) |*m| m.deinit(allocator);
+            errdefer std.debug.print("{s} flags {any}\n", .{ c.pattern, flags });
+            if (want) |w| {
+                try std.testing.expectEqual(w[0], found.?.start);
+                try std.testing.expectEqual(w[1], found.?.end);
+            } else try std.testing.expect(found == null);
+        }
+    }
+    // The same in a byte-mode program, both match kinds.
+    var program = try regex.Program.compileWithOptions(allocator, "MZ.{,4}PE", .{ .bytes = true, .dot_all = true }, .{ .match_kind = .leftmost_first });
+    defer program.deinit(allocator);
+    var scratch = try regex.Scratch.init(allocator, &program);
+    defer scratch.deinit(allocator);
+    try std.testing.expect(try program.isMatch(&scratch, "MZ\x90\x00PE"));
+    try std.testing.expect(!try program.isMatch(&scratch, "MZ\x90\x00\x00\x00\x00PE"));
+    try std.testing.expectError(RegexError.InvalidQuantifier, Regex.compile(allocator, "a{,3}{,2}"));
+}
+
+// PCRE's and Python's `(?P=name)` is a named backreference, like `\k<name>`;
+// `(?P<name>...)` enables `\k<name>` as `(?<name>...)` does (#51).
+test "parser: (?P=name) is a named backreference" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "(?P<n>ab)c(?P=n)", "(?P<n>ab)c\\k<n>", "(?<n>ab)c(?P=n)" }) |pattern| {
+        var re = try Regex.compileWithFlags(allocator, pattern, .{ .bytes = true });
+        defer re.deinit();
+        var m = (try re.find("xabcabd")).?;
+        defer m.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), m.start);
+        try std.testing.expectEqual(@as(usize, 6), m.end);
+        try std.testing.expect(try re.find("abcaa") == null);
+    }
+    try std.testing.expectError(RegexError.InvalidBackreference, Regex.compile(allocator, "(?P<n>x)(?P=m)"));
+    try std.testing.expectError(RegexError.InvalidBackreference, Regex.compile(allocator, "(?P=m)"));
+    try std.testing.expectError(RegexError.UnexpectedCharacter, Regex.compileWithFlags(allocator, "(?<n>x)(?P=n)", .{ .ecmascript = true }));
+}

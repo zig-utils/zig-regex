@@ -570,6 +570,11 @@ pub const Parser = struct {
             } else if (c == '(' and i + 2 < pattern.len and pattern[i + 1] == '?' and pattern[i + 2] == '<') {
                 const after = if (i + 3 < pattern.len) pattern[i + 3] else 0;
                 if (after != '=' and after != '!') return true; // not a lookbehind
+            } else if (c == '(' and i + 3 < pattern.len and pattern[i + 1] == '?' and pattern[i + 2] == 'P' and
+                (pattern[i + 3] == '<' or pattern[i + 3] == '='))
+            {
+                // Python/PCRE spellings (?P<name>...) and (?P=name).
+                return true;
             }
         }
         return false;
@@ -915,9 +920,19 @@ pub const Parser = struct {
         }
     }
 
+    /// Whether the `{` at the current token starts a braced quantifier:
+    /// `{n}`, `{n,}`, `{n,m}`, and outside ECMAScript also `{,m}`, which
+    /// Perl 5.34, PCRE2 10.43 and later, and YARA read as `{0,m}` (#51). An
+    /// ECMAScript pattern keeps `{,m}` literal (Annex B), as did PCRE2 before
+    /// 10.43. `{,}` is literal everywhere.
     fn validBoundedQuantifierAhead(self: *Parser) bool {
         var i = self.current_token.span.start + 1;
         const input = self.lexer.input;
+        if (!self.ecmascript and i + 1 < input.len and input[i] == ',' and std.ascii.isDigit(input[i + 1])) {
+            i += 1;
+            while (i < input.len and std.ascii.isDigit(input[i])) : (i += 1) {}
+            return i < input.len and input[i] == '}';
+        }
         if (i >= input.len or !std.ascii.isDigit(input[i])) return false;
         while (i < input.len and std.ascii.isDigit(input[i])) : (i += 1) {}
         if (i < input.len and input[i] == ',') {
@@ -1282,6 +1297,25 @@ pub const Parser = struct {
                             if (self.ecmascript)
                                 return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                             try self.advance(); // consume P
+                            if (self.current_token.token_type == .literal and self.current_token.value == '=') {
+                                // Python/PCRE named backreference (?P=name), the
+                                // same as \k<name>.
+                                const name_start = self.current_token.span.start + 1;
+                                var name_end = name_start;
+                                const input = self.lexer.input;
+                                while (name_end < input.len and input[name_end] != ')') : (name_end += 1) {}
+                                if (name_end >= input.len) return self.fail(RegexError.UnexpectedEndOfPattern, .missing_closing_parenthesis);
+                                const name = self.normalizeGroupName(input[name_start..name_end]) catch |err| {
+                                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                                    return self.fail(err, .invalid_group_specifier_name);
+                                };
+                                errdefer self.allocator.free(name);
+                                self.lexer.pos = name_end + 1;
+                                self.lexer.pending_len = 0;
+                                self.lexer.pending_pos = 0;
+                                try self.advance();
+                                return ast.Node.createBackreference(self.allocator, 0, name, span);
+                            }
                             if (self.current_token.token_type != .literal or self.current_token.value != '<') {
                                 return self.fail(RegexError.UnexpectedCharacter, .unrecognized_character_after_group_start);
                             }

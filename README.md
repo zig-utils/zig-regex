@@ -24,7 +24,7 @@ zig-regex is a regular expression engine for Zig featuring Thompson NFA construc
 | Feature | Syntax | Status |
 |---------|--------|--------|
 | **Literals** | `abc`, `123` | Stable |
-| **Quantifiers** | `*`, `+`, `?`, `{n}`, `{m,n}` | Stable |
+| **Quantifiers** | `*`, `+`, `?`, `{n}`, `{m,}`, `{m,n}`, `{,n}` (= `{0,n}`, as in PCRE2 10.43+, Perl and YARA; literal under ECMAScript) | Stable |
 | **Alternation** | `a\|b\|c` | Stable |
 | **Character Classes** | `\d`, `\w`, `\s`, `\D`, `\W`, `\S` | Stable |
 | **Custom Classes** | `[abc]`, `[a-z]`, `[^0-9]` | Stable |
@@ -35,7 +35,7 @@ zig-regex is a regular expression engine for Zig featuring Thompson NFA construc
 | **Non-capturing** | `(?:...)` | Stable |
 | **Lookahead** | `(?=...)`, `(?!...)` | Stable |
 | **Lookbehind** | `(?<=...)`, `(?<!...)` | Stable |
-| **Backreferences** | `\1`, `\2` | Stable |
+| **Backreferences** | `\1`, `\2`, `\k<name>`, `(?P=name)` | Stable |
 | **Case-insensitive** | `compileWithFlags(..., .{.case_insensitive = true})` | Stable |
 | **Multiline** | `compileWithFlags(..., .{.multiline = true})` | Stable |
 | **Dot-all** | `compileWithFlags(..., .{.dot_matches_newline = true})` | Stable |
