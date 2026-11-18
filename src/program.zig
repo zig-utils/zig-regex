@@ -14,7 +14,10 @@
 //! backreferences, general lookaround, lazy quantifiers outside ECMAScript
 //! mode, scoped inline modifiers and Unicode property escapes, which need the
 //! backtracking engine. `Program.fromRegex` reports those with
-//! `error.UnsupportedByProgram`. ECMAScript mode is also unsupported. Matching
+//! `error.UnsupportedByProgram`, as it does for a regex the backtracker got
+//! only to order captures inside an alternation; `Program.compile` drops
+//! capture groups first, so such patterns still become programs. ECMAScript
+//! mode is also unsupported. Matching
 //! reports spans only (no capture groups) with the same semantics as
 //! `Regex.find`: the leftmost match, extended as far as possible.
 //!
@@ -220,9 +223,13 @@ pub const Program = struct {
     /// One byte of each byte class: every byte of a class behaves alike.
     class_rep: [256]u8,
 
-    /// Compile `pattern` and flatten it into a program.
+    /// Compile `pattern` and flatten it into a program. Programs report
+    /// spans only, so groups are compiled as non-capturing (see
+    /// `Regex.compileWithoutCaptures`): an alternation of capture groups,
+    /// which `Regex` hands to the backtracker to order its captures, still
+    /// becomes a program.
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Program {
-        var re = try Regex.compileWithFlags(allocator, pattern, flags);
+        var re = try Regex.compileWithoutCaptures(allocator, pattern, flags);
         defer re.deinit();
         return fromRegex(allocator, &re);
     }

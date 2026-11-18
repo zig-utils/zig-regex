@@ -126,19 +126,32 @@ pub const Regex = struct {
 
     /// Compile a regex pattern with custom flags
     pub fn compileWithFlags(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
-        return compileWithFlagsInner(allocator, pattern, flags, null);
+        return compileWithFlagsInner(allocator, pattern, flags, null, true);
+    }
+
+    /// Compile `pattern` with every group treated as non-capturing: matches
+    /// report spans only and `Match.captures` is empty. A pattern that needs
+    /// the backtracker only to order its captures, such as an alternation of
+    /// capture groups (`(etc/(passwd|shadow)|win\.ini)`), then stays on the
+    /// linear Thompson engines. `Program.compile` compiles this way. A
+    /// pattern with a backreference keeps its groups, which the reference
+    /// needs, and compiles exactly as `compileWithFlags` would.
+    pub fn compileWithoutCaptures(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags) !Regex {
+        return compileWithFlagsInner(allocator, pattern, flags, null, false);
     }
 
     /// Compile while retaining the precise parse reason on failure. The
     /// ordinary error return remains source-compatible with `compileWithFlags`.
     pub fn compileWithFlagsDiagnostic(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: *?CompileErrorReason) !Regex {
         diagnostic.* = null;
-        return compileWithFlagsInner(allocator, pattern, flags, diagnostic);
+        return compileWithFlagsInner(allocator, pattern, flags, diagnostic, true);
     }
 
-    fn compileWithFlagsInner(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: ?*?CompileErrorReason) !Regex {
+    fn compileWithFlagsInner(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: ?*?CompileErrorReason, captures: bool) !Regex {
         var tree = try parseTree(allocator, pattern, flags, diagnostic);
         errdefer tree.deinit(); // Free AST if compilation fails
+        if (!captures and tree.capture_count > 0 and try dropCaptures(allocator, tree.root))
+            tree.capture_count = 0;
 
         // Store owned copy of pattern
         const owned_pattern = try allocator.dupe(u8, pattern);
@@ -2980,6 +2993,40 @@ fn variableQuantifierTailBytes(node: *ast.Node, flags: common.CompileFlags) ?Byt
         },
         else => return null,
     }
+}
+
+/// Make every group of the tree non-capturing, unless it has a
+/// backreference (which needs its group); returns whether it did. Walks with
+/// an explicit stack: concatenations nest once per element, so a long literal
+/// would otherwise recurse once per byte.
+fn dropCaptures(allocator: std.mem.Allocator, root: *ast.Node) !bool {
+    var stack: std.ArrayList(*ast.Node) = .empty;
+    defer stack.deinit(allocator);
+    var groups: std.ArrayList(*ast.Node) = .empty;
+    defer groups.deinit(allocator);
+    try stack.append(allocator, root);
+    while (stack.pop()) |node| {
+        switch (node.node_type) {
+            .backref => return false,
+            .group => {
+                if (node.data.group.capture_index != null) try groups.append(allocator, node);
+                try stack.append(allocator, node.data.group.child);
+            },
+            .concat => try stack.appendSlice(allocator, &.{ node.data.concat.left, node.data.concat.right }),
+            .alternation => try stack.appendSlice(allocator, &.{ node.data.alternation.left, node.data.alternation.right }),
+            .star => try stack.append(allocator, node.data.star.child),
+            .plus => try stack.append(allocator, node.data.plus.child),
+            .optional => try stack.append(allocator, node.data.optional.child),
+            .repeat => try stack.append(allocator, node.data.repeat.child),
+            .lookahead => try stack.append(allocator, node.data.lookahead.child),
+            .lookbehind => try stack.append(allocator, node.data.lookbehind.child),
+            .literal, .any, .char_class, .anchor, .empty, .unicode_property, .class_set => {},
+        }
+    }
+    // The name stays on the node so the tree still frees it; without an
+    // index the group is not collected as a named capture.
+    for (groups.items) |g| g.data.group.capture_index = null;
+    return true;
 }
 
 fn containsCapture(node: *ast.Node) bool {

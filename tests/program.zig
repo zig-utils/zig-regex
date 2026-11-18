@@ -283,6 +283,37 @@ test "program: patterns that need backtracking are reported" {
     try testing.expectError(error.UnsupportedByProgram, Program.compile(testing.allocator, "a|b", .{ .ecmascript = true }));
 }
 
+test "program: capture groups inside alternations still compile" {
+    // `Regex` orders these captures on the backtracker; a program reports
+    // spans only, so `Program.compile` drops the groups and stays linear.
+    const Case = struct { pattern: []const u8, flags: CompileFlags, input: []const u8, span: [2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(etc/(passwd|shadow)|proc/self/environ|win\\.ini)", .flags = .{}, .input = "GET /../etc/shadow HTTP", .span = .{ 8, 18 } },
+        .{ .pattern = "(\\.\\./|%2e%2e(/|%2f))", .flags = .{ .bytes = true, .case_insensitive = true }, .input = "f=%2E%2E%2Fx", .span = .{ 2, 11 } },
+        .{ .pattern = "x(a(b|c)|d)y", .flags = .{}, .input = "zxacy", .span = .{ 1, 5 } },
+        .{ .pattern = "(?<n>ab|cd(e|f))", .flags = .{}, .input = "--cdf", .span = .{ 2, 5 } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(testing.allocator, c.pattern, c.flags);
+        defer re.deinit();
+        try testing.expectError(error.UnsupportedByProgram, Program.fromRegex(testing.allocator, &re));
+
+        var spans_only = try Regex.compileWithoutCaptures(testing.allocator, c.pattern, c.flags);
+        defer spans_only.deinit();
+        try testing.expectEqual(@as(usize, 0), spans_only.capture_count);
+
+        var program = try Program.compile(testing.allocator, c.pattern, c.flags);
+        defer program.deinit(testing.allocator);
+        var scratch = try Scratch.init(testing.allocator, &program);
+        defer scratch.deinit(testing.allocator);
+        const span = (try program.find(&scratch, c.input)).?;
+        try testing.expectEqual(c.span, [2]usize{ span.start, span.end });
+        try testing.expect(try re.isMatch(c.input));
+    }
+    // A backreference needs its group: still the backtracker, still refused.
+    try testing.expectError(error.UnsupportedByProgram, Program.compile(testing.allocator, "(a|b)\\1", .{}));
+}
+
 test "program: the NFA fallback agrees with the DFA" {
     const patterns = [_][]const u8{ "[ab]*a[ab]{6}", "x[abcdef]*y", "\\bfoo\\b", "^\\w+$", "(foo|foobar)baz", "a{2,4}", "(?:ab)+e|cde" };
     const inputs = [_][]const u8{ "abababbbaabababa", "xay xbcy xdefy xbcbcy", "foo foobar foo", "line1\nline2", "foobarbaz foobaz", "aaaaa", "ababcde" };
