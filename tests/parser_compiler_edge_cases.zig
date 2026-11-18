@@ -621,15 +621,20 @@ test "backtrack: budget exhaustion preserves partial cleanup and offset searches
 
 test "backtrack: exact budget succeeds and iterator initializes its own input" {
     const allocator = std.testing.allocator;
-    var re = try Regex.compileWithFlags(allocator, "(?!a)", .{ .ecmascript = true });
+    // A fixed literal lookaround now runs on the NFA, so these use an
+    // alternation inside the assertion to stay on the backtracker.
+    var re = try Regex.compileWithFlags(allocator, "(?!a|c)", .{ .ecmascript = true });
     defer re.deinit();
-    re.backtrack_engine.?.max_steps = 2;
     try std.testing.expect(try re.isMatch("b"));
-    try std.testing.expectEqual(@as(usize, 2), re.backtrack_engine.?.step_count);
-    re.backtrack_engine.?.max_steps = 1;
+    const needed = re.backtrack_engine.?.step_count;
+    try std.testing.expect(needed > 0);
+    re.backtrack_engine.?.max_steps = needed;
+    try std.testing.expect(try re.isMatch("b"));
+    try std.testing.expectEqual(needed, re.backtrack_engine.?.step_count);
+    re.backtrack_engine.?.max_steps = needed - 1;
     try std.testing.expectError(error.Timeout, re.isMatch("b"));
 
-    var capture = try Regex.compileWithFlags(allocator, "(a)(?=b)", .{ .ecmascript = true });
+    var capture = try Regex.compileWithFlags(allocator, "(a)(?=b|c)", .{ .ecmascript = true });
     defer capture.deinit();
     var prior = (try capture.find("ab")).?;
     prior.deinit(allocator);
