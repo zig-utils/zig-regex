@@ -297,6 +297,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_multiline_dotall_tests = b.addRunArtifact(multiline_dotall_tests);
 
+    const bytes_mode_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/bytes_mode.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_bytes_mode_tests = b.addRunArtifact(bytes_mode_tests);
+
     const lazy_quantifiers_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/lazy_quantifiers.zig"),
@@ -376,6 +388,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_multiline_dotall_tests.step);
     test_step.dependOn(&run_named_captures_tests.step);
     test_step.dependOn(&run_lazy_quantifiers_tests.step);
+    test_step.dependOn(&run_bytes_mode_tests.step);
     test_step.dependOn(&run_fuzz_tests.step);
     test_step.dependOn(&run_benchmarks_tests.step);
 
@@ -396,6 +409,10 @@ pub fn build(b: *std.Build) void {
     test_core_step.dependOn(&run_multiline_dotall_tests.step);
     test_core_step.dependOn(&run_named_captures_tests.step);
     test_core_step.dependOn(&run_lazy_quantifiers_tests.step);
+    test_core_step.dependOn(&run_bytes_mode_tests.step);
+
+    const bytes_mode_step = b.step("test-bytes", "Run byte-mode compilation tests");
+    bytes_mode_step.dependOn(&run_bytes_mode_tests.step);
 
     // Regression tests for specific fixes
     const regression_tests = b.addTest(.{

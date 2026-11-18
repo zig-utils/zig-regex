@@ -111,17 +111,22 @@ pub const Regex = struct {
     }
 
     fn compileWithFlagsInner(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: ?*?CompileErrorReason) !Regex {
+        // Byte mode has no code points, so the flags defined over them conflict.
+        if (flags.bytes and (flags.unicode or flags.unicode_sets or flags.ecmascript))
+            return RegexError.UnsupportedInBytesMode;
         // Parse the pattern into an AST
         var p = try parser.Parser.initWithDiagnostic(allocator, pattern, diagnostic);
+        p.bytes = flags.bytes;
         p.unicode_sets = flags.unicode_sets;
         p.unicode = flags.unicode;
         p.case_insensitive = flags.case_insensitive;
         p.ecmascript = flags.ecmascript;
         // The `x`, `u`, and `v` flags affect lexing from the first token, so
         // enable them on the lexer and re-lex the already-fetched first token.
-        if (flags.extended or flags.unicode or flags.unicode_sets) {
+        if (flags.extended or flags.unicode or flags.unicode_sets or flags.bytes) {
             p.extended = flags.extended;
             p.lexer.extended = flags.extended;
+            p.lexer.bytes = flags.bytes;
             p.lexer.unicode_strict = flags.unicode or flags.unicode_sets;
             p.lexer.reset();
             p.current_token = try p.lexer.next();

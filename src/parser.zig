@@ -92,6 +92,9 @@ pub const Lexer = struct {
     /// parser). When set (or in `u`/`v` mode) `\k` must be a `\k<name>` named
     /// backreference; otherwise a lone `\k` is the identity escape (Annex B).
     has_named_groups: bool = false,
+    /// Byte mode (`CompileFlags.bytes`): `\xHH` is one byte and code-point
+    /// escapes are rejected.
+    bytes: bool = false,
     diagnostic: ?*?CompileErrorReason = null,
 
     pub fn init(input: []const u8) Lexer {
@@ -253,9 +256,9 @@ pub const Lexer = struct {
                 if (self.unicode_strict) break :blk self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
                 break :blk self.literalWithPending('\\', "c"); // Annex B: invalid \c is literal "\c"
             },
-            'u' => try self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
-            'p' => self.parsePropertyEscape(false),
-            'P' => self.parsePropertyEscape(true),
+            'u' => if (self.bytes) RegexError.UnsupportedInBytesMode else try self.parseUnicodeEscape(), // \uHHHH or \u{...} → UTF-8 byte(s)
+            'p' => if (self.bytes) RegexError.UnsupportedInBytesMode else self.parsePropertyEscape(false),
+            'P' => if (self.bytes) RegexError.UnsupportedInBytesMode else self.parsePropertyEscape(true),
             '\\', '.', '*', '+', '?', '|', '(', ')', '[', ']', '{', '}', '^', '$', '/' => {
                 // Literal escape of special characters
                 return self.makeToken(.literal, c);
@@ -318,6 +321,7 @@ pub const Lexer = struct {
     }
 
     fn parseHexEscape(self: *Lexer) !Token {
+        if (self.bytes) return self.parseByteHexEscape();
         const save = self.pos;
         const h1 = self.peekHex(0);
         const h2 = self.peekHex(1);
@@ -328,6 +332,34 @@ pub const Lexer = struct {
         self.pos = save;
         if (self.unicode_strict) return self.fail(RegexError.InvalidEscapeSequence, .invalid_escaped_character_for_unicode_pattern);
         return self.makeToken(.literal, 'x');
+    }
+
+    /// Byte mode `\x`, with PCRE's rules: up to two hex digits (none is NUL)
+    /// or a braced `\x{H..}` whose value fits a byte. Either way the result is
+    /// that one byte, never a UTF-8 encoding.
+    fn parseByteHexEscape(self: *Lexer) !Token {
+        if (self.peek() == '{') {
+            self.pos += 1; // consume '{'
+            var value: u32 = 0;
+            var digits: usize = 0;
+            while (self.peekHex(0)) |d| {
+                value = value * 16 + d;
+                self.pos += 1;
+                digits += 1;
+                if (value > 0xFF) return RegexError.InvalidEscapeSequence;
+            }
+            if (digits == 0 or self.peek() != '}') return RegexError.InvalidEscapeSequence;
+            self.pos += 1; // consume '}'
+            return self.makeToken(.literal, @intCast(value));
+        }
+        var value: u8 = 0;
+        var digits: usize = 0;
+        while (digits < 2) : (digits += 1) {
+            const d = self.peekHex(0) orelse break;
+            value = value * 16 + d;
+            self.pos += 1;
+        }
+        return self.makeToken(.literal, value);
     }
 
     /// `\uHHHH` or `\u{H...}`: a code point, emitted as its UTF-8 bytes (the
@@ -511,6 +543,9 @@ pub const Parser = struct {
     /// modifiers `(?ims)` (only the scoped `(?ims:…)` / `(?ims-i:…)` colon form
     /// is valid), and modifier flags spelled with unicode escapes `(?i:…)`.
     ecmascript: bool = false,
+    /// Byte mode (`CompileFlags.bytes`): every pattern byte is its own atom,
+    /// classes are byte sets and `\s`/`\S` are ASCII.
+    bytes: bool = false,
 
     /// Maximum nesting depth to prevent stack overflow from patterns like (((((...
     pub const MAX_NESTING_DEPTH: usize = 512;
@@ -1077,7 +1112,7 @@ pub const Parser = struct {
                 // binds to the whole character/code unit, not just its last byte.
                 // The matcher is byte-based, so the grouped concat matches the
                 // same bytes; only quantifier binding changes.
-                if (token.value >= 0xC0) {
+                if (token.value >= 0xC0 and !self.bytes) {
                     var bytes: [4]u8 = undefined;
                     bytes[0] = token.value;
                     var len: usize = 1;
@@ -1141,10 +1176,12 @@ pub const Parser = struct {
             },
             .escape_s => {
                 try self.advance();
+                if (self.bytes) return self.createOwnedCharClass(common.CharClasses.whitespace, span);
                 return self.createBuiltinClassSet('s', span);
             },
             .escape_S => {
                 try self.advance();
+                if (self.bytes) return self.createOwnedCharClass(common.CharClasses.non_whitespace, span);
                 return self.createBuiltinClassSet('S', span);
             },
             .escape_b => {
@@ -2356,10 +2393,16 @@ pub const Parser = struct {
     fn parseCharClass(self: *Parser) !*ast.Node {
         // With the `v` flag, classes use set notation; parse from the raw input
         // (the byte-token stream can't represent code-point operands/operators).
-        if (self.unicode_sets) return self.parseClassSetV();
-        if (self.unicode) return self.parseUnicodeCharClass();
-        if (self.currentClassContainsPropertyEscape()) return self.parseUnicodeCharClass();
-        if (self.currentClassNeedsCodepoints()) return self.parseUnicodeCharClass();
+        if (self.bytes) {
+            // Byte mode: the class is a byte set, so the byte parser below
+            // handles every member; a property escape has no byte meaning.
+            if (self.currentClassContainsPropertyEscape()) return RegexError.UnsupportedInBytesMode;
+        } else {
+            if (self.unicode_sets) return self.parseClassSetV();
+            if (self.unicode) return self.parseUnicodeCharClass();
+            if (self.currentClassContainsPropertyEscape()) return self.parseUnicodeCharClass();
+            if (self.currentClassNeedsCodepoints()) return self.parseUnicodeCharClass();
+        }
         const start = self.current_token.span.start;
         try self.advance(); // consume [
 
@@ -2470,7 +2513,7 @@ pub const Parser = struct {
                     // only flag ranges whose BOTH bounds are single ASCII bytes
                     // (< 0x80), where byte order is code-point order. (A reversed
                     // multibyte range is rare and unreliable to detect by byte.)
-                    if (first_char < 0x80 and second_char < 0x80 and first_char > second_char)
+                    if ((self.bytes or (first_char < 0x80 and second_char < 0x80)) and first_char > second_char)
                         return self.fail(RegexError.InvalidCharacterClass, .range_out_of_order_in_character_class);
                     try ranges.append(self.allocator, common.CharRange.init(first_char, second_char));
                 }

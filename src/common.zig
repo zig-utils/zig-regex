@@ -72,6 +72,16 @@ pub const CompileFlags = packed struct {
     /// the Thompson engines stay leftmost-longest, which is also wrong for
     /// PCRE/Perl (leftmost-first backtrackers) but is left as it was.
     ecmascript: bool = false,
+    /// Byte mode: the pattern and the input are raw bytes, not UTF-8 text.
+    /// `\xHH` (one or two hex digits, or `\x{H..}` up to `FF`) is one byte,
+    /// `.` matches any single byte (any byte but `\n` without `dot_all`),
+    /// a raw byte of the pattern is one atom, character classes are byte sets
+    /// and `\s`/`\S` are their ASCII forms. Case-insensitive matching folds
+    /// ASCII letters only. Unicode property escapes and `\u` escapes are
+    /// rejected with `error.UnsupportedInBytesMode`, as are the `unicode`,
+    /// `unicode_sets` and `ecmascript` flags, whose semantics are defined over
+    /// code points.
+    bytes: bool = false,
 };
 
 pub fn isEcmaLineTerminator(cp: unicode.Codepoint) bool {
@@ -130,6 +140,8 @@ pub fn ecmaCodePointLen(input: []const u8, pos: usize) ?usize {
 
 pub fn dotMatchLen(input: []const u8, pos: usize, flags: CompileFlags) ?usize {
     if (pos >= input.len) return null;
+    // Byte mode: `.` is one byte, any byte but `\n` unless `dot_all`.
+    if (flags.bytes) return if (!flags.dot_all and input[pos] == '\n') null else 1;
 
     const dec = unicode.decodeUtf8Lenient(input[pos..]) orelse {
         const b = input[pos];

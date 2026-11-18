@@ -2292,6 +2292,7 @@ pub const BacktrackEngine = struct {
 
     fn previousCodepointStart(self: *BacktrackEngine, pos: usize) ?usize {
         if (pos == 0 or pos > self.input.len) return null;
+        if (self.flags.bytes) return pos - 1;
         var start = pos - 1;
         while (start > 0 and (self.input[start] & 0xC0) == 0x80) : (start -= 1) {}
         if (self.flags.unicode) {

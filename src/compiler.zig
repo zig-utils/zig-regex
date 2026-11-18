@@ -386,6 +386,14 @@ pub const Compiler = struct {
     /// line terminators `\n \r    ` unless `dot_all`. This keeps `.` on
     /// the fast byte engine instead of forcing the whole pattern to backtrack.
     fn compileAny(self: *Compiler) !Fragment {
+        // Byte mode: `.` is one byte (every engine reads `.any` as any byte but
+        // `\n`, or any byte at all under `dot_all`).
+        if (self.flags.bytes) {
+            const start = try self.nfa.addState();
+            const accept = try self.nfa.addState();
+            try self.nfa.getState(start).addTransition(Transition.any(accept));
+            return Fragment{ .start = start, .accept = accept };
+        }
         const max: u21 = if (self.flags.unicode) 0x10FFFF else 0xFFFF;
         if (self.flags.dot_all) {
             const ranges = [_]ast.Node.CpRange{.{ .lo = 0, .hi = max }};

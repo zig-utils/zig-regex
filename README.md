@@ -213,6 +213,32 @@ while (true) {
 }
 ```
 
+### Byte Mode (binary data)
+
+By default a pattern describes UTF-8 text: `\xHH` is the code point U+00HH
+(two bytes when HH >= 80) and `.` matches one code point. Set `.bytes = true`
+to match raw bytes instead, as PCRE does without its UTF option:
+
+```zig
+var sig = try Regex.compileWithFlags(allocator, "MZ.{2}\\x80\\xff[\\x00-\\x1f]+", .{ .bytes = true });
+defer sig.deinit();
+_ = try sig.isMatch(file_bytes);
+```
+
+In byte mode:
+
+- `\xHH` (one or two hex digits, none meaning NUL) and `\x{H..}` (up to `FF`)
+  are one byte.
+- `.` matches any single byte; without `dot_all` it excludes `\n` only.
+- A raw byte in the pattern is its own atom, so `\xc3\xa9+` repeats `\xa9` only.
+- Character classes are byte sets (`[\x80-\xff]`, `[^a]` matches one byte) and
+  `\s`, `\S`, `\d`, `\w` and the POSIX classes are their ASCII forms.
+- `case_insensitive` folds ASCII letters only.
+- `^`, `$`, `\A`, `\z`, `\b` and `\B` work as in UTF-8 mode; bytes `>= 0x80`
+  are not word bytes.
+- `\p{..}`, `\P{..}` and `\u` escapes, and the `unicode`, `unicode_sets` and
+  `ecmascript` flags, are rejected with `error.UnsupportedInBytesMode`.
+
 ## CLI
 
 zig-regex includes a command-line tool:

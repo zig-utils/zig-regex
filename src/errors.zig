@@ -20,6 +20,9 @@ pub const RegexError = error{
     InvalidBackreference,
     DuplicateGroupName,
     NestingTooDeep,
+    /// A construct defined over code points (`\p{..}`, `\u`, the `unicode`,
+    /// `unicode_sets` or `ecmascript` flag) was used with `bytes` mode.
+    UnsupportedInBytesMode,
 
     // Compilation errors
     CompilationFailed,

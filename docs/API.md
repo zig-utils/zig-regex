@@ -367,8 +367,18 @@ pub const CompileFlags = packed struct {
     dot_all: bool = false,           // Not yet implemented
     extended: bool = false,          // Not yet implemented
     unicode: bool = false,           // Not yet implemented
+    // ...
+    bytes: bool = false,             // Raw-byte patterns and input
 }
 ```
+
+#### `bytes`
+
+When `true`, the pattern and the input are raw bytes rather than UTF-8 text:
+`\xHH` and `\x{H..}` are single bytes, `.` matches one byte, classes are byte
+sets and case folding is ASCII only. Unicode property and `\u` escapes, and the
+`unicode`, `unicode_sets` and `ecmascript` flags, fail with
+`error.UnsupportedInBytesMode`. See "Byte Mode" in the README for the full rules.
 
 #### `case_insensitive`
 
