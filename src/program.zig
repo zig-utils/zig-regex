@@ -11,14 +11,16 @@
 //! then reused for every match on its thread; no match ever allocates.
 //!
 //! Programs cover the patterns the Thompson engine runs: everything except
-//! backreferences, general lookaround, scoped inline modifiers and Unicode
-//! property escapes, which need the backtracking engine. `Program.fromRegex`
-//! reports those with `error.UnsupportedByProgram`, as it does for a regex the
-//! backtracker got only to order captures, alternatives or lazy repeats.
-//! `Program.compile` compiles for spans: it drops capture groups and keeps
-//! lazy repeats and repeated alternations (`(?:ab|cd)+`, `a.+?b`) on the
-//! Thompson route, so such patterns still become programs. ECMAScript mode is
-//! unsupported. Matching reports spans only (no capture groups).
+//! backreferences, general lookaround and Unicode property escapes, which
+//! need the backtracking engine. `Program.fromRegex` reports those with
+//! `error.UnsupportedByProgram`, as it does for a regex the backtracker got
+//! only to order captures, alternatives or lazy repeats, or to scope inline
+//! modifiers. `Program.compile` compiles for spans: it drops capture groups
+//! and keeps lazy repeats and repeated alternations (`(?:ab|cd)+`, `a.+?b`)
+//! on the Thompson route, so such patterns still become programs; in byte
+//! mode it also builds inline modifiers (`(?i)`, `(?s:..)`, `(?-i:..)`,
+//! `(?m:..)`) into the automaton. ECMAScript mode is unsupported. Matching
+//! reports spans only (no capture groups).
 //!
 //! Every program has a `MatchKind`, chosen when it is built and stored in it:
 //!

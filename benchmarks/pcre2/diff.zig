@@ -14,8 +14,9 @@
 //! A case is flags<TAB>pattern-hex<TAB>subject-hex, the format
 //! `pcre2_spans.c` reads. Patterns come from a small grammar over the
 //! constructs whose match ends depend on the match kind: alternation order,
-//! greedy and lazy repeats (`*?`, `+?`, `??`, `{m,n}?`), repeated groups and
-//! alternations, classes, `.`, `\b`, anchors and case folding. Each case is
+//! greedy and lazy repeats (`*?`, `+?`, `??`, `{m,n}?`, `{,n}`), repeated
+//! groups and alternations, classes, `.`, `\b`, anchors, case folding and
+//! inline modifiers (scoped `(?i:..)` and standalone `(?i)`). Each case is
 //! compiled as a byte-mode leftmost-first `Program` and its `g`-style matches
 //! (`Program.iterator`) are compared with PCRE2's.
 
@@ -26,7 +27,7 @@ const Io = std.Io;
 const max_pattern = 96;
 
 fn genAtom(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Allocator, depth: usize) !void {
-    const pick = random.uintLessThan(u8, if (depth > 2) 14 else 18);
+    const pick = random.uintLessThan(u8, if (depth > 2) 15 else 20);
     switch (pick) {
         0...4 => try out.append(gpa, "abc"[random.uintLessThan(usize, 3)]),
         5 => try out.append(gpa, '.'),
@@ -35,8 +36,11 @@ fn genAtom(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Allocator, 
         8 => try out.append(gpa, ' '),
         9 => try out.append(gpa, "AB1"[random.uintLessThan(usize, 3)]),
         10...13 => try out.append(gpa, "ab"[random.uintLessThan(usize, 2)]),
+        // A standalone inline modifier, for the rest of the enclosing group.
+        14 => try out.appendSlice(gpa, ([_][]const u8{ "(?i)", "(?-i)", "(?s)", "(?m)", "(?-s)", "(?im)" })[random.uintLessThan(usize, 6)]),
         else => {
-            try out.appendSlice(gpa, if (random.boolean()) "(?:" else "(");
+            const opens = [_][]const u8{ "(?:", "(", "(", "(?i:", "(?-i:", "(?s:", "(?m:", "(?is-m:" };
+            try out.appendSlice(gpa, opens[random.uintLessThan(usize, if (pick == 15 or pick == 16) 3 else opens.len)]);
             try genAlt(random, out, gpa, depth + 1);
             try out.append(gpa, ')');
         },
@@ -50,8 +54,9 @@ fn genQuantified(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Alloc
     // A quantifier may not follow an assertion.
     const assertion = atom.len > 0 and (atom[0] == '^' or atom[0] == '$' or
         (atom.len == 2 and atom[0] == '\\' and (atom[1] == 'b' or atom[1] == 'B' or atom[1] == 'A' or atom[1] == 'z')));
-    if (assertion or random.uintLessThan(u8, 3) != 0) return;
-    const quantifiers = [_][]const u8{ "*", "+", "?", "{2}", "{1,3}", "{0,2}", "{2,}" };
+    const directive = std.mem.startsWith(u8, atom, "(?") and std.mem.indexOfScalar(u8, atom, ':') == null;
+    if (assertion or directive or random.uintLessThan(u8, 3) != 0) return;
+    const quantifiers = [_][]const u8{ "*", "+", "?", "{2}", "{1,3}", "{0,2}", "{2,}", "{,2}" };
     try out.appendSlice(gpa, quantifiers[random.uintLessThan(usize, quantifiers.len)]);
     if (random.boolean()) try out.append(gpa, '?');
 }

@@ -197,7 +197,14 @@ pub const Regex = struct {
         const ordered_captures = span_only or (flags.ecmascript and
             (tree.capture_count == 0 or hasSingleEntryCaptures(tree.root, false) or
                 (tree.capture_count == 1 and hasSpanningAssertionCapture(tree.root))));
-        var needs_backtracking = requiresBacktracking(tree.root, flags, ordered_captures);
+        // Inline modifiers (`(?i)`, `(?s:..)`, `(?-i:..)`, `(?m:..)`) only
+        // change which bytes an atom accepts and what `^`/`$` mean where they
+        // sit, which a byte-mode automaton can encode directly (see
+        // `Compiler.initScopedModes`), so a capture-free byte-mode compile
+        // keeps them on the Thompson route (#51). `Regex.compile` keeps them on
+        // the backtracker, which honours them per scope too.
+        const scoped_modes = span_only and flags.bytes and !flags.ecmascript and hasInlineModifier(tree.root);
+        var needs_backtracking = requiresBacktracking(tree.root, flags, ordered_captures, scoped_modes);
         if (!needs_backtracking and tree.capture_count > 0) {
             onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
             if (onepass_plan == null and hasAmbiguousCaptureBoundary(tree.root, flags))
@@ -246,13 +253,24 @@ pub const Regex = struct {
             // Use Thompson NFA engine
             // `\bfn\b`-style bounded literal (computed from the AST before it is
             // freed). Captures disable it (the fast path returns no groups).
-            const bounded_literal = if (tree.capture_count == 0)
+            const bounded_literal = if (tree.capture_count == 0 and !scoped_modes)
                 try detectBoundedLiteral(allocator, tree.root, flags)
             else
                 null;
             errdefer if (bounded_literal) |bl| allocator.free(bl.literal);
 
-            var comp = compiler.Compiler.initWithFlags(allocator, flags);
+            if (scoped_modes) {
+                // The AST-derived hints read literals, `.` and anchors without
+                // their modifiers; keep only those that do not depend on them.
+                const lengths = .{ opt_info.min_length, opt_info.max_length, opt_info.has_lazy };
+                opt_info.deinit(allocator);
+                opt_info = .{ .has_assertions = true };
+                opt_info.min_length, opt_info.max_length, opt_info.has_lazy = lengths;
+            }
+            var comp = if (scoped_modes)
+                compiler.Compiler.initScopedModes(allocator, flags)
+            else
+                compiler.Compiler.initWithFlags(allocator, flags);
             errdefer comp.deinit();
             _ = try comp.compile(&tree);
 
@@ -268,7 +286,7 @@ pub const Regex = struct {
                 .ast_tree = null,
                 .engine_type = .thompson_nfa,
                 .capture_count = capture_count,
-                .flags = flags,
+                .flags = if (scoped_modes) compiler.Compiler.scopedModesFlags(flags) else flags,
                 .opt_info = opt_info,
                 .named_captures = named_captures,
                 .named_capture_list = owned_named_capture_list,
@@ -2789,7 +2807,7 @@ fn hasSingleEntryCaptures(node: *ast.Node, repeated: bool) bool {
 // The ECMAScript priority-ordered VM honors lazy edges and alternation order.
 // Admit capture-free and single-entry capture paths, or one spanning capture
 // with boundary assertions. Repeated capture histories retain the fallback.
-fn requiresBacktracking(root: *ast.Node, flags: common.CompileFlags, ordered_quantifiers: bool) bool {
+fn requiresBacktracking(root: *ast.Node, flags: common.CompileFlags, ordered_quantifiers: bool, scoped_modes: bool) bool {
     // Sequences and alternations are walked along their spine, recursing only
     // into the element or branch beside it (see `spine`), so a long flat
     // pattern does not overflow the stack (#48).
@@ -2865,7 +2883,7 @@ fn requiresBacktracking(root: *ast.Node, flags: common.CompileFlags, ordered_qua
                     if (containsCapture(node)) return true;
                 }
                 const step = ast.spine(node);
-                if (requiresBacktracking(step.side, flags, ordered_quantifiers)) return true;
+                if (requiresBacktracking(step.side, flags, ordered_quantifiers, scoped_modes)) return true;
                 // No branch below a capture-free alternation holds a capture.
                 branches_checked = node.node_type == .alternation and step.next.node_type == .alternation;
                 node = step.next;
@@ -2873,7 +2891,7 @@ fn requiresBacktracking(root: *ast.Node, flags: common.CompileFlags, ordered_qua
             // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
             // which only the backtracking engine honors.
             .group => {
-                if (node.data.group.mod != null) return true;
+                if (node.data.group.mod != null and !scoped_modes) return true;
                 node = node.data.group.child;
             },
 
@@ -2896,6 +2914,25 @@ fn isAsciiWordClass(char_class: common.CharClass) bool {
         if (a.start != b.start or a.end != b.end) return false;
     }
     return true;
+}
+
+/// Whether the tree has an inline-modifier group (`(?i)`, `(?s:..)`).
+fn hasInlineModifier(root: *ast.Node) bool {
+    var node = root;
+    while (true) {
+        switch (node.node_type) {
+            .group => {
+                if (node.data.group.mod != null) return true;
+                node = node.data.group.child;
+            },
+            .concat, .alternation => {
+                const step = ast.spine(node);
+                if (hasInlineModifier(step.side)) return true;
+                node = step.next;
+            },
+            else => node = ast.onlyChild(node) orelse return false,
+        }
+    }
 }
 
 fn containsAlternation(root: *ast.Node) bool {

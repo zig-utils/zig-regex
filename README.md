@@ -269,11 +269,14 @@ _ = n;
 
 - `Program.fromRegex(allocator, &re)` flattens an already compiled `Regex`.
 - Programs cover every pattern the Thompson engine runs. Patterns that need
-  the backtracking engine (backreferences, general lookaround, scoped inline
-  modifiers, Unicode property escapes) and ECMAScript mode return
-  `error.UnsupportedByProgram`. `Program.compile` drops capture groups and
-  keeps lazy repeats and repeated alternations (`(?:\x90|\xcc){4,}`,
-  `a.+?b`) on the linear engines.
+  the backtracking engine (backreferences, general lookaround, Unicode
+  property escapes, and outside byte mode inline modifiers) and ECMAScript
+  mode return `error.UnsupportedByProgram`. `Program.compile` drops capture
+  groups and keeps lazy repeats and repeated alternations
+  (`(?:\x90|\xcc){4,}`, `a.+?b`) on the linear engines; in byte mode it also
+  builds inline modifiers (`(?i)`, `(?s:..)`, `(?-i:..)`, `(?m:..)`) into the
+  program. A standalone `(?flags)` lasts to the end of its group, later
+  alternatives included, as in PCRE2 and Perl.
 - Results are spans without capture groups. Every match is the leftmost one;
   where it ends depends on the program's match kind, chosen when it is built
   and kept by `bytes()`/`load()`:

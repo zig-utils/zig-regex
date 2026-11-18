@@ -261,6 +261,15 @@ pub const Compiler = struct {
     allocator: std.mem.Allocator,
     flags: common.CompileFlags,
     next_loop: u32 = 0,
+    /// Set by `initScopedModes`: case folding, `.` and the line anchors are
+    /// compiled into the automaton from `modes`, the flags in force where
+    /// each atom sits, so inline modifiers (`(?i)`, `(?s:..)`, `(?-m:..)`)
+    /// need no match-time flags.
+    scoped_modes: bool = false,
+    modes: Modes = .{},
+
+    /// The match-time flags an inline modifier can change.
+    pub const Modes = struct { i: bool = false, m: bool = false, s: bool = false };
 
     pub fn init(allocator: std.mem.Allocator) Compiler {
         return initWithFlags(allocator, .{});
@@ -274,6 +283,31 @@ pub const Compiler = struct {
             .allocator = allocator,
             .flags = flags,
         };
+    }
+
+    /// A byte-mode compiler for a pattern with inline modifiers. The NFA is
+    /// meant to run with `scopedModesFlags(flags)`: no case folding, no
+    /// `dot_all`, multiline line anchors. Every literal and class is folded,
+    /// every `.` is a byte set, and every `^`/`$` outside a multiline scope is
+    /// a text anchor, according to `flags` and the modifiers around it.
+    pub fn initScopedModes(allocator: std.mem.Allocator, flags: common.CompileFlags) Compiler {
+        var self = initWithFlags(allocator, scopedModesFlags(flags));
+        self.scoped_modes = true;
+        self.modes = .{ .i = flags.case_insensitive, .m = flags.multiline, .s = flags.dot_all };
+        return self;
+    }
+
+    /// The match-time flags an NFA from `initScopedModes` runs with.
+    pub fn scopedModesFlags(flags: common.CompileFlags) common.CompileFlags {
+        var out = flags;
+        out.case_insensitive = false;
+        out.dot_all = false;
+        out.multiline = true;
+        return out;
+    }
+
+    fn foldsCase(self: *const Compiler) bool {
+        return if (self.scoped_modes) self.modes.i else self.flags.case_insensitive;
     }
 
     pub fn deinit(self: *Compiler) void {
@@ -366,7 +400,7 @@ pub const Compiler = struct {
 
     fn compileLiteral(self: *Compiler, c: u8) !Fragment {
         // Under `i`, an ASCII letter matches both cases — emit a folded class.
-        if (self.flags.case_insensitive and ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z'))) {
+        if (self.foldsCase() and ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z'))) {
             const folded = try caseFoldByteRanges(self.allocator, &[_]common.CharRange{.{ .start = c, .end = c }}, false);
             defer self.allocator.free(folded.ranges);
             return self.compileCharClassValue(folded);
@@ -388,6 +422,13 @@ pub const Compiler = struct {
     fn compileAny(self: *Compiler) !Fragment {
         // Byte mode: `.` is one byte (every engine reads `.any` as any byte but
         // `\n`, or any byte at all under `dot_all`).
+        if (self.flags.bytes and self.scoped_modes) {
+            const ranges = if (self.modes.s)
+                &[_]common.CharRange{.{ .start = 0x00, .end = 0xff }}
+            else
+                &[_]common.CharRange{ .{ .start = 0x00, .end = '\n' - 1 }, .{ .start = '\n' + 1, .end = 0xff } };
+            return self.compileCharClassValue(.{ .ranges = ranges, .negated = false });
+        }
         if (self.flags.bytes) {
             const start = try self.nfa.addState();
             const accept = try self.nfa.addState();
@@ -798,7 +839,7 @@ pub const Compiler = struct {
     /// Compile character class
     fn compileCharClass(self: *Compiler, char_class: common.CharClass) !Fragment {
         // Under `i`, fold the class so it matches both cases case-sensitively.
-        if (self.flags.case_insensitive) {
+        if (self.foldsCase()) {
             const folded = try caseFoldByteRanges(self.allocator, char_class.ranges, char_class.negated);
             defer self.allocator.free(folded.ranges);
             return self.compileCharClassValue(folded);
@@ -863,7 +904,17 @@ pub const Compiler = struct {
 
     /// Compile capture group
     fn compileGroup(self: *Compiler, group: ast.Node.Group) !Fragment {
-        const child_frag = try self.compileNode(group.child);
+        const saved_modes = self.modes;
+        if (self.scoped_modes) if (group.mod) |mod| {
+            if (mod.i) |on| self.modes.i = on;
+            if (mod.m) |on| self.modes.m = on;
+            if (mod.s) |on| self.modes.s = on;
+        };
+        const child_frag = self.compileNode(group.child) catch |err| {
+            self.modes = saved_modes;
+            return err;
+        };
+        self.modes = saved_modes;
 
         if (group.capture_index) |capture_idx| {
             // Create new states to mark capture boundaries
@@ -964,7 +1015,14 @@ pub const Compiler = struct {
     }
 
     /// Compile anchor
-    fn compileAnchor(self: *Compiler, anchor_type: ast.AnchorType) !Fragment {
+    fn compileAnchor(self: *Compiler, anchor: ast.AnchorType) !Fragment {
+        // With scoped modes the NFA runs multiline, so a line anchor outside
+        // a multiline scope becomes the text anchor it means there.
+        const anchor_type: ast.AnchorType = if (self.scoped_modes and !self.modes.m) switch (anchor) {
+            .start_line => .start_text,
+            .end_line => .end_text,
+            else => anchor,
+        } else anchor;
         const start = try self.nfa.addState();
         const accept = try self.nfa.addState();
 

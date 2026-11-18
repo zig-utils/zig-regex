@@ -538,6 +538,13 @@ pub const Parser = struct {
     /// Current `U` state: when set, quantifier greediness is swapped (so `a+`
     /// is lazy and `a+?` is greedy) for the duration of the scope.
     swap_greedy: bool = false,
+    /// What standalone `(?flags)` directives set for the rest of the
+    /// enclosing group: as in PCRE and Perl, that includes the alternatives
+    /// after the one holding the directive (`(a(?i)b|c)` matches `C`). Reset
+    /// on entry to every group and restored on exit by `parseAlternation`.
+    scope_mod: ?ast.Node.FlagDelta = null,
+    scope_extended: ?bool = null,
+    scope_swap_greedy: ?bool = null,
     /// ECMAScript-conformance mode (the engine is hosting a JS RegExp). Disables
     /// the PCRE/Perl extensions ECMAScript does not have: standalone inline
     /// modifiers `(?ims)` (only the scoped `(?ims:…)` / `(?ims-i:…)` colon form
@@ -817,14 +824,39 @@ pub const Parser = struct {
 
     /// Parse alternation (lowest precedence)
     fn parseAlternation(self: *Parser) !*ast.Node {
+        // A group starts with no standalone directive in force; the ones
+        // found in it apply to its later alternatives and end with it.
+        const saved_scope = .{ self.scope_mod, self.scope_extended, self.scope_swap_greedy };
+        const entry_extended = self.extended;
+        const entry_swap_greedy = self.swap_greedy;
+        self.scope_mod = null;
+        self.scope_extended = null;
+        self.scope_swap_greedy = null;
+        defer {
+            self.scope_mod, self.scope_extended, self.scope_swap_greedy = saved_scope;
+            self.setParseFlags(entry_extended, entry_swap_greedy);
+        }
+
         var left = try self.parseConcat();
         errdefer left.destroy(self.allocator);
 
         while (self.peek() == .pipe) {
             const start = self.current_token.span.start;
+            // Directives from earlier alternatives: parse-time flags before
+            // the next token is lexed, match-time ones as a group around it.
+            const branch_mod = self.scope_mod;
+            self.setParseFlags(self.scope_extended orelse entry_extended, self.scope_swap_greedy orelse entry_swap_greedy);
             try self.advance(); // consume |
-            const right = try self.parseConcat();
+            var right = try self.parseConcat();
             const span = common.Span.init(start, self.current_token.span.end);
+            if (branch_mod) |mod| {
+                const wrapped = ast.Node.createGroup(self.allocator, right, null, right.span) catch |err| {
+                    right.destroy(self.allocator);
+                    return err;
+                };
+                wrapped.data.group.mod = mod;
+                right = wrapped;
+            }
             left = ast.Node.createAlternation(self.allocator, left, right, span) catch |err| {
                 right.destroy(self.allocator);
                 return err;
@@ -1446,11 +1478,25 @@ pub const Parser = struct {
                                     self.setParseFlags(saved_extended, saved_swap_greedy);
                                     return e;
                                 };
+                                // The directive also covers the enclosing
+                                // group's later alternatives. Recorded before
+                                // the rest is parsed, so a later directive in
+                                // it overrides this one.
+                                if (mod.any()) {
+                                    var merged = self.scope_mod orelse ast.Node.FlagDelta{};
+                                    if (mod.i) |on| merged.i = on;
+                                    if (mod.m) |on| merged.m = on;
+                                    if (mod.s) |on| merged.s = on;
+                                    self.scope_mod = merged;
+                                }
+                                if (new_extended != saved_extended) self.scope_extended = new_extended;
+                                if (new_swap_greedy != saved_swap_greedy) self.scope_swap_greedy = new_swap_greedy;
                                 const body = self.parseConcat() catch |e| {
                                     self.setParseFlags(saved_extended, saved_swap_greedy);
                                     return e;
                                 };
                                 self.setParseFlags(saved_extended, saved_swap_greedy);
+                                errdefer body.destroy(self.allocator);
                                 const node = try ast.Node.createGroup(self.allocator, body, null, span);
                                 if (mod.any()) node.data.group.mod = mod;
                                 return node;

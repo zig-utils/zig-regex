@@ -231,3 +231,34 @@ test "early error: unknown / repeated new flags" {
     try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, "(?xx:a)")); // repeated
     try std.testing.expectError(error.UnexpectedCharacter, Regex.compile(allocator, "(?U-U:a)")); // add+remove
 }
+
+// A standalone `(?flags)` lasts to the end of the enclosing group, later
+// alternatives included, as in PCRE2 and Perl (#51). Results checked against
+// PCRE2 10.49.
+test "a standalone modifier covers the rest of its group, later alternatives too" {
+    const allocator = std.testing.allocator;
+    const Case = struct { pattern: []const u8, input: []const u8, want: ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(a(?i)b|c)", .input = "C", .want = .{ 0, 1 } },
+        .{ .pattern = "a(?i)b|c", .input = "C", .want = .{ 0, 1 } },
+        .{ .pattern = "(?:x(?i)|y)z", .input = "yZ", .want = null },
+        .{ .pattern = "(?:x|(?i)y)z", .input = "xZ", .want = null },
+        .{ .pattern = "(?i)a(?-i)b|c", .input = "AC", .want = null },
+        .{ .pattern = "(?i)a(?-i)b|c", .input = "Ab", .want = .{ 0, 2 } },
+        .{ .pattern = "(?s)a|.", .input = "\n", .want = .{ 0, 1 } },
+        .{ .pattern = "(?:(?s)a|b).", .input = "b\n", .want = null },
+    };
+    for (cases) |c| {
+        for ([_]@import("regex").common.CompileFlags{ .{}, .{ .bytes = true } }) |flags| {
+            var re = try Regex.compileWithFlags(allocator, c.pattern, flags);
+            defer re.deinit();
+            var found = try re.find(c.input);
+            defer if (found) |*m| m.deinit(allocator);
+            errdefer std.debug.print("{s} on {any}\n", .{ c.pattern, c.input });
+            if (c.want) |w| {
+                try std.testing.expectEqual(w[0], found.?.start);
+                try std.testing.expectEqual(w[1], found.?.end);
+            } else try std.testing.expect(found == null);
+        }
+    }
+}

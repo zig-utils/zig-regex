@@ -579,6 +579,44 @@ test "program: leftmost-first programs agree with PCRE2 on recorded cases" {
     try testing.expectEqual(@as(usize, 1000), checked);
 }
 
+// Inline modifiers only change which bytes an atom accepts and what `^`/`$`
+// mean where they sit, so byte-mode `Program.compile` builds them into the
+// automaton (#51); `Regex` runs them on the backtracker, the reference here.
+test "program: inline modifiers compile as byte-mode programs" {
+    const patterns = [_][]const u8{
+        "(?i)urldownloadtofile[aw]", "a(?i:bc)d",  "(?i:ab(?-i:c)d)e",  "x(?s:.)y",
+        "(?s)a.b(?-s:.)c",           "(?m:^ab$)",  "a(?m)^b|^c",        "(?i)[a-c]+(?-i)[a-c]",
+        "(?is-m:a.^)",               "(a(?i)b|c)", "(?i)\\x41[^b]\\bz", "(?:(?i)ab|cd)e",
+    };
+    const inputs = [_][]const u8{ "URLDownloadToFileA x", "abcd aBCd aBcD", "ABcDE abcde aBCDe", "x\ny xay", "a\nb\nc a\nbxc", "ab\nab\n", "xa\nb\nc", "ABCabc aBcA", "A\n", "aB C c", "aX z AYz a\x00 z", "ABe cDe CDE" };
+    for (patterns) |pattern| {
+        for ([_]CompileFlags{ .{ .bytes = true }, .{ .bytes = true, .case_insensitive = true }, .{ .bytes = true, .multiline = true, .dot_all = true } }) |flags| {
+            var re = try Regex.compileWithFlags(testing.allocator, pattern, flags);
+            defer re.deinit();
+            for ([_]regex.program.MatchKind{ .leftmost_first, .leftmost_longest }) |kind| {
+                var program = try Program.compileWithOptions(testing.allocator, pattern, flags, .{ .match_kind = kind });
+                defer program.deinit(testing.allocator);
+                var scratch = try Scratch.init(testing.allocator, &program);
+                defer scratch.deinit(testing.allocator);
+                for (inputs) |input| {
+                    errdefer std.debug.print("pattern \"{s}\" flags {any} kind {t} input {any}\n", .{ pattern, flags, kind, input });
+                    try testing.expectEqual(try re.isMatch(input), try program.isMatch(&scratch, input));
+                    // The backtracker is leftmost-first; both kinds agree on starts.
+                    var m = try re.find(input);
+                    defer if (m) |*mm| mm.deinit(testing.allocator);
+                    const got = try program.find(&scratch, input);
+                    if (m) |mm| {
+                        try testing.expectEqual(mm.start, got.?.start);
+                        if (kind == .leftmost_first) try testing.expectEqual(mm.end, got.?.end);
+                    } else try testing.expect(got == null);
+                }
+            }
+        }
+    }
+    // UTF-8 mode keeps refusing them: case folding there is not ASCII-only.
+    try testing.expectError(error.UnsupportedByProgram, Program.compile(testing.allocator, "(?i:a)b", .{}));
+}
+
 test "program: the NFA fallback agrees with the DFA" {
     const patterns = [_][]const u8{ "[ab]*a[ab]{6}", "x[abcdef]*y", "\\bfoo\\b", "^\\w+$", "(foo|foobar)baz", "a{2,4}", "(?:ab)+e|cde" };
     const inputs = [_][]const u8{ "abababbbaabababa", "xay xbcy xdefy xbcbcy", "foo foobar foo", "line1\nline2", "foobarbaz foobaz", "aaaaa", "ababcde" };
