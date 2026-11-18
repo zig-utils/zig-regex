@@ -8,6 +8,7 @@ from one command:
 ```sh
 zig build bench                 # multi-literal matchers and byte-mode regex programs
 benchmarks/pcre2/compare.sh     # the same regex patterns and corpora through PCRE2
+benchmarks/pcre2/diff.sh        # leftmost-first agreement with PCRE2
 ```
 
 Inputs are generated from fixed seeds, so the same command produces the same
@@ -22,8 +23,8 @@ ripgrep comparison) are described in [benchmarks/README.md](../benchmarks/README
 |---|---|
 | Machine | Apple M3 Pro (5 performance and 6 efficiency cores), 18 GiB, macOS 27.2.1 (Darwin arm64) |
 | Toolchain | Zig 0.17.0-dev.1857+3c46da14d, every benchmark built ReleaseFast |
-| Library | zig-regex f8ddb54 (`fix(program): compile capture groups inside alternations as programs`), with the suite committed alongside this file |
-| PCRE2 | 10.47 (2025-10-21) from `pantry install`, statically linked, `cc -O2`, JIT and interpreter |
+| Library | literal matchers: zig-regex f8ddb54; regex programs: zig-regex 56d39f1 (`feat(program): add leftmost-first programs, reverse start search and prefilters`), against 0.3.1 (111f6df) on the same day |
+| PCRE2 | 10.49 (2026-09-28) from `pantry install`, statically linked, `cc -O2`, JIT and interpreter (the literal tables predate it; they do not involve PCRE2) |
 | Date | 2026-11-18 |
 
 The machine is a shared development box. Both runs were taken while it was
@@ -210,85 +211,123 @@ the same count loop. The ClamAV-style set runs over the executable-like
 corpus and the CRS-style set over generated HTTP requests; each pattern's
 sample match is planted about every 4 KiB. **Program** is the serialised
 program and **Scratch** the scratch's whole allocation (default 1024-state DFA
-cap). MB/s is 10^6 bytes per second, best of at least three passes and 1 s.
-Match
-counts agree with PCRE2 on every pattern; programs report leftmost-longest
-matches and PCRE2 leftmost-first ones, and these patterns do not tell the two
-apart.
+cap), both for the leftmost-first build. MB/s is 10^6 bytes per second, best
+of at least three passes and 1 s. **0.3.1** is the previous release
+(leftmost-longest, the only kind it had) measured in the same session;
+**first / JIT** compares the leftmost-first program with the JIT.
+`compare.sh` measures leftmost-first programs and `MATCH_KIND=longest
+compare.sh` the default kind. Leftmost-first match counts equal PCRE2's on
+every pattern (so do leftmost-longest ones: these patterns do not tell the
+kinds apart).
 
 ### ClamAV-style signatures (`clamav.txt`, executable-like corpus)
 
-| Pattern | Program | Scratch | zig-regex MB/s | PCRE2 JIT MB/s | PCRE2 interpreter MB/s | zig-regex / JIT | Matches |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `dos_stub` | 1016 B | 53.0 KiB | 25712 | 46091 | 6781 | 0.56x | 176 |
-| `pe_machine` | 864 B | 52.6 KiB | 28577 | 46603 | 6916 | 0.61x | 160 |
-| `getpc` | 760 B | 44.6 KiB | 27545 | 46603 | 6985 | 0.59x | 152 |
-| `wildcards` | 792 B | 44.6 KiB | 27214 | 46864 | 6996 | 0.58x | 180 |
-| `bounded_gap` | 1.84 KiB | 62.6 KiB | 27761 | 45590 | 6781 | 0.61x | 160 |
-| `alternation` | 872 B | 48.7 KiB | 2371 | 46864 | 633 | 0.05x | 156 |
-| `nibble` | 696 B | 36.5 KiB | 22996 | 21237 | 4745 | 1.08x | 163 |
-| `xor_loop` | 984 B | 52.9 KiB | 28951 | 46603 | 6716 | 0.62x | 163 |
-| `nocase_api` | 1.30 KiB | 77.3 KiB | 2361 | 36003 | 2921 | 0.07x | 160 |
-| `wide_string` | 1016 B | 53.0 KiB | 2481 | 43240 | 2891 | 0.06x | 160 |
-| `stub_gap` | 19.8 KiB | 270 KiB | 16120 | 37283 | 3862 | 0.43x | 143 |
-| `class_run` | 1.34 KiB | 69.5 KiB | 171 | 468 | 70 | 0.37x | 147 |
-| all, in sequence | | | 135 | 414 | 56 | 0.33x | |
+| Pattern | Program | Scratch | 0.3.1 MB/s | leftmost-longest MB/s | leftmost-first MB/s | PCRE2 JIT MB/s | PCRE2 interpreter MB/s | first / JIT | Matches |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `dos_stub` | 1.47 KiB | 85.6 KiB | 26025 | 26266 | 26143 | 41121 | 6066 | 0.64x | 176 |
+| `pe_machine` | 1.17 KiB | 85.1 KiB | 26560 | 26801 | 27388 | 41943 | 6564 | 0.65x | 160 |
+| `getpc` | 1.03 KiB | 77.0 KiB | 25984 | 26462 | 26532 | 41528 | 6214 | 0.64x | 152 |
+| `wildcards` | 1.06 KiB | 77.0 KiB | 26905 | 26529 | 26769 | 41121 | 6279 | 0.65x | 180 |
+| `bounded_gap` | 3.13 KiB | 96.2 KiB | 26038 | 25848 | 26797 | 39946 | 6242 | 0.67x | 160 |
+| `alternation` | 1.22 KiB | 81.2 KiB | 2242 | 27317 | 27888 | 41323 | 612 | 0.67x | 156 |
+| `nibble` | 960 B | 68.9 KiB | 21639 | 26532 | 27451 | 18040 | 4562 | 1.52x | 163 |
+| `xor_loop` | 1.38 KiB | 85.4 KiB | 26262 | 27115 | 26969 | 41323 | 6399 | 0.65x | 163 |
+| `nocase_api` | 1.91 KiB | 110 KiB | 2360 | 10388 | 10306 | 31655 | 2714 | 0.33x | 160 |
+| `wide_string` | 1.47 KiB | 85.6 KiB | 2343 | 27137 | 27284 | 39569 | 2746 | 0.69x | 160 |
+| `stub_gap` | 38.8 KiB | 324 KiB | 14894 | 17109 | 17121 | 33421 | 3576 | 0.51x | 143 |
+| `class_run` | 2.06 KiB | 102 KiB | 164 | 522 | 521 | 416 | 66 | 1.25x | 147 |
+| all, in sequence | | | 129 | 415 | 415 | 368 | 53 | 1.13x | |
 
 ### CRS-style request rules (`crs.txt`, HTTP request corpus)
 
-| Pattern | Program | Scratch | zig-regex MB/s | PCRE2 JIT MB/s | PCRE2 interpreter MB/s | zig-regex / JIT | Matches |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `sqli_union` | 1.33 KiB | 77.4 KiB | 340 | 22982 | 1345 | 0.01x | 165 |
-| `sqli_tautology` | 1.30 KiB | 53.6 KiB | 31931 | 57065 | 52759 | 0.56x | 139 |
-| `sqli_sleep` | 1.92 KiB | 102 KiB | 313 | 1181 | 201 | 0.26x | 171 |
-| `sqli_schema` | 1.91 KiB | 102 KiB | 1966 | 38836 | 641 | 0.05x | 149 |
-| `xss_script` | 968 B | 56.7 KiB | 30601 | 39199 | 47127 | 0.78x | 126 |
-| `xss_handler` | 1.84 KiB | 94.3 KiB | 324 | 5726 | 442 | 0.06x | 169 |
-| `xss_js_uri` | 1.10 KiB | 68.9 KiB | 1183 | 29747 | 661 | 0.04x | 142 |
-| `traversal` | 1.17 KiB | 57.4 KiB | 2198 | 4043 | 314 | 0.54x | 302 |
-| `lfi_files` | 2.59 KiB | 116 KiB | 1230 | 1113 | 77 | 1.11x | 149 |
-| `cmd_injection` | 1.73 KiB | 90.0 KiB | 981 | 1883 | 285 | 0.52x | 154 |
-| `php_tag` | 664 B | 44.4 KiB | 387 | 43919 | 45100 | 0.01x | 149 |
-| `scanner_ua` | 1.84 KiB | 90.4 KiB | 382 | 1325 | 136 | 0.29x | 146 |
-| `rfi` | 1.46 KiB | 73.7 KiB | 766 | 7530 | 287 | 0.10x | 135 |
-| all, in sequence | | | 51 | 266 | 24 | 0.19x | |
+| Pattern | Program | Scratch | 0.3.1 MB/s | leftmost-longest MB/s | leftmost-first MB/s | PCRE2 JIT MB/s | PCRE2 interpreter MB/s | first / JIT | Matches |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `sqli_union` | 2.02 KiB | 110 KiB | 309 | 5814 | 5574 | 22075 | 1265 | 0.25x | 165 |
+| `sqli_tautology` | 2.13 KiB | 86.5 KiB | 31820 | 69375 | 66117 | 54471 | 46864 | 1.21x | 139 |
+| `sqli_sleep` | 3.02 KiB | 140 KiB | 286 | 1138 | 1094 | 1129 | 189 | 0.97x | 171 |
+| `sqli_schema` | 2.98 KiB | 136 KiB | 1997 | 29888 | 28472 | 37283 | 596 | 0.76x | 149 |
+| `xss_script` | 1.31 KiB | 89.2 KiB | 30555 | 66709 | 62855 | 37449 | 44151 | 1.68x | 126 |
+| `xss_handler` | 2.92 KiB | 132 KiB | 297 | 2307 | 2089 | 5256 | 417 | 0.40x | 169 |
+| `xss_js_uri` | 1.56 KiB | 102 KiB | 1162 | 13006 | 12242 | 28533 | 634 | 0.43x | 142 |
+| `traversal` | 1.83 KiB | 90.2 KiB | 2209 | 3814 | 3606 | 3822 | 303 | 0.94x | 302 |
+| `lfi_files` | 4.28 KiB | 150 KiB | 1213 | 916 | 864 | 1056 | 76 | 0.82x | 149 |
+| `cmd_injection` | 2.70 KiB | 123 KiB | 976 | 3919 | 3697 | 1828 | 285 | 2.02x | 154 |
+| `php_tag` | 896 B | 76.8 KiB | 370 | 43455 | 41146 | 41943 | 43464 | 0.98x | 149 |
+| `scanner_ua` | 2.97 KiB | 124 KiB | 371 | 932 | 865 | 1291 | 134 | 0.67x | 146 |
+| `rfi` | 2.28 KiB | 107 KiB | 786 | 2571 | 2428 | 7410 | 271 | 0.33x | 135 |
+| all, in sequence | | | 49 | 212 | 199 | 255 | 23 | 0.78x | |
 
 ### What the numbers say
 
-- **Signatures that start with one fixed byte run at memory-scan speed.**
-  Every ClamAV-style pattern led by a single byte (`dos_stub`, `pe_machine`,
-  `getpc`, `wildcards`, `bounded_gap`, `xor_loop`) counts at 26 to 29 GB/s,
-  0.56 to 0.62 times PCRE2's JIT and about four times its interpreter; the
-  program skips straight to occurrences of its first byte. `nibble` (`\x0f[\x80-\x8f].{4}\xe8`) beats the JIT at 23 GB/s, and the
-  256-byte gap of `stub_gap` still runs at 16 GB/s.
-- **Several possible first bytes cost a factor of ten.** An alternation of
-  first bytes (`alternation`) or an ASCII case-insensitive literal
-  (`nocase_api`, `wide_string`, `sqli_schema`, `xss_js_uri`) has no single
-  first byte, so the DFA steps through every input byte: 1.2 to 2.5 GB/s,
-  0.04 to 0.07 times the JIT, which starts from its own first-code-unit and
-  required-byte searches. A start prefilter for small first-byte sets (or
-  Teddy over `requiredFactors`) inside `Program` is the obvious next step.
-- **Word boundaries set the speed.** Every pattern with `\b` (`sqli_union`,
-  `sqli_sleep`, `xss_handler`, `php_tag`, `scanner_ua`) runs at 310 to
-  390 MB/s whatever its literals, so the assertion path, not the pattern,
-  is the bottleneck there.
-- **Restarting at every candidate start hurts long runs.** `class_run`
-  (`[\x20-\x7e]{6,}\.(exe|dll|scr)\x00`) counts at 171 MB/s against 468 for the
-  JIT: `find` and `count` try an anchored match from each candidate start, so
-  long printable runs are rescanned. A reverse DFA to find match starts would
-  make this linear.
-- **Where PCRE2 has no shortcut, programs keep up or win.** `lfi_files` (1.11
-  times the JIT), `cmd_injection` and `traversal` (0.52 to 0.54) and
-  `scanner_ua` and `sqli_sleep` (0.26 to 0.29) are alternations PCRE2 cannot
-  anchor on one byte; against the PCRE2 interpreter, which is what PCRE2 runs
-  where JIT is unavailable, programs are 1.6 to 16 times faster on those.
-- **Programs are small.** 0.7 to 2.6 KiB for every pattern but `stub_gap`
-  (19.8 KiB, its counted gap unrolled), with a scratch of 36 to 270 KiB that
-  is allocated once and reused for every search.
+- **Several possible first bytes no longer cost a factor of ten.** 0.3.1
+  skipped ahead only when every match began with one byte. A program now
+  stores the rarest set of at most 3 bytes at a fixed offset in the first 16
+  bytes of every match (plus a second one to verify candidates) and finds it
+  with a vector search: `alternation` (three first bytes) goes from 2.2 to 28
+  GB/s, the ASCII case-insensitive literals `wide_string`, `sqli_schema` and
+  `xss_js_uri` from 1.2 to 2.3 GB/s to 12 to 28 GB/s, `nocase_api` from 2.4 to
+  10 GB/s. They run at 0.33 to 0.76 times the JIT.
+- **Word boundaries no longer pin a pattern to 300-400 MB/s.** The skip used
+  to need a start state that does not depend on the previous byte, which
+  `\b` and `^` break. Transitions into a start state are now flagged and the
+  scan restarts in the start state for the context at the candidate, so
+  `php_tag` (`<\?php\b`) runs at 41 GB/s, level with the JIT, `sqli_union`
+  at 5.6 GB/s (18 times 0.3.1) and `xss_handler` at 2.1 GB/s. `sqli_sleep`
+  and `scanner_ua` have six to eight first bytes, common letters, and stay
+  at 0.87 to 1.1 GB/s, 0.67 to 0.97 times the JIT.
+- **Long runs are linear.** `class_run` (`[\x20-\x7e]{6,}\.(exe|dll|scr)\x00`)
+  used to retry an anchored run from every start in a long printable run. The
+  forward DFA now finds the match end and a DFA over the reversed program
+  walks back to the start, so it counts at 521 MB/s, 3.2 times 0.3.1 and 1.25
+  times the JIT. Storing row offsets in the transition table (no multiply per
+  byte) took the plain DFA step from about 360 to 525 MB/s.
+- **Single-first-byte signatures are unchanged** at 26 to 27 GB/s, 0.64 to
+  0.67 times the JIT, and `stub_gap` is a little faster (17 GB/s) now that
+  bounded repeats compile as nested optionals.
+- **One pattern is slower.** `lfi_files` (first bytes `e`, `p`, `b`, `w` in
+  both cases, about one HTTP byte in ten) drops from 1213 to 864 MB/s, 0.82
+  times the JIT: every candidate leaves and re-enters the start state, which
+  costs more than 0.3.1's inline table loop did. Its match count still agrees.
+- **Leftmost-first costs 0 to 10 percent** against leftmost-longest on these
+  patterns; ordered DFA states hold the same threads as the unordered ones
+  here.
+- **Programs are larger.** The reversed program roughly doubles the edge
+  sections: 0.9 to 4.3 KiB per pattern (38.8 KiB for `stub_gap`), with a
+  scratch of 69 to 324 KiB, about 1.6 times 0.3.1's.
 
-Matching all 12 ClamAV-style patterns one after another runs at 0.33 times
-the JIT and 2.4 times the interpreter; the 13 CRS-style patterns at 0.19 and
-2.1 times. Both sets match exactly the same number of times as PCRE2.
-`traversal` and `lfi_files` became programs only with this change: before it,
-a capture group inside an alternation sent the pattern to the backtracker and
-`Program.compile` refused it.
+Matching all 12 ClamAV-style patterns one after another runs at 1.13 times
+the JIT and 7.8 times the interpreter; the 13 CRS-style patterns at 0.78 and
+8.7 times. In 0.3.1 the same sequences ran at 0.34 and 0.19 times the JIT.
+
+## Leftmost-first agreement with PCRE2
+
+```sh
+benchmarks/pcre2/diff.sh [count] [seed]   # default 20000 cases, seed 1
+```
+
+generates random cases from a grammar of alternations, greedy and lazy
+repeats (`*?`, `+?`, `??`, `{m,n}?`), repeated and capture groups, classes,
+`.`, `\b`, `\B`, `^`, `$`, `\A`, `\z` and the `i`, `m` and `s` flags,
+with subjects of up to 48 bytes, and compares every `g`-style match of a
+byte-mode leftmost-first program with PCRE2's (no UTF; `PCRE2_DOLLAR_ENDONLY`
+and `PCRE2_ALT_CIRCUMFLEX` give `$` and multiline `^` zig-regex's
+conventions). Three seeds of 100,000 cases:
+
+| Seed | Compared | Agree | Differ | PCRE2 errors |
+|---:|---:|---:|---:|---:|
+| 1 | 99,988 | 99,982 | 6 | 12 |
+| 2 | 99,989 | 99,984 | 5 | 11 |
+| 3 | 99,985 | 99,976 | 9 | 15 |
+| all | 299,962 | 299,942 | 20 | 38 |
+
+Every pattern compiled as a program. All 20 differences repeat a group that
+can match empty inside an iteration (`(?:.{0,2}?){2,}b`, `(b|\W??)*a??`):
+PCRE2 accepts one empty iteration and then leaves the loop, at that
+iteration's priority, while a Pike VM (and so the DFA built from it) never
+revisits a state within one step and drops that path. RE2 and Rust's regex
+differ from PCRE2 the same way. The 38 PCRE2 errors are searches PCRE2 abandoned with
+`PCRE2_ERROR_MATCHLIMIT` (nested quantifiers backtracking past its default
+limit of 10 million calls); programs answer those in linear time, and they are
+not counted.
+`tests/testdata/pcre2_leftmost_first.tsv` keeps 1,000 agreeing cases with
+PCRE2's spans, which the test suite checks without needing PCRE2.
