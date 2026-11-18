@@ -288,3 +288,17 @@ the text column. Two changes mattered: loading whole 16-byte registers for the
 gram shuffle (a 19-byte source made LLVM insert bytes one at a time) and
 computing the block index with a scalar multiply (NEON has no 64-bit lane
 multiply, so the vector form was scalarised with lane moves).
+
+## Regex API micro-benchmarks
+
+Two small programs time the `Regex` API on short inputs: compile once, then
+run the same match many times and print the total and per-operation time,
+measured on the `std.Io` awake clock (`std.time.Timer` is gone in Zig 0.17).
+
+```sh
+zig build bench-basic    # isMatch, find and replace on ten common patterns
+zig build bench-prefix   # literal-prefix and anchored patterns over longer text
+```
+
+They are quick sanity checks for regressions in the `Regex` fast paths, not
+comparisons with other engines; `zig build bench` and `compare.sh` are those.

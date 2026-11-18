@@ -556,6 +556,22 @@ pub fn build(b: *std.Build) void {
 
     addBenchSuite(b, target, mod, test_step, install_benchmarks);
 
+    // Regex API micro-benchmarks (compile once, many small matches).
+    const basic_bench = b.addExecutable(.{
+        .name = "basic_benchmarks",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/basic.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    if (install_benchmarks) b.installArtifact(basic_bench);
+    const basic_bench_step = b.step("bench-basic", "Run Regex API micro-benchmarks");
+    basic_bench_step.dependOn(&b.addRunArtifact(basic_bench).step);
+
     // Add prefix optimization benchmark executable
     const prefix_bench = b.addExecutable(.{
         .name = "prefix_benchmarks",

@@ -1,12 +1,18 @@
 const std = @import("std");
 
-// Timer was removed in zig 0.17-dev; stub for compile-only.
+/// Elapsed time on the monotonic (awake) clock; `std.time.Timer` is gone in
+/// Zig 0.17, and `std.Io` owns the clocks.
 const Timer = struct {
-    pub fn start() !@This() {
-        return .{};
+    io: std.Io,
+    start_ns: i96,
+
+    fn start(io: std.Io) Timer {
+        return .{ .io = io, .start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds };
     }
-    pub fn read(_: @This()) u64 {
-        return 0;
+
+    /// Nanoseconds since `start`.
+    fn read(self: Timer) u64 {
+        return @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - self.start_ns);
     }
 };
 const Regex = @import("regex").Regex;
@@ -16,18 +22,16 @@ const Benchmark = struct {
     name: []const u8,
     iterations: usize = 10000,
 
-    fn run(self: Benchmark, comptime func: anytype, args: anytype) !void {
-        var timer = try Timer.start();
-        const start = timer.read();
+    fn run(self: Benchmark, io: std.Io, comptime func: anytype, args: anytype) !void {
+        const timer = Timer.start(io);
 
         var i: usize = 0;
         while (i < self.iterations) : (i += 1) {
-            _ = try @call(.auto, func, args);
+            std.mem.doNotOptimizeAway(try @call(.auto, func, args));
         }
 
-        const end = timer.read();
-        const elapsed_ns = end - start;
-        const avg_ns = elapsed_ns / self.iterations;
+        const elapsed_ns = @max(timer.read(), 1);
+        const avg_ns = @max(elapsed_ns / self.iterations, 1);
         const avg_us = @as(f64, @floatFromInt(avg_ns)) / 1000.0;
 
         std.debug.print("{s}:\n", .{self.name});
@@ -37,10 +41,9 @@ const Benchmark = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     std.debug.print("=== Regex Benchmarks ===\n\n", .{});
 
@@ -51,7 +54,7 @@ pub fn main() !void {
         const input = "hello world";
 
         const bench = Benchmark{ .name = "Simple literal match", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -65,7 +68,7 @@ pub fn main() !void {
         const input = "aaabbbbc";
 
         const bench = Benchmark{ .name = "Quantifier match (a+b*c?)", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -79,7 +82,7 @@ pub fn main() !void {
         const input = "dog";
 
         const bench = Benchmark{ .name = "Alternation (cat|dog|bird)", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -93,7 +96,7 @@ pub fn main() !void {
         const input = "abcdefghijklmnop";
 
         const bench = Benchmark{ .name = "Character class [a-z]+", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -107,7 +110,7 @@ pub fn main() !void {
         const input = "555-1234";
 
         const bench = Benchmark{ .name = "Digit pattern (\\d{3}-\\d{4})", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -121,7 +124,7 @@ pub fn main() !void {
         const input = "user@example.com";
 
         const bench = Benchmark{ .name = "Email pattern (\\w+@\\w+\\.\\w+)", .iterations = 5000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -135,7 +138,7 @@ pub fn main() !void {
         const input = "The price is $123 and tax is $45";
 
         const bench = Benchmark{ .name = "Find first match", .iterations = 5000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8, a: std.mem.Allocator) !void {
                 if (try r.find(i)) |match| {
                     var mut_match = match;
@@ -152,7 +155,7 @@ pub fn main() !void {
         const input = "Call 555-1234 or 555-5678";
 
         const bench = Benchmark{ .name = "Replace first", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8, a: std.mem.Allocator) !void {
                 const result = try r.replace(a, i, "XXX");
                 a.free(result);
@@ -167,7 +170,7 @@ pub fn main() !void {
         const input = "HELLO world";
 
         const bench = Benchmark{ .name = "Case-insensitive match", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }
@@ -181,7 +184,7 @@ pub fn main() !void {
         const input = "test.user+tag@example.co.uk";
 
         const bench = Benchmark{ .name = "Complex email validation", .iterations = 10000 };
-        try bench.run(struct {
+        try bench.run(io, struct {
             fn f(r: *const Regex, i: []const u8) !bool {
                 return try r.isMatch(i);
             }

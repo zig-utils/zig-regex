@@ -1,12 +1,18 @@
 const std = @import("std");
 
-// Timer was removed in zig 0.17-dev; stub for compile-only.
+/// Elapsed time on the monotonic (awake) clock; `std.time.Timer` is gone in
+/// Zig 0.17, and `std.Io` owns the clocks.
 const Timer = struct {
-    pub fn start() !@This() {
-        return .{};
+    io: std.Io,
+    start_ns: i96,
+
+    fn start(io: std.Io) Timer {
+        return .{ .io = io, .start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds };
     }
-    pub fn read(_: @This()) u64 {
-        return 0;
+
+    /// Nanoseconds since `start`.
+    fn read(self: Timer) u64 {
+        return @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds - self.start_ns);
     }
 };
 const Regex = @import("regex").Regex;
@@ -21,10 +27,9 @@ fn repeatStr(comptime s: []const u8, comptime n: usize) []const u8 {
     }
 }
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     std.debug.print("=== Literal Prefix Optimization Benchmarks ===\n\n", .{});
 
@@ -44,8 +49,7 @@ pub fn main() !void {
             std.debug.print("  ✗ No literal prefix found\n", .{});
         }
 
-        var timer = try Timer.start();
-        const start = timer.read();
+        const timer = Timer.start(io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -56,7 +60,7 @@ pub fn main() !void {
             }
         }
 
-        const elapsed = timer.read() - start;
+        const elapsed = timer.read();
         const avg_ns = elapsed / iterations;
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
@@ -77,8 +81,7 @@ pub fn main() !void {
             std.debug.print("  ✗ No literal prefix found (slower performance expected)\n", .{});
         }
 
-        var timer = try Timer.start();
-        const start = timer.read();
+        const timer = Timer.start(io);
 
         // Use fewer iterations since this is much slower without optimization
         const iterations: usize = 100;
@@ -90,7 +93,7 @@ pub fn main() !void {
             }
         }
 
-        const elapsed = timer.read() - start;
+        const elapsed = timer.read();
         const avg_ns = elapsed / iterations;
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
@@ -112,8 +115,7 @@ pub fn main() !void {
             std.debug.print("  ✗ No literal prefix found\n", .{});
         }
 
-        var timer = try Timer.start();
-        const start = timer.read();
+        const timer = Timer.start(io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -124,7 +126,7 @@ pub fn main() !void {
             }
         }
 
-        const elapsed = timer.read() - start;
+        const elapsed = timer.read();
         const avg_ns = elapsed / iterations;
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
@@ -147,16 +149,15 @@ pub fn main() !void {
         }
 
         const text = "hello world";
-        var timer = try Timer.start();
-        const start = timer.read();
+        const timer = Timer.start(io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
         while (i < iterations) : (i += 1) {
-            _ = try regex.isMatch(text);
+            std.mem.doNotOptimizeAway(try regex.isMatch(text));
         }
 
-        const elapsed = timer.read() - start;
+        const elapsed = timer.read();
         const avg_ns = elapsed / iterations;
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
@@ -176,8 +177,7 @@ pub fn main() !void {
             std.debug.print("  ✓ Using literal prefix: \"{s}\" (min_len={d})\n", .{ prefix, regex.opt_info.min_length });
         }
 
-        var timer = try Timer.start();
-        const start = timer.read();
+        const timer = Timer.start(io);
 
         const iterations: usize = 10000;
         var i: usize = 0;
@@ -188,7 +188,7 @@ pub fn main() !void {
             }
         }
 
-        const elapsed = timer.read() - start;
+        const elapsed = timer.read();
         const avg_ns = elapsed / iterations;
         std.debug.print("  {d} iterations in {d:.2}ms ({d:.2}µs/op)\n\n", .{
             iterations,
