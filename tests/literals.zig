@@ -254,3 +254,112 @@ test "aho-corasick exhaustive over a two-byte alphabet" {
         }
     }
 }
+
+/// Every candidate the prober reports for `hay` from `start`, in order.
+fn allCandidates(gpa: std.mem.Allocator, f: *const lit.Sbbf, hay: []const u8, start: usize, buf_len: usize) ![]usize {
+    var out: std.ArrayList(usize) = .empty;
+    errdefer out.deinit(gpa);
+    const buf = try gpa.alloc(usize, buf_len);
+    defer gpa.free(buf);
+    var p = f.prober(hay, start);
+    while (true) {
+        const c = p.next(buf);
+        if (c.len == 0) break;
+        try out.appendSlice(gpa, c);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "sbbf never misses a planted anchor at strides 1 to 16" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5bbf);
+    const r = prng.random();
+    const strides = [_]u32{ 1, 4, 8, 1, 2, 3, 5, 7, 16 };
+    for (0..120) |round| {
+        const stride = strides[round % strides.len];
+        const n = r.intRangeAtMost(usize, 1, 200);
+        const set = try PatternSet.random(gpa, r, n, stride + 3, stride + 3 + r.uintAtMost(usize, 20), if (round % 2 == 0) 4 else 255);
+        defer set.deinit(gpa);
+        const anchors = try gpa.alloc([]const u8, n);
+        defer gpa.free(anchors);
+        for (set.pats, anchors) |p, *a| a.* = p.bytes;
+        var f = try lit.Sbbf.build(gpa, anchors, .{ .stride = stride, .bits_per_key = r.intRangeAtMost(u32, 2, 20), .seed = r.int(u32) });
+        defer f.deinit(gpa);
+
+        const hay = try gpa.alloc(u8, r.uintAtMost(usize, 3000));
+        defer gpa.free(hay);
+        for (hay) |*b| b.* = r.int(u8);
+        const start = r.uintAtMost(usize, 3);
+        var planted: std.ArrayList(struct { at: usize, len: usize }) = .empty;
+        defer planted.deinit(gpa);
+        for (0..r.uintAtMost(usize, 40)) |_| {
+            const a = anchors[r.uintLessThan(usize, n)];
+            if (a.len + start > hay.len) continue;
+            const at = r.intRangeAtMost(usize, start, hay.len - a.len);
+            @memcpy(hay[at..][0..a.len], a);
+            try planted.append(gpa, .{ .at = at, .len = a.len });
+        }
+        const cands = try allCandidates(gpa, &f.view, hay, start, lit.sbbf.batch + r.uintAtMost(usize, 20));
+        defer gpa.free(cands);
+
+        // Candidates are sampled positions, strictly ascending.
+        for (cands, 0..) |c, i| {
+            try testing.expectEqual(@as(usize, 0), (c - start) % stride);
+            try testing.expect(c + 4 <= hay.len);
+            if (i > 0) try testing.expect(cands[i - 1] < c);
+        }
+        // Every planted anchor that survived later plants has a candidate
+        // inside its first `stride` bytes.
+        for (planted.items) |p| {
+            var intact = false;
+            for (anchors) |a| {
+                if (a.len == p.len and std.mem.eql(u8, a, hay[p.at..][0..p.len])) intact = true;
+            }
+            if (!intact) continue;
+            var found = false;
+            for (cands) |c| {
+                if (c >= p.at and c < p.at + stride) found = true;
+            }
+            try testing.expect(found);
+        }
+    }
+}
+
+test "sbbf false-positive rate is within 20 percent of theory" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xf9);
+    const r = prng.random();
+    const Case = struct { keys: usize, bits_per_key: u32 };
+    for ([_]Case{
+        .{ .keys = 100_000, .bits_per_key = 16 },
+        .{ .keys = 50_000, .bits_per_key = 10 },
+        .{ .keys = 20_000, .bits_per_key = 8 },
+    }) |case| {
+        var b = try lit.sbbf.Builder.init(gpa, .{ .bits_per_key = case.bits_per_key, .seed = r.int(u32) });
+        defer b.deinit();
+        var inserted: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer inserted.deinit(gpa);
+        while (inserted.count() < case.keys) {
+            const g = r.int(u32);
+            try inserted.put(gpa, g, {});
+            try b.addGram(g);
+        }
+        var f = try b.finish();
+        defer f.deinit(gpa);
+        const expected = f.view.expectedFalsePositiveRate();
+
+        var queries: usize = 0;
+        var hits: usize = 0;
+        // Enough queries for about 4000 expected false positives, so the
+        // sampling error (about 1.6 percent) is far inside the tolerance.
+        const want_queries: usize = @intFromFloat(4000 / expected);
+        while (queries < want_queries) {
+            const g = r.int(u32);
+            if (inserted.contains(g)) continue;
+            queries += 1;
+            hits += @intFromBool(f.view.contains(g));
+        }
+        const measured = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(queries));
+        try testing.expect(@abs(measured - expected) <= 0.2 * expected);
+    }
+}

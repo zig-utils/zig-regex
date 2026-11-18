@@ -193,7 +193,7 @@ zig-waf. Haystacks are 16 MiB and deterministic: `random` is xorshift bytes,
 
 ```sh
 zig build bench-literals            # everything
-zig build bench-literals -- teddy   # one group: teddy or ac
+zig build bench-literals -- teddy   # one group: teddy, ac or sbbf
 ```
 
 ### Teddy (Apple M3 Pro, Zig 0.17.0-dev.1857, ReleaseFast)
@@ -238,3 +238,33 @@ previous state, and slower on text, where failure walks dominate. Giving the
 dense layout the same root branch (with or without a separate root row
 pointer) measured about 30 percent slower, because the branch becomes a
 conditional select that keeps the dependency.
+
+### Sampled split-block Bloom filter (Apple M3 Pro, Zig 0.17.0-dev.1857, ReleaseFast)
+
+Filters hold random grams at 16 bits per key; the text haystack has no
+planted grams, so candidates are false positives. Cycles per byte assume a
+4.05 GHz P-core clock.
+
+| Filter | Stride | random GB/s (c/B) | text GB/s (c/B) |
+|---|---|---|---|
+| 64 KiB | 1 | 0.81 (5.0) | 0.82 (5.0) |
+| 64 KiB | 4 | 3.55 (1.14) | 3.55 (1.14) |
+| 64 KiB | 8 | 6.91 (0.59) | 6.91 (0.59) |
+| 1 MiB | 1 | 0.63 (6.4) | 0.80 (5.1) |
+| 1 MiB | 4 | 3.04 (1.33) | 3.51 (1.15) |
+| 1 MiB | 8 | 5.86 (0.69) | 6.85 (0.59) |
+| 16 MiB | 1 | 0.21 (19.5) | 0.74 (5.5) |
+| 16 MiB | 4 | 0.83 (4.9) | 3.14 (1.29) |
+| 16 MiB | 8 | 1.97 (2.05) | 6.16 (0.66) |
+| 64 MiB | 1 | 0.10 (39.8) | 0.58 (7.0) |
+| 64 MiB | 4 | 0.56 (7.2) | 3.05 (1.33) |
+| 64 MiB | 8 | 1.20 (3.4) | 5.96 (0.68) |
+
+With the filter in cache the kernel meets the design estimates (0.6 cycles
+per byte at stride 8, 1.2 at stride 4, 4.5 at stride 1). A random haystack
+against a filter far larger than the caches touches a random block per
+probe, so it becomes memory bound; real files repeat grams and stay close to
+the text column. Two changes mattered: loading whole 16-byte registers for the
+gram shuffle (a 19-byte source made LLVM insert bytes one at a time) and
+computing the block index with a scalar multiply (NEON has no 64-bit lane
+multiply, so the vector form was scalarised with lane moves).

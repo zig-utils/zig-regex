@@ -1,7 +1,7 @@
 //! Throughput benchmarks for the multi-literal engines in src/literals.
 //!
 //!   zig build bench-literals                 run every benchmark
-//!   zig build bench-literals -- teddy        run one group (teddy, ac)
+//!   zig build bench-literals -- teddy        run one group (teddy, ac, sbbf)
 //!
 //! Haystacks are deterministic (xorshift), so numbers compare across runs and
 //! machines. Each case reports the best of several timed passes in GB/s
@@ -258,6 +258,59 @@ fn benchAc(gpa: std.mem.Allocator) !void {
     }
 }
 
+// ------------------------------------------------------------------ SBBF
+
+const SbbfCase = struct {
+    f: *const lit.Sbbf,
+    hay: []const u8,
+
+    fn countCandidates(c: *const SbbfCase) usize {
+        var buf: [1024]usize = undefined;
+        var n: usize = 0;
+        var p = c.f.prober(c.hay, 0);
+        while (true) {
+            const got = p.next(&buf);
+            if (got.len == 0) break;
+            n += got.len;
+        }
+        return n;
+    }
+};
+
+/// Nominal P-core clock used to turn GB/s into cycles per byte.
+const nominal_ghz = 4.05;
+
+fn benchSbbf(gpa: std.mem.Allocator) !void {
+    std.debug.print("sbbf (cycles per byte assume {d:.2} GHz)\n", .{nominal_ghz});
+    const size = 16 << 20;
+    const rand = try randomBytes(gpa, size, 0x5bbf);
+    defer gpa.free(rand);
+    const text = try englishText(gpa, size, 0x7e47, &.{});
+    defer gpa.free(text);
+
+    var buf: [128]u8 = undefined;
+    for ([_]usize{ 64 << 10, 1 << 20, 16 << 20, 64 << 20 }) |filter_bytes| {
+        // 16 bits per key.
+        const keys = filter_bytes * 8 / 16;
+        for ([_]u32{ 1, 4, 8 }) |stride| {
+            var b = try lit.sbbf.Builder.init(gpa, .{ .stride = stride, .bits_per_key = 16, .seed = 7 });
+            defer b.deinit();
+            var r: Rng = .{ .s = keys + stride };
+            for (0..keys) |_| try b.addGram(@truncate(r.next()));
+            var f = try b.finish();
+            defer f.deinit(gpa);
+            for ([_][]const u8{ "random", "text" }, [_][]const u8{ rand, text }) |hname, hay| {
+                const c: SbbfCase = .{ .f = &f.view, .hay = hay };
+                const m = measure(hay.len, &c, SbbfCase.countCandidates);
+                const name = try std.fmt.bufPrint(&buf, "{d} KiB filter, stride {d}, {s} ({d:.2} c/B)", .{
+                    f.bytes.len >> 10, stride, hname, nominal_ghz / m.gbps,
+                });
+                report(name, hay.len, m.gbps, m.result);
+            }
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.c_allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -267,4 +320,5 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("literals benchmarks ({s}, {s})\n", .{ @tagName(builtin.cpu.arch), builtin.cpu.model.name });
     if (only == null or std.mem.eql(u8, only.?, "teddy")) try benchTeddy(gpa);
     if (only == null or std.mem.eql(u8, only.?, "ac")) try benchAc(gpa);
+    if (only == null or std.mem.eql(u8, only.?, "sbbf")) try benchSbbf(gpa);
 }

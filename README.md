@@ -199,6 +199,18 @@ var ac = try lit.AhoCorasick.build(allocator, &patterns, .{});
 defer ac.deinit(allocator);
 var it = ac.view.iterator(haystack);
 while (it.next()) |m| std.debug.print("{d} at {d}\n", .{ m.pattern, m.start });
+
+// Sampled Bloom prefilter: candidate positions for very large sets. With
+// stride 8 every anchor must be at least 11 bytes long.
+var filter = try lit.Sbbf.build(allocator, &.{"\x4d\x5a\x90\x00\x03\x00\x00\x00\x04\x00\x00"}, .{ .stride = 8 });
+defer filter.deinit(allocator);
+var buf: [256]usize = undefined;
+var probe = filter.view.prober(haystack, 0);
+while (true) {
+    const candidates = probe.next(&buf);
+    if (candidates.len == 0) break;
+    // An anchor may start in the 8 bytes ending at each candidate.
+}
 ```
 
 ## CLI
