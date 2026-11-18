@@ -696,6 +696,7 @@ pub const Compiler = struct {
                 }
 
                 // {0,n}: n optional copies
+                if (try self.nestsOptionalCopies(repeat.child)) return self.compileNestedOptionals(repeat.child, max_val, greedy);
                 var current_frag = try self.compileOptional(repeat.child, greedy);
                 var i: usize = 1;
                 while (i < max_val) : (i += 1) {
@@ -728,6 +729,12 @@ pub const Compiler = struct {
         if (max) |max_val| {
             // Add optional copies for the difference (max - min)
             const diff = max_val - min;
+            if (diff > 0 and try self.nestsOptionalCopies(repeat.child)) {
+                const tail = try self.compileNestedOptionals(repeat.child, diff, greedy);
+                try self.nfa.getState(current_frag.accept).addTransition(Transition.epsilon(tail.start));
+                current_frag.accept = tail.accept;
+                return current_frag;
+            }
             i = 0;
             while (i < diff) : (i += 1) {
                 const opt_fragment = try self.compileOptional(repeat.child, greedy);
@@ -744,6 +751,48 @@ pub const Compiler = struct {
         }
 
         return current_frag;
+    }
+
+    /// Whether the optional copies of a bounded repeat of `atom` are nested
+    /// (`x{0,3}` as `(?:x(?:x(?:x)?)?)?`) rather than chained (`x?x?x?`).
+    /// Both match the same strings and, for a capture-free atom, report the
+    /// same matches under any priority order, as RE2 and Rust's regex-syntax
+    /// rewrite them. The chain lets every copy be skipped independently, so
+    /// the closure after each copy holds every later copy: `.{0,256}` made
+    /// each lazy-DFA state list hundreds of NFA states. ECMAScript keeps the
+    /// chain, whose iterations carry RepeatMatcher's capture and empty-match
+    /// rules, and so does an atom with captures, whose last iteration a
+    /// capture reports.
+    fn nestsOptionalCopies(self: *Compiler, atom: *ast.Node) !bool {
+        if (self.flags.ecmascript) return false;
+        const captures = try self.captureIndicesIn(atom);
+        defer self.allocator.free(captures);
+        return captures.len == 0;
+    }
+
+    /// `count` (at least 1) optional copies of `atom`, nested: each copy is
+    /// followed by an optional rest, built from the innermost copy out. A
+    /// greedy repeat tries the copy before skipping; a lazy one skips first.
+    fn compileNestedOptionals(self: *Compiler, atom: *ast.Node, count: usize, greedy: bool) !Fragment {
+        var rest = try self.compileOptional(atom, greedy);
+        var k: usize = 1;
+        while (k < count) : (k += 1) {
+            const copy = try self.compileNode(atom);
+            try self.nfa.getState(copy.accept).addTransition(Transition.epsilon(rest.start));
+            const start = try self.nfa.addState();
+            const accept = try self.nfa.addState();
+            const start_state = self.nfa.getState(start);
+            if (greedy) {
+                try start_state.addTransition(Transition.epsilon(copy.start));
+                try start_state.addTransition(Transition.epsilon(accept));
+            } else {
+                try start_state.addTransition(Transition.epsilon(accept));
+                try start_state.addTransition(Transition.epsilon(copy.start));
+            }
+            try self.nfa.getState(rest.accept).addTransition(Transition.epsilon(accept));
+            rest = .{ .start = start, .accept = accept };
+        }
+        return rest;
     }
 
     /// Compile character class
