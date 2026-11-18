@@ -427,6 +427,9 @@ pub const Node = struct {
         capture_index: ?usize, // null for non-capturing groups
         name: ?[]const u8 = null, // null for unnamed groups
         mod: ?FlagDelta = null, // inline-modifier flag override, if any
+        /// An atomic group `(?>...)`: once its body matches, the match never
+        /// backtracks into it for another way to match.
+        atomic: bool = false,
     };
 
     pub const Assertion = struct {

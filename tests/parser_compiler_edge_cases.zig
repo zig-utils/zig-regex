@@ -1172,3 +1172,38 @@ test "parser: (?P=name) is a named backreference" {
     try std.testing.expectError(RegexError.InvalidBackreference, Regex.compile(allocator, "(?P=m)"));
     try std.testing.expectError(RegexError.UnexpectedCharacter, Regex.compileWithFlags(allocator, "(?<n>x)(?P=n)", .{ .ecmascript = true }));
 }
+
+// Atomic groups (PCRE, Perl): once the body matches, later failure does not
+// retry it. Results checked against PCRE2 10.49.
+test "regex: atomic groups" {
+    const allocator = std.testing.allocator;
+    const regex = @import("regex");
+    const Case = struct { pattern: []const u8, input: []const u8, want: ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(?>a+)a", .input = "aaaa", .want = null },
+        .{ .pattern = "(?>a+)b", .input = "aaab", .want = .{ 0, 4 } },
+        .{ .pattern = "(?>ab|a)c", .input = "abc", .want = .{ 0, 3 } },
+        .{ .pattern = "(?>a|ab)c", .input = "abc", .want = null },
+        .{ .pattern = "(?>.*)x", .input = "abx", .want = null },
+        .{ .pattern = "a(?>b*?)c", .input = "abbc", .want = null },
+        .{ .pattern = "(?>(a)\\1)+", .input = "aabb aaaa", .want = .{ 0, 2 } },
+        .{ .pattern = "x(?>abc)y", .input = "xabcy", .want = .{ 0, 5 } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .bytes = true });
+        defer re.deinit();
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        errdefer std.debug.print("{s} on {s}\n", .{ c.pattern, c.input });
+        if (c.want) |w| {
+            try std.testing.expectEqual(w[0], found.?.start);
+            try std.testing.expectEqual(w[1], found.?.end);
+        } else try std.testing.expect(found == null);
+    }
+    // One match length means one end: the linear engines take it as a plain
+    // group; anything else needs a backtracker.
+    var fixed = try regex.Program.compile(allocator, "x(?>abc|d[ef]g)y", .{ .bytes = true });
+    defer fixed.deinit(allocator);
+    try std.testing.expectError(error.UnsupportedByProgram, regex.Program.compile(allocator, "(?>a+)b", .{ .bytes = true }));
+    try std.testing.expectError(RegexError.UnexpectedCharacter, Regex.compileWithFlags(allocator, "(?>a)", .{ .ecmascript = true }));
+}

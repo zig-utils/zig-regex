@@ -2892,6 +2892,11 @@ fn requiresBacktracking(root: *ast.Node, flags: common.CompileFlags, ordered_qua
             // which only the backtracking engine honors.
             .group => {
                 if (node.data.group.mod != null and !scoped_modes) return true;
+                // An atomic group whose every match has one length has one
+                // end, so it never has another way to match: the Thompson
+                // engines run it as a plain group. Any other needs the
+                // backtracker's commit.
+                if (node.data.group.atomic and fixedWidth(node.data.group.child, flags) == null) return true;
                 node = node.data.group.child;
             },
 
@@ -2914,6 +2919,61 @@ fn isAsciiWordClass(char_class: common.CharClass) bool {
         if (a.start != b.start or a.end != b.end) return false;
     }
     return true;
+}
+
+/// The length in bytes of every match of `root`, when all have the same, or
+/// null. Recursion follows nesting only; sequences and alternations are
+/// walked along their spine.
+fn fixedWidth(root: *ast.Node, flags: common.CompileFlags) ?usize {
+    switch (root.node_type) {
+        .literal => return 1,
+        .any => return if (flags.bytes) 1 else null,
+        .char_class => {
+            if (flags.bytes) return 1;
+            for (root.data.char_class.ranges) |r| if (r.end >= 0x80) return null;
+            return if (root.data.char_class.negated) null else 1;
+        },
+        .anchor, .empty, .lookahead, .lookbehind => return 0,
+        .group => return fixedWidth(root.data.group.child, flags),
+        .repeat => {
+            const r = root.data.repeat;
+            const w = fixedWidth(r.child, flags) orelse return null;
+            if (w == 0) return 0;
+            const max = r.bounds.max orelse return null;
+            if (max != r.bounds.min) return null;
+            return std.math.mul(usize, w, max) catch null;
+        },
+        .star, .plus, .optional => {
+            const child = ast.onlyChild(root).?;
+            return if (fixedWidth(child, flags) == 0) 0 else null;
+        },
+        .concat => {
+            var total: usize = 0;
+            var node = root;
+            while (node.node_type == .concat) {
+                const step = ast.spine(node);
+                total += fixedWidth(step.side, flags) orelse return null;
+                node = step.next;
+            }
+            return total + (fixedWidth(node, flags) orelse return null);
+        },
+        .alternation => {
+            var width: ?usize = null;
+            var node = root;
+            while (true) {
+                const branch, const next = if (node.node_type == .alternation) blk: {
+                    const step = ast.spine(node);
+                    break :blk .{ step.side, @as(?*ast.Node, step.next) };
+                } else .{ node, @as(?*ast.Node, null) };
+                const w = fixedWidth(branch, flags) orelse return null;
+                if (width) |known| {
+                    if (known != w) return null;
+                } else width = w;
+                node = next orelse return width;
+            }
+        },
+        .backref, .class_set, .unicode_property => return null,
+    }
 }
 
 /// Whether the tree has an inline-modifier group (`(?i)`, `(?s:..)`).

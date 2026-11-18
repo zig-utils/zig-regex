@@ -108,8 +108,11 @@ pub const BacktrackEngine = struct {
         // position, so the search terminates.
         self.step_count = 0;
         self.match_error = null;
-        const capture_continuations = self.flags.ecmascript and
-            (self.hasBackreference(self.ast_root) or self.hasLazyQuantifier(self.ast_root));
+        // Atomic groups need the continuation matcher, whose choice stack an
+        // atomic group can cut.
+        const capture_continuations = (self.flags.ecmascript and
+            (self.hasBackreference(self.ast_root) or self.hasLazyQuantifier(self.ast_root))) or
+            self.hasAtomicGroup(self.ast_root);
         while (pos <= input.len) {
             if (prefix) |literal| {
                 // ECMA-262 RegExpBuiltinExec searches starts in order. A
@@ -173,6 +176,9 @@ pub const BacktrackEngine = struct {
         repeat: ContinuationRepeat,
         advance: struct { next: ContinuationRepeat, start: usize, required: bool },
         clear: *ast.Node,
+        /// The end of an atomic group's body: drop every choice made since
+        /// the group began, so the match never returns into it.
+        commit: usize,
     };
 
     const ContinuationLink = struct {
@@ -282,6 +288,7 @@ pub const BacktrackEngine = struct {
                         const group = node.data.group;
                         const flags = self.enterGroupFlags(group);
                         head = try pool.push(head, .{ .finish_group = .{ .index = group.capture_index, .start = position, .flags = flags } });
+                        if (group.atomic) head = try pool.push(head, .{ .commit = choices.items.len });
                         head = try pool.push(head, .{ .node = group.child });
                     },
                     .star, .plus, .optional, .repeat => {
@@ -351,6 +358,13 @@ pub const BacktrackEngine = struct {
                 .clear => |node| {
                     self.clearCapturesIn(node);
                     if (self.match_error) |err| return err;
+                },
+                .commit => |depth| {
+                    while (choices.items.len > depth) {
+                        const choice = choices.pop().?;
+                        pool.release(choice.head);
+                        try retired_captures.append(allocator, choice.captures);
+                    }
                 },
             }
             if (failed) {
@@ -902,6 +916,18 @@ pub const BacktrackEngine = struct {
                 return switch (n.node_type) {
                     .backref => .matched,
                     .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+                    else => .skip,
+                };
+            }
+        }.decide);
+    }
+
+    fn hasAtomicGroup(self: *BacktrackEngine, node: *ast.Node) bool {
+        return self.anyNodeMatches(node, struct {
+            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+                return switch (n.node_type) {
+                    .group => if (n.data.group.atomic) .matched else .descend,
+                    .concat, .alternation, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
                     else => .skip,
                 };
             }

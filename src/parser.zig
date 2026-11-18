@@ -1322,6 +1322,16 @@ pub const Parser = struct {
                             errdefer child.destroy(self.allocator);
                             try self.expectWithReason(.rparen, .missing_closing_parenthesis);
                             return ast.Node.createLookahead(self.allocator, child, false, span);
+                        } else if (self.current_token.value == '>' and !self.ecmascript) {
+                            // Atomic group (?>...) (PCRE, Perl): the body's first
+                            // match is final; later failure does not retry it.
+                            try self.advance(); // consume >
+                            const child = try self.parseAlternation();
+                            errdefer child.destroy(self.allocator);
+                            try self.expectWithReason(.rparen, .missing_closing_parenthesis);
+                            const node = try ast.Node.createGroup(self.allocator, child, null, span);
+                            node.data.group.atomic = true;
+                            return node;
                         } else if (self.current_token.value == 'P') {
                             // Python-style named group (?P<name>...). ECMAScript
                             // has no such form: after `(?` it allows only `:`,

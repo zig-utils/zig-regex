@@ -35,6 +35,7 @@ zig-regex is a regular expression engine for Zig featuring Thompson NFA construc
 | **Non-capturing** | `(?:...)` | Stable |
 | **Lookahead** | `(?=...)`, `(?!...)` | Stable |
 | **Lookbehind** | `(?<=...)`, `(?<!...)` | Stable |
+| **Atomic groups** | `(?>...)` | Stable |
 | **Backreferences** | `\1`, `\2`, `\k<name>`, `(?P=name)` | Stable |
 | **Case-insensitive** | `compileWithFlags(..., .{.case_insensitive = true})` | Stable |
 | **Multiline** | `compileWithFlags(..., .{.multiline = true})` | Stable |
