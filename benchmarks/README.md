@@ -193,7 +193,7 @@ zig-waf. Haystacks are 16 MiB and deterministic: `random` is xorshift bytes,
 
 ```sh
 zig build bench-literals            # everything
-zig build bench-literals -- teddy   # one group: teddy
+zig build bench-literals -- teddy   # one group: teddy or ac
 ```
 
 ### Teddy (Apple M3 Pro, Zig 0.17.0-dev.1857, ReleaseFast)
@@ -213,3 +213,28 @@ text case is slower because the folded fingerprint of `Sherlock` is `she`, a
 common word, so candidates are frequent; that is a real fingerprint collision,
 not overhead. A scan width of 16 measured about 6 percent slower and 64 about 3
 percent faster than the chosen 32.
+
+### Aho-Corasick (Apple M3 Pro, Zig 0.17.0-dev.1857, ReleaseFast)
+
+Patterns are random lowercase words of 4 to 12 letters; the text haystack has
+one planted about every 2 KiB. `all` reports every overlapping match,
+`leftmost-longest` iterates non-overlapping matches. Sizes are the blob.
+
+| Words | Layout (blob) | random, all | random, leftmost-longest | text, all | text, leftmost-longest |
+|---|---|---|---|---|---|
+| 8 | dense (8 KiB) | 0.72 | 0.74 | 0.73 | 0.73 |
+| 8 | sparse (3 KiB) | 1.66 | 1.69 | 0.34 | 0.35 |
+| 100 | dense (103 KiB) | 0.73 | 0.73 | 0.73 | 0.72 |
+| 100 | sparse (40 KiB) | 0.84 | 0.86 | 0.30 | 0.30 |
+| 1000 | dense (921 KiB) | 0.73 | 0.73 | 0.71 | 0.68 |
+| 1000 | sparse (304 KiB) | 0.79 | 0.80 | 0.28 | 0.29 |
+| 10000 | dense (8286 KiB) | 0.69 | 0.69 | 0.62 | 0.61 |
+| 10000 | sparse (2290 KiB) | 0.80 | 0.81 | 0.21 | 0.20 |
+
+The dense layout is one dependent load per byte (about 5.5 cycles) whatever
+the input. The sparse layout is faster on input that rarely leaves the root,
+because its root test is a predicted branch whose load does not depend on the
+previous state, and slower on text, where failure walks dominate. Giving the
+dense layout the same root branch (with or without a separate root row
+pointer) measured about 30 percent slower, because the branch becomes a
+conditional select that keeps the dependency.

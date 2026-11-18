@@ -192,6 +192,13 @@ const patterns = [_]lit.Pattern{
 var teddy = try lit.Teddy.build(allocator, &patterns, .{ .ascii_case_insensitive = true });
 defer teddy.deinit(allocator);
 if (teddy.view.find(haystack, 0)) |m| std.debug.print("{d} at {d}..{d}\n", .{ m.pattern, m.start, m.end });
+
+// Aho-Corasick: any number of literals, every match or leftmost-longest,
+// and streaming over chunks with `scanStream`.
+var ac = try lit.AhoCorasick.build(allocator, &patterns, .{});
+defer ac.deinit(allocator);
+var it = ac.view.iterator(haystack);
+while (it.next()) |m| std.debug.print("{d} at {d}\n", .{ m.pattern, m.start });
 ```
 
 ## CLI

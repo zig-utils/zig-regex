@@ -1,7 +1,7 @@
 //! Throughput benchmarks for the multi-literal engines in src/literals.
 //!
 //!   zig build bench-literals                 run every benchmark
-//!   zig build bench-literals -- teddy        run one group (teddy)
+//!   zig build bench-literals -- teddy        run one group (teddy, ac)
 //!
 //! Haystacks are deterministic (xorshift), so numbers compare across runs and
 //! machines. Each case reports the best of several timed passes in GB/s
@@ -187,6 +187,77 @@ fn benchTeddy(gpa: std.mem.Allocator) !void {
     }
 }
 
+// ---------------------------------------------------------- Aho-Corasick
+
+const AcCase = struct {
+    ac: *const lit.AhoCorasick,
+    hay: []const u8,
+
+    fn countAll(c: *const AcCase) usize {
+        var n: usize = 0;
+        _ = c.ac.scanAll(c.hay, &n, struct {
+            fn on(k: *usize, _: Match) bool {
+                k.* += 1;
+                return true;
+            }
+        }.on);
+        return n;
+    }
+
+    fn countLeftmostLongest(c: *const AcCase) usize {
+        var n: usize = 0;
+        var it = c.ac.iterator(c.hay);
+        while (it.next()) |_| n += 1;
+        return n;
+    }
+};
+
+/// `n` random lowercase words of 4 to 12 letters.
+fn randomWords(gpa: std.mem.Allocator, n: usize, seed: u64) ![][]u8 {
+    const out = try gpa.alloc([]u8, n);
+    var r: Rng = .{ .s = seed };
+    for (out) |*w| {
+        w.* = try gpa.alloc(u8, 4 + r.next() % 9);
+        for (w.*) |*c| c.* = 'a' + @as(u8, @intCast(r.next() % 26));
+    }
+    return out;
+}
+
+fn benchAc(gpa: std.mem.Allocator) !void {
+    std.debug.print("aho-corasick\n", .{});
+    const size = 16 << 20;
+    const rand = try randomBytes(gpa, size, 0xabcdef);
+    defer gpa.free(rand);
+
+    var buf: [128]u8 = undefined;
+    for ([_]usize{ 8, 100, 1000, 10000 }) |n| {
+        const vocab = try randomWords(gpa, n, n);
+        defer {
+            for (vocab) |w| gpa.free(w);
+            gpa.free(vocab);
+        }
+        const plants: []const []const u8 = vocab;
+        const text = try englishText(gpa, size, 0x5151, plants);
+        defer gpa.free(text);
+        const pats = try gpa.alloc(Pattern, n);
+        defer gpa.free(pats);
+        for (vocab, 0..) |w, i| pats[i] = .{ .bytes = w, .id = @intCast(i) };
+
+        for ([_]lit.aho_corasick.Layout{ .dense, .sparse }) |layout| {
+            var ac = try lit.AhoCorasick.build(gpa, pats, .{ .layout = layout });
+            defer ac.deinit(gpa);
+            const kib = ac.bytes.len >> 10;
+            for ([_][]const u8{ "random", "text" }, [_][]const u8{ rand, text }) |hname, hay| {
+                const c: AcCase = .{ .ac = &ac.view, .hay = hay };
+                const a = measure(hay.len, &c, AcCase.countAll);
+                report(try std.fmt.bufPrint(&buf, "{d} words {s} ({d} KiB), {s}, all", .{ n, @tagName(layout), kib, hname }), hay.len, a.gbps, a.result);
+                const l = measure(hay.len, &c, AcCase.countLeftmostLongest);
+                report(try std.fmt.bufPrint(&buf, "{d} words {s} ({d} KiB), {s}, leftmost-longest", .{ n, @tagName(layout), kib, hname }), hay.len, l.gbps, l.result);
+            }
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.c_allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -195,4 +266,5 @@ pub fn main(init: std.process.Init) !void {
     const only: ?[]const u8 = if (args.len >= 2) args[1] else null;
     std.debug.print("literals benchmarks ({s}, {s})\n", .{ @tagName(builtin.cpu.arch), builtin.cpu.model.name });
     if (only == null or std.mem.eql(u8, only.?, "teddy")) try benchTeddy(gpa);
+    if (only == null or std.mem.eql(u8, only.?, "ac")) try benchAc(gpa);
 }

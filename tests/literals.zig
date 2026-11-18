@@ -127,3 +127,130 @@ test "teddy finds a pattern planted at every offset" {
         }
     }
 }
+
+fn checkAhoCorasick(gpa: std.mem.Allocator, ac: *const lit.AhoCorasick, pats: []const Pattern, hay: []const u8, r: std.Random) !void {
+    const opts: Options = .{ .ascii_case_insensitive = ac.nocase };
+    const want = try naive.allMatches(gpa, pats, hay, opts);
+    defer gpa.free(want);
+
+    // Whole haystack.
+    var got: std.ArrayList(Match) = .empty;
+    defer got.deinit(gpa);
+    try testing.expect(ac.scanAll(hay, &got, collect));
+    std.mem.sort(Match, got.items, {}, naive.lessThan);
+    try testing.expectEqualSlices(Match, want, got.items);
+    try testing.expectEqual(want.len != 0, ac.isMatch(hay));
+
+    // The same haystack fed as a stream of random chunks.
+    got.clearRetainingCapacity();
+    var stream: lit.aho_corasick.Stream = .{};
+    var pos: usize = 0;
+    while (pos < hay.len) {
+        const len = @min(hay.len - pos, r.uintAtMost(usize, 40));
+        try testing.expect(ac.scanStream(&stream, hay[pos..][0..len], &got, collect));
+        pos += len;
+    }
+    std.mem.sort(Match, got.items, {}, naive.lessThan);
+    try testing.expectEqualSlices(Match, want, got.items);
+
+    // Non-overlapping leftmost-longest.
+    const want_ll = try naive.leftmostLongest(gpa, pats, hay, opts);
+    defer gpa.free(want_ll);
+    got.clearRetainingCapacity();
+    var it = ac.iterator(hay);
+    while (it.next()) |m| try got.append(gpa, m);
+    try testing.expectEqualSlices(Match, want_ll, got.items);
+}
+
+test "aho-corasick agrees with naive search on random inputs in every layout, reloaded too" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xac0ac0);
+    const r = prng.random();
+    for (0..600) |round| {
+        const alpha: u8 = switch (round % 4) {
+            0 => 2,
+            1 => 4,
+            2 => 8,
+            else => 255,
+        };
+        const n = r.intRangeAtMost(usize, 1, if (round % 10 == 0) 300 else 40);
+        const set = try PatternSet.random(gpa, r, n, 1, 1 + r.uintAtMost(usize, 10), alpha);
+        defer set.deinit(gpa);
+        const hay = try plantedHaystack(gpa, r, r.uintAtMost(usize, 1500), set.pats, alpha);
+        defer gpa.free(hay);
+        const nocase = r.boolean();
+        const configs = [_]lit.aho_corasick.Options{
+            .{ .ascii_case_insensitive = nocase, .layout = .dense },
+            .{ .ascii_case_insensitive = nocase, .layout = .sparse },
+            // Root row only, so failure walks run all the way down.
+            .{ .ascii_case_insensitive = nocase, .layout = .sparse, .shallow_depth = 0 },
+            // A row budget that cuts the shallow states off part way.
+            .{ .ascii_case_insensitive = nocase, .layout = .sparse, .shallow_depth = 3, .shallow_max_bytes = 4096 },
+        };
+        for (configs) |config| {
+            var ac = try lit.AhoCorasick.build(gpa, set.pats, config);
+            defer ac.deinit(gpa);
+            try checkAhoCorasick(gpa, &ac.view, set.pats, hay, r);
+
+            // A copy at a different address, loaded with full validation.
+            const copy = try lit.blob.dupeAligned(gpa, ac.bytes);
+            defer gpa.free(copy);
+            const loaded = try lit.AhoCorasick.load(copy);
+            try checkAhoCorasick(gpa, &loaded, set.pats, hay, r);
+        }
+    }
+}
+
+test "aho-corasick agrees with teddy on small sets" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7eac);
+    const r = prng.random();
+    for (0..200) |_| {
+        const set = try PatternSet.random(gpa, r, r.intRangeAtMost(usize, 1, 64), 1, 6, 4);
+        defer set.deinit(gpa);
+        const hay = try plantedHaystack(gpa, r, 1000, set.pats, 4);
+        defer gpa.free(hay);
+        var t = try lit.Teddy.build(gpa, set.pats, .{});
+        defer t.deinit(gpa);
+        var ac = try lit.AhoCorasick.build(gpa, set.pats, .{});
+        defer ac.deinit(gpa);
+        var a: std.ArrayList(Match) = .empty;
+        defer a.deinit(gpa);
+        var b: std.ArrayList(Match) = .empty;
+        defer b.deinit(gpa);
+        _ = t.view.scan(hay, &a, collect);
+        _ = ac.view.scanAll(hay, &b, collect);
+        std.mem.sort(Match, a.items, {}, naive.lessThan);
+        std.mem.sort(Match, b.items, {}, naive.lessThan);
+        try testing.expectEqualSlices(Match, a.items, b.items);
+    }
+}
+
+test "aho-corasick exhaustive over a two-byte alphabet" {
+    // Every set of patterns of length 1 and 2 over {0x00, 0xff}, against
+    // every haystack of length up to 10 over the same bytes.
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(1);
+    const strings = [_][]const u8{ "\x00", "\xff", "\x00\x00", "\x00\xff", "\xff\x00", "\xff\xff" };
+    var pats: [strings.len]Pattern = undefined;
+    var hay: [10]u8 = undefined;
+    for (1..(1 << strings.len)) |set| {
+        var n: usize = 0;
+        for (strings, 0..) |s, i| {
+            if (set & (@as(usize, 1) << @intCast(i)) != 0) {
+                pats[n] = .{ .bytes = s, .id = @intCast(i) };
+                n += 1;
+            }
+        }
+        for ([_]lit.aho_corasick.Layout{ .dense, .sparse }) |layout| {
+            var ac = try lit.AhoCorasick.build(gpa, pats[0..n], .{ .layout = layout });
+            defer ac.deinit(gpa);
+            for (0..hay.len + 1) |len| {
+                for (0..(@as(usize, 1) << @intCast(len))) |bits| {
+                    for (0..len) |k| hay[k] = if (bits & (@as(usize, 1) << @intCast(k)) != 0) 0xff else 0x00;
+                    try checkAhoCorasick(gpa, &ac.view, pats[0..n], hay[0..len], prng.random());
+                }
+            }
+        }
+    }
+}
