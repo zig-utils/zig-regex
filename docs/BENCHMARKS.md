@@ -331,3 +331,50 @@ limit of 10 million calls); programs answer those in linear time, and they are
 not counted.
 `tests/testdata/pcre2_leftmost_first.tsv` keeps 1,000 agreeing cases with
 PCRE2's spans, which the test suite checks without needing PCRE2.
+
+## Backtracking programs (`regex.bt`) against PCRE2
+
+`regex.bt` runs what a `Program` cannot: backreferences, lookaround, atomic
+groups and counted repeats too large to unroll. Patterns in the style of
+the ClamAV subsignatures zig-anti-virus could not run as programs, counted
+over the same 8 MiB corpora (MB/s; best of three passes; `Scratch` with an
+unlimited budget). Match counts equal PCRE2's for every row.
+
+| Pattern | Program | executable-like: bt | JIT | interpreter | HTTP: bt | JIT | interpreter |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `(\w{3,8}) \1` | 280 B | 311 | 549 | 81 | 54 | 289 | 17 |
+| `(?P<n>[a-z]{4})[^a-z]{1,8}(?P=n)` | 280 B | 667 | 1242 | 174 | 112 | 385 | 22 |
+| `union(?=\s+select)` | 716 B | 2410 | 44151 | 6070 | 1952 | 28533 | 2335 |
+| `(?<=\x00\x00)MZ.{2}PE` | 488 B | 2341 | 43691 | 4871 | 2172 | 45344 | 3213 |
+| `select(?!\s+1)\b` (i) | 560 B | 2190 | 32514 | 2637 | 1448 | 9800 | 476 |
+| `(?>[a-z]+)=` | 260 B | 621 | 1222 | 140 | 118 | 360 | 23 |
+| `[\x20-\x7e]{2000,}` | 168 B | 282 | 454 | 62 | 59 | 88 | 10 |
+
+The backtracking rows run at 0.15 to 0.7 times the JIT and 2.5 to 7 times
+the interpreter; the literal-led lookaround rows are limited by the
+start-byte scan (a byte-set walk, memchr only for a single first byte)
+where PCRE2 has its full start-of-match optimizer. These are the cases zav
+used to refuse outright.
+
+`MODE=bt benchmarks/pcre2/diff.sh` differential-tests `regex.bt` programs
+with the grammar above plus backreferences to earlier groups, lookahead,
+bounded lookbehind (alternatives and `{1,2}` included), atomic groups and
+`{20,}`/`{5,30}` repeats of groups and classes. Three seeds of 100,000 cases:
+
+| Seed | Compared | Agree | Differ | PCRE2 errors | zig-regex limits |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 98,212 | 98,210 | 2 | 1,783 | 5 |
+| 2 | 98,246 | 98,240 | 6 | 1,753 | 1 |
+| 3 | 98,242 | 98,239 | 3 | 1,756 | 2 |
+| all | 294,700 | 294,689 | 11 | 5,292 | 8 |
+
+With `PCRE2_NO_START_OPTIMIZE=1` (PCRE2 compiles without its start-of-match
+optimizations) 294,696 agree and 4 differ: 7 of the 11 differences are
+PCRE2's optimizer giving a different answer for a backreference to a group
+that is still unset (`(x|\1*?)a` does not match `a` with the optimizations
+and does without; zig-regex matches). The remaining 4 combine an empty
+iteration of a repeated group with a capture a backreference or lookaround
+then reads. Nearly all PCRE2 errors are patterns it rejects (the grammar
+quantifies `\b`, which PCRE2 refuses: "quantifier does not follow a
+repeatable item"); a few are its match limit. zig-regex limits are searches
+that used up the default 10M-step budget.
