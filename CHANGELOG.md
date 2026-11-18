@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.1 - 2026-11-18
+
+- feat(program): compile inline modifiers into byte-mode programs (4065d58)
+- fix(parser): read {,n} as {0,n} and parse (?P=name) outside ECMAScript (31c6e85)
+
+### Changes (v0.4.1)
+
+From zav's E13 differential of ClamAV PCRE subsignatures and YARA regex
+strings against PCRE2 (#51):
+
+- `{,n}` is `{0,n}` outside ECMAScript, as in YARA, Perl 5.34 and PCRE2
+  10.43 and later; ECMAScript keeps it literal (Annex B) and `{,}` is literal
+  everywhere. Before, every pattern was read the ECMAScript way.
+- `(?P=name)` parses as a named backreference (it was a syntax error), and
+  `(?P<name>...)` enables `\k<name>` as `(?<name>...)` does.
+- A standalone `(?flags)` lasts to the end of its group, later alternatives
+  included (`(a(?i)b|c)` matches `C`), as in PCRE2 and Perl; it used to end at
+  the next `|`.
+- Byte-mode `Program.compile` builds inline modifiers (`(?i)`, `(?s:..)`,
+  `(?-i:..)`, `(?m:..)`) into the program instead of refusing them with
+  `error.UnsupportedByProgram`.
+
 ## v0.4.0 - 2026-11-18
 
 - docs(bench): measure programs against PCRE2 after leftmost-first and prefilters (7091a3f)
