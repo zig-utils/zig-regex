@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.4.0 - 2026-11-18
+
+- docs(bench): measure programs against PCRE2 after leftmost-first and prefilters (7091a3f)
+- feat(program): add leftmost-first programs, reverse start search and prefilters (56d39f1)
+- perf(compiler): nest the optional copies of capture-free bounded repeats (b1d4b85)
+- fix(regex): end literal-alternation fast-path matches leftmost-longest (b82ec26)
+- fix(bench): time basic and prefix benchmarks on the std.Io clock (1797d27)
+- fix(parser): walk flat patterns along their spine in post-parse checks (f8c1ad3)
+
+### Highlights (v0.4.0)
+
+Programs gain PCRE2's match semantics and stop rescanning: a leftmost-first
+match kind, a reverse DFA that finds match starts in linear time, and a start
+prefilter that also works for patterns with assertions. Measured numbers
+against PCRE2 are in docs/BENCHMARKS.md.
+
+### New APIs
+
+- `program.MatchKind` (`.leftmost_longest`, the default, and
+  `.leftmost_first`) and `program.BuildOptions`, taken by
+  `Program.compileWithOptions` and `Program.fromRegexWithOptions`.
+  `Program.matchKind()` reports a program's kind; `bytes()`/`load()` keep it.
+  Leftmost-first programs end matches where PCRE2, Perl and YARA do:
+  alternatives in order, greedy and lazy repeats honoured.
+- `vm.VM.matchAtLeftmostFirst` is public (the reference the leftmost-first
+  tests use).
+- `benchmarks/pcre2/diff.sh`: a differential test of leftmost-first programs
+  against PCRE2; `zig build bench-basic` for the Regex micro-benchmarks.
+
+### Behaviour changes
+
+- The program blob layout is version 2 (`program.format_version`): it adds
+  the match kind, the reversed program and the prefilter. Blobs written by
+  0.3.x fail to load with `error.UnsupportedVersion`; rebuild them from their
+  patterns.
+- `Program.capacity().states` counts the reversed program's extra start
+  state, and `Scratch.bytesNeeded` grew to `56N + 4D(C+1) + 4D(W+9) + 4H +
+  16W + 40` bytes (`Scratch.boundFor`); `max_dfa_states` is now 2,088,991.
+- `Regex.find`, `findAll`, `count` and the iterator end a top-level literal
+  alternation leftmost-longest outside ECMAScript (`a|ab` finds `ab`), as the
+  rest of `Regex` already did (#50).
+- Bounded repeats of a capture-free atom compile their optional copies
+  nested (`x{0,3}` as `(?:x(?:x(?:x)?)?)?`), as RE2 and Rust's regex-syntax
+  do; matches are unchanged.
+
 ## v0.3.1 - 2026-11-18
 
 - fix(program): compile repeated alternations and lazy repeats as programs (11ec9c0)
