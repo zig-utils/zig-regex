@@ -26,3 +26,6 @@ pantry
 benchmarks/rust-bench/target/
 haystack.txt
 /.zig-global-cache
+
+# Zig package cache (zig fetch)
+zig-pkg/

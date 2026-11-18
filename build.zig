@@ -554,23 +554,7 @@ pub fn build(b: *std.Build) void {
     const example_step = b.step("example", "Run the basic example");
     example_step.dependOn(&example_run.step);
 
-    // Add benchmark executable
-    const benchmark = b.addExecutable(.{
-        .name = "benchmarks",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("benchmarks/simple.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{
-                .{ .name = "regex", .module = mod },
-            },
-        }),
-    });
-    if (install_benchmarks) b.installArtifact(benchmark);
-
-    const benchmark_run = b.addRunArtifact(benchmark);
-    const benchmark_step = b.step("bench", "Run benchmarks");
-    benchmark_step.dependOn(&benchmark_run.step);
+    addBenchSuite(b, target, mod, test_step, install_benchmarks);
 
     // Add prefix optimization benchmark executable
     const prefix_bench = b.addExecutable(.{
@@ -800,4 +784,45 @@ fn addLiterals(
     bench_run.addPassthruArgs();
     const bench_step = b.step("bench-literals", "Run the multi-literal engine benchmarks");
     bench_step.dependOn(&bench_run.step);
+}
+
+/// `zig build bench`: the suite behind docs/BENCHMARKS.md (multi-literal
+/// matchers with external-process memory sampling, and byte-mode regex
+/// programs). Its zig-benchmarks dependency is lazy and only resolved when
+/// this package is the root build, so consumers never fetch it.
+fn addBenchSuite(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mod: *std.Build.Module,
+    test_step: *std.Build.Step,
+    install_benchmarks: bool,
+) void {
+    // The generators are plain std code: test them with everything else.
+    const gen_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/suite/gen.zig"),
+            .target = target,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(gen_tests).step);
+
+    const bench_step = b.step("bench", "Run the benchmark suite behind docs/BENCHMARKS.md");
+    if (!b.isRoot()) return;
+    const bench_dep = b.lazyDependency("bench", .{ .target = target, .optimize = .ReleaseFast }) orelse return;
+    const suite = b.addExecutable(.{
+        .name = "bench_suite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/suite/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+                .{ .name = "process", .module = bench_dep.module("process") },
+            },
+        }),
+    });
+    if (install_benchmarks) b.installArtifact(suite);
+    const run = b.addRunArtifact(suite);
+    run.addPassthruArgs();
+    bench_step.dependOn(&run.step);
 }

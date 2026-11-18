@@ -1,5 +1,25 @@
 # Benchmarks
 
+## The suite behind docs/BENCHMARKS.md
+
+`zig build bench` runs `benchmarks/suite/`: every multi-literal matcher (Teddy,
+Aho-Corasick dense and sparse, the Bloom prefilter at strides 1, 4 and 8) over
+literal sets of 8, 64, 1k, 100k and 400k on a text and a binary corpus, with
+build time, blob size and memory, then the byte-mode regex programs on the
+ClamAV-style and CRS-style pattern sets in `benchmarks/suite/patterns/`. It
+prints Markdown tables. Memory is sampled from outside with
+[zig-benchmarks](https://github.com/zig-utils/zig-benchmarks)' process mode
+(a lazy dependency, fetched only for this repository's own builds).
+
+```sh
+zig build bench                 # everything
+zig build bench -- literals     # one section: literals or regex
+benchmarks/pcre2/compare.sh     # the same regex patterns and corpora through PCRE2
+```
+
+`compare.sh` needs a C compiler and PCRE2 (`PCRE2_PREFIX`, pkg-config's
+`libpcre2-8`, or `pantry install`, which provisions it from `deps.yaml`).
+
 ## grep throughput vs ripgrep (issue #10)
 
 `zg` (`benchmarks/zg.zig`, built by `zig build` to `zig-out/bin/zg`) is a minimal

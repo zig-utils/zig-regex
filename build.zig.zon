@@ -1,6 +1,14 @@
 .{
     .name = .zig_regex,
     .version = "0.2.1",
+    .dependencies = .{
+        .bench = .{
+            .url = "https://registry.pantry.dev/zig/packages/zig-bench/0.2.2/tarball",
+            .hash = "zig_bench-0.2.2-FoCM-1bIAwB0KZkJao6Y2lkFFK82_jQbtZ7uGRSYewHC",
+            // Only `zig build bench` uses it, and only in this repository.
+            .lazy = true,
+        },
+    },
     .fingerprint = 0x7bcf21ebd13269a2,
     .minimum_zig_version = "0.17.0-dev.1857+3c46da14d",
     .paths = .{
