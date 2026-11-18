@@ -313,6 +313,31 @@ const hit = program.isMatch(&scratch, data) catch |err| switch (err) {
   `re.setStepBudget(n)` (default 10,000,000 steps); running out fails with
   `error.Timeout`.
 
+### Required Literal Factors (prefilters)
+
+`requiredFactors` reports literal strings every match must contain, so a
+prefilter can skip the regex entirely when none of them is in the input:
+
+```zig
+if (try regex.requiredFactors(allocator, "foo(bar|baz)qux", .{}, .{ .min_len = 3 })) |found| {
+    var f = found;
+    defer f.deinit(allocator);
+    // f.prefix = "fooba" (every match starts with it), f.suffix = "qux",
+    // f.inner = factors found elsewhere in every match.
+}
+// Same analysis for a compiled regex: try re.requiredFactors(allocator, .{}).
+```
+
+- Each `Factor` has `bytes` and `case_folded`; a folded factor is lowercase
+  and must be searched for ignoring ASCII case (from the `case_insensitive`
+  flag, `(?i:...)`, or a class such as `[Ss]`).
+- Factors are sound: every match contains them where they say. Alternation
+  keeps what its branches share (`bar|baz` contributes `ba`), and anything
+  that can repeat zero times or match an unknown character breaks a factor.
+- In byte mode the factors are raw bytes (`\x80\xff` gives those two bytes).
+- The result is null when no factor of at least `min_len` bytes (default 3)
+  exists, as for `(a|b)*`.
+
 ## CLI
 
 zig-regex includes a command-line tool:

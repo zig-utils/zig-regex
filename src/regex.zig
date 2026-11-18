@@ -11,6 +11,7 @@ const backtrack = @import("backtrack.zig");
 const dfa = @import("dfa.zig");
 const onepass = @import("onepass.zig");
 const unicode_mod = @import("unicode.zig");
+const factors = @import("factors.zig");
 
 const MAX_NFA_REPEAT_EXPANSION: usize = 10_000;
 
@@ -58,6 +59,31 @@ pub const NamedCapture = struct {
     name: []const u8,
     index: usize,
 };
+
+/// Parse `pattern` under `flags` into the tree `Regex.compileWithFlags`
+/// compiles. The caller owns the tree (`deinit`).
+pub fn parseTree(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: ?*?CompileErrorReason) !ast.AST {
+    // Byte mode has no code points, so the flags defined over them conflict.
+    if (flags.bytes and (flags.unicode or flags.unicode_sets or flags.ecmascript))
+        return RegexError.UnsupportedInBytesMode;
+    var p = try parser.Parser.initWithDiagnostic(allocator, pattern, diagnostic);
+    p.bytes = flags.bytes;
+    p.unicode_sets = flags.unicode_sets;
+    p.unicode = flags.unicode;
+    p.case_insensitive = flags.case_insensitive;
+    p.ecmascript = flags.ecmascript;
+    // The `x`, `u`, `v` and byte-mode flags affect lexing from the first
+    // token, so enable them on the lexer and re-lex the first token.
+    if (flags.extended or flags.unicode or flags.unicode_sets or flags.bytes) {
+        p.extended = flags.extended;
+        p.lexer.extended = flags.extended;
+        p.lexer.bytes = flags.bytes;
+        p.lexer.unicode_strict = flags.unicode or flags.unicode_sets;
+        p.lexer.reset();
+        p.current_token = try p.lexer.next();
+    }
+    return p.parse();
+}
 
 /// Main regex type - represents a compiled regular expression pattern
 pub const Regex = struct {
@@ -111,27 +137,7 @@ pub const Regex = struct {
     }
 
     fn compileWithFlagsInner(allocator: std.mem.Allocator, pattern: []const u8, flags: common.CompileFlags, diagnostic: ?*?CompileErrorReason) !Regex {
-        // Byte mode has no code points, so the flags defined over them conflict.
-        if (flags.bytes and (flags.unicode or flags.unicode_sets or flags.ecmascript))
-            return RegexError.UnsupportedInBytesMode;
-        // Parse the pattern into an AST
-        var p = try parser.Parser.initWithDiagnostic(allocator, pattern, diagnostic);
-        p.bytes = flags.bytes;
-        p.unicode_sets = flags.unicode_sets;
-        p.unicode = flags.unicode;
-        p.case_insensitive = flags.case_insensitive;
-        p.ecmascript = flags.ecmascript;
-        // The `x`, `u`, and `v` flags affect lexing from the first token, so
-        // enable them on the lexer and re-lex the already-fetched first token.
-        if (flags.extended or flags.unicode or flags.unicode_sets or flags.bytes) {
-            p.extended = flags.extended;
-            p.lexer.extended = flags.extended;
-            p.lexer.bytes = flags.bytes;
-            p.lexer.unicode_strict = flags.unicode or flags.unicode_sets;
-            p.lexer.reset();
-            p.current_token = try p.lexer.next();
-        }
-        var tree = try p.parse();
+        var tree = try parseTree(allocator, pattern, flags, diagnostic);
         errdefer tree.deinit(); // Free AST if compilation fails
 
         // Store owned copy of pattern
@@ -294,6 +300,12 @@ pub const Regex = struct {
             return match.captures[entry.index - 1]; // Captures are 1-indexed in the API
         }
         return null;
+    }
+
+    /// The literal strings every match must contain (see `factors`), or null
+    /// when none of at least `options.min_len` bytes exists.
+    pub fn requiredFactors(self: *const Regex, allocator: std.mem.Allocator, options: factors.Options) !?factors.Factors {
+        return factors.requiredFactors(allocator, self.pattern, self.flags, options);
     }
 
     /// Cap the work one search may do on the backtracking engine: the steps

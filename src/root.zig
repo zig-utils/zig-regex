@@ -28,6 +28,10 @@ pub const program = @import("program.zig");
 pub const Program = program.Program;
 pub const Scratch = program.Scratch;
 
+// Required literal factors for prefilters
+pub const factors = @import("factors.zig");
+pub const requiredFactors = factors.requiredFactors;
+
 // Performance and debugging
 pub const Profiler = @import("profiling.zig").Profiler;
 pub const ScopedTimer = @import("profiling.zig").ScopedTimer;
