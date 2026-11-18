@@ -10,8 +10,8 @@
 # PCRE2_PREFIX=<dir with include/ and lib/>, else pkg-config's libpcre2-8,
 # else ./pantry/pcre.org/v2 (`pantry install` provisions it from deps.yaml).
 #
-# Match counts can differ where semantics do: zig-regex programs report
-# leftmost-longest matches, PCRE2 leftmost-first ones.
+# Programs are leftmost-first, as PCRE2 is, so match counts agree;
+# MATCH_KIND=longest measures leftmost-longest programs instead.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -56,7 +56,7 @@ for set in clamav:binary crs:http; do
   patterns="benchmarks/suite/patterns/$name.txt"
   corpus="$work/$name.corpus"
   "$suite" gen "$patterns" "$kind" "$corpus"
-  "$suite" regex-file "$patterns" "$corpus" >"$work/$name.zig.tsv"
+  "$suite" regex-file "$patterns" "$corpus" "${MATCH_KIND:-first}" >"$work/$name.zig.tsv"
   "$work/pcre2_bench" "$patterns" "$corpus" jit >"$work/$name.jit.tsv"
   "$work/pcre2_bench" "$patterns" "$corpus" interp >"$work/$name.interp.tsv"
 

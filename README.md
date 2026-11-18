@@ -271,17 +271,38 @@ _ = n;
 - Programs cover every pattern the Thompson engine runs. Patterns that need
   the backtracking engine (backreferences, general lookaround, scoped inline
   modifiers, Unicode property escapes) and ECMAScript mode return
-  `error.UnsupportedByProgram`. `Program.compile` builds lazy repeats and
-  repeated alternations (`(?:\x90|\xcc){4,}`, `a.+?b`) like their greedy
-  forms: they only change which match end a backtracker reports, and program
-  ends are leftmost-longest anyway.
-- Results are spans without capture groups. Match ends follow the Thompson
-  engine (the leftmost match, extended as far as possible), and `Regex.find`
-  agrees on every path, its literal-alternation fast path included (`a|ab`
-  finds `ab`).
+  `error.UnsupportedByProgram`. `Program.compile` drops capture groups and
+  keeps lazy repeats and repeated alternations (`(?:\x90|\xcc){4,}`,
+  `a.+?b`) on the linear engines.
+- Results are spans without capture groups. Every match is the leftmost one;
+  where it ends depends on the program's match kind, chosen when it is built
+  and kept by `bytes()`/`load()`:
+
+  ```zig
+  // PCRE2, Perl and YARA semantics: alternatives in order, greedy and lazy
+  // repeats honoured (`a|ab` matches `a`, `a+?` one `a`).
+  var pcre_like = try regex.Program.compileWithOptions(allocator, pattern, .{ .bytes = true }, .{ .match_kind = .leftmost_first });
+  _ = pcre_like.matchKind(); // .leftmost_first
+  ```
+
+  The default, `.leftmost_longest`, extends the leftmost match as far as
+  possible, as `Regex.find` does on the Thompson engines (on every path, its
+  literal-alternation fast path included: `a|ab` finds `ab`).
+  `fromRegexWithOptions` takes the same options. Leftmost-first programs agree
+  with PCRE2 on 99.99% of randomly generated patterns; the rest are repeated
+  groups whose iterations can match empty (see docs/BENCHMARKS.md).
 - One scratch can serve several programs: size it with
   `Scratch.initCapacity(allocator, a.capacity().max(b.capacity()))`. A
   program larger than the scratch returns `error.ScratchTooSmall`.
+- A search runs forwards to the end of the leftmost match on a lazy DFA whose
+  states are priority-ordered thread lists, then backwards over a reversed
+  copy of the program to its start, so `find`, `count` and the iterator are
+  linear in the input. While no thread is alive the forward scan skips to the
+  next possible match start: a vector search for the rarest of the first 16
+  bytes of every match when that byte has at most 3 values (ASCII
+  case-insensitive literals included), else a nibble-table search of the
+  first-byte set. This works with assertions too, so `\b` and `^` patterns
+  skip like any other.
 - When a pattern's DFA outgrows the scratch's state cache, the cache resets
   and that call finishes on an NFA simulation of the same program, still in
   time linear in the input.
@@ -303,12 +324,14 @@ const hit = program.isMatch(&scratch, data) catch |err| switch (err) {
 ```
 
 - `Scratch.bytesNeeded(capacity)` is the exact size and is fixed when the
-  scratch is made. For N program states, C byte classes and a cap of D DFA
-  states it is at most `36N + 4D(C+1) + 4D(W+1) + 4H + 12W + 8` bytes, with
+  scratch is made. For N states (`capacity.states`, which counts the reversed
+  program's extra start state), C byte classes and a cap of D DFA states it is
+  at most `56N + 4D(C+1) + 4D(W+9) + 4H + 16W + 40` bytes, with
   `W = ceil(N/32)` and `H` the smallest power of two that is at least 16 and
   at least `2D` (`Scratch.boundFor`). With `D = 256` that is at most
-  `36N + 1024(C + W + 2) + 12W + 2056` bytes.
-- A step is one input byte the DFA reads or skips, or one unit of NFA work.
+  `56N + 1024(C + W + 10) + 16W + 2088` bytes.
+- A step is one input byte a DFA reads (forwards or backwards) or skips, or
+  one unit of NFA work.
   The budget applies to each `isMatch`, `find` and `findFrom`, and to each
   match an iterator, `findAll` or `count` looks for. `scratch.steps` reports
   what the last search used, never more than the budget.
@@ -334,10 +357,13 @@ _ = try loaded.isMatch(&scratch, data);
 
 `Program.load` checks the header, the version, the checksum and every
 structural invariant matching relies on (section layout, edge ranges and
-targets, byte-set indices, the byte-class map) and fails with
-`error.Truncated`, `BadMagic`, `UnsupportedVersion`, `ChecksumMismatch` or
-`InvalidProgram`, never with a fault. A loaded program borrows its bytes:
-they must outlive it and stay unchanged.
+targets in both directions, byte-set indices, the byte-class map, the
+prefilter fields) and fails with `error.Truncated`, `BadMagic`,
+`UnsupportedVersion`, `ChecksumMismatch` or `InvalidProgram`, never with a
+fault. A loaded program borrows its bytes: they must outlive it and stay
+unchanged. The layout is version 2 (`program.format_version`); blobs written
+by 0.3.x are version 1 and fail with `error.UnsupportedVersion`, so rebuild
+stored programs from their patterns.
 
 ### Required Literal Factors (prefilters)
 

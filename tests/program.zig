@@ -358,6 +358,227 @@ test "program: repeated alternations and lazy repeats compile for spans" {
     defer nested.deinit(testing.allocator);
 }
 
+/// The leftmost-first engine of record: the NFA VM's priority-ordered
+/// simulation, run at each start in turn.
+fn vmFirstFrom(machine: *regex.vm.VM, input: []const u8, from: usize) !?[2]usize {
+    var pos = from;
+    while (pos <= input.len) : (pos += 1) {
+        if (try machine.matchAtLeftmostFirst(input, pos)) |result| {
+            var owned = result;
+            defer owned.deinit(testing.allocator);
+            return .{ result.start, result.end };
+        }
+    }
+    return null;
+}
+
+/// The `g`-style matches of a leftmost-first program against the VM's: find,
+/// every iterator match, count and findFrom, on a DFA scratch, an NFA-only
+/// scratch, a two-state DFA (which overflows into the NFA at once) and a
+/// round-tripped copy, all without allocating.
+fn compareFirst(pattern: []const u8, flags: CompileFlags, inputs: []const []const u8) !Outcome {
+    var re = Regex.compileWithoutCaptures(testing.allocator, pattern, flags) catch return .invalid;
+    defer re.deinit();
+    var freezer = Freezer.init();
+    var program = Program.fromRegexWithOptions(freezer.allocator(), &re, .{ .match_kind = .leftmost_first }) catch |err| switch (err) {
+        error.UnsupportedByProgram => return .unsupported,
+        else => return err,
+    };
+    defer program.deinit(freezer.allocator());
+    const loaded = try Program.load(program.bytes());
+    try testing.expectEqual(regex.program.MatchKind.leftmost_first, loaded.matchKind());
+    var capacities = [_]regex.program.Capacity{ program.capacity(), program.capacity(), program.capacity() };
+    capacities[1].dfa_states = 0;
+    capacities[2].dfa_states = 2;
+    var scratches: [3]Scratch = undefined;
+    for (&scratches, capacities) |*s, c| s.* = try Scratch.initCapacity(freezer.allocator(), c);
+    defer for (&scratches) |*s| s.deinit(freezer.allocator());
+    var machine = regex.vm.VM.init(testing.allocator, &re.nfa, re.capture_count, re.flags);
+    defer machine.deinit();
+
+    for (inputs) |input| {
+        var want_all: [64][2]usize = undefined;
+        var want_count: usize = 0;
+        var pos: usize = 0;
+        while (pos <= input.len) {
+            const m = (try vmFirstFrom(&machine, input, pos)) orelse break;
+            want_all[want_count] = m;
+            want_count += 1;
+            pos = if (m[1] > m[0]) m[1] else m[1] + 1;
+        }
+        var froms: [3]usize = .{ 1, input.len / 2, input.len };
+        var want_from: [3]?[2]usize = undefined;
+        for (&froms, &want_from) |*from, *want| {
+            from.* = @min(from.*, input.len);
+            want.* = try vmFirstFrom(&machine, input, from.*);
+        }
+
+        errdefer std.debug.print("leftmost-first pattern \"{s}\" flags {any} input {any}\n", .{ pattern, flags, input });
+        for (&scratches, 0..) |*scratch, which| {
+            const p = if (which == 0) &loaded else &program;
+            freezer.freeze();
+            const got_match = try p.isMatch(scratch, input);
+            var got_all: [64]Span = undefined;
+            const got_count = try p.findAll(scratch, input, &got_all);
+            const counted = try p.count(scratch, input);
+            var got_from: [3]?Span = undefined;
+            for (froms, &got_from) |from, *got| got.* = try p.findFrom(scratch, input, from);
+            try freezer.thaw();
+            try testing.expectEqual(want_count > 0, got_match);
+            try testing.expectEqual(want_count, got_count);
+            try testing.expectEqual(want_count, counted);
+            for (want_all[0..want_count], got_all[0..got_count]) |w, g| try expectSpan(w, g);
+            for (want_from, got_from) |w, g| try expectSpan(w, g);
+        }
+    }
+    return .compared;
+}
+
+test "program: leftmost-first ends follow alternation order and lazy repeats" {
+    const Case = struct { pattern: []const u8, flags: CompileFlags = .{}, input: []const u8, first: ?[2]usize, longest: ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "a|ab", .input = "xab", .first = .{ 1, 2 }, .longest = .{ 1, 3 } },
+        .{ .pattern = "ab|a", .input = "xab", .first = .{ 1, 3 }, .longest = .{ 1, 3 } },
+        .{ .pattern = "(?:foo|foobar)baz", .input = "foobarbaz", .first = .{ 0, 9 }, .longest = .{ 0, 9 } },
+        .{ .pattern = "a+?", .input = "baaa", .first = .{ 1, 2 }, .longest = .{ 1, 4 } },
+        .{ .pattern = "a*?", .input = "aaa", .first = .{ 0, 0 }, .longest = .{ 0, 3 } },
+        .{ .pattern = "a{2,4}?", .input = "aaaaa", .first = .{ 0, 2 }, .longest = .{ 0, 4 } },
+        .{ .pattern = ".*?b", .input = "aabab", .first = .{ 0, 3 }, .longest = .{ 0, 5 } },
+        .{ .pattern = "<script.+?>", .flags = .{ .case_insensitive = true }, .input = "<p><SCRIPT src=x>y>", .first = .{ 3, 17 }, .longest = .{ 3, 19 } },
+        .{ .pattern = "(?:\\x90|\\xcc){4,}?", .flags = .{ .bytes = true }, .input = "MZ\x90\xcc\x90\x90\xcc!", .first = .{ 2, 6 }, .longest = .{ 2, 7 } },
+        .{ .pattern = "(?:ab|a)(?:bc)?", .input = "abc", .first = .{ 0, 2 }, .longest = .{ 0, 3 } },
+        .{ .pattern = "\\b\\w+?\\b", .input = "hello world", .first = .{ 0, 5 }, .longest = .{ 0, 5 } },
+        .{ .pattern = "(?:a|ab)*c", .input = "ababc", .first = .{ 0, 5 }, .longest = .{ 0, 5 } },
+        .{ .pattern = "x(?:a|b)??y", .input = "xay xy", .first = .{ 0, 3 }, .longest = .{ 0, 3 } },
+        .{ .pattern = "(?:a|b)??", .input = "ab", .first = .{ 0, 0 }, .longest = .{ 0, 1 } },
+        .{ .pattern = "[\\x20-\\x7e]{6,}\\.(?:exe|dll|scr)\\x00", .flags = .{ .bytes = true }, .input = "\x01run svchost32.exe\x00!", .first = .{ 1, 19 }, .longest = .{ 1, 19 } },
+        .{ .pattern = "q", .input = "abc", .first = null, .longest = null },
+    };
+    for (cases) |c| {
+        for ([_]regex.program.MatchKind{ .leftmost_first, .leftmost_longest }) |kind| {
+            var program = try Program.compileWithOptions(testing.allocator, c.pattern, c.flags, .{ .match_kind = kind });
+            defer program.deinit(testing.allocator);
+            var scratch = try Scratch.init(testing.allocator, &program);
+            defer scratch.deinit(testing.allocator);
+            const want = if (kind == .leftmost_first) c.first else c.longest;
+            errdefer std.debug.print("{s} ({t}) on {any}\n", .{ c.pattern, kind, c.input });
+            try expectSpan(want, try program.find(&scratch, c.input));
+        }
+    }
+}
+
+// Random patterns with lazy quantifiers and alternations, as leftmost-first
+// programs, against the VM's leftmost-first simulation.
+fn genFirstAtom(random: std.Random, buf: []u8, len: *usize, depth: usize) void {
+    const atoms = [_][]const u8{ "a", "b", "c", "A", ".", "[ab]", "[^a]", "\\w", "\\d", "\\s", "\\xff", "x", "ab", "ba" };
+    const assertions = [_][]const u8{ "^", "$", "\\b", "\\B", "\\A", "\\z" };
+    const choice = random.uintLessThan(u8, 9);
+    if (choice <= 1 and depth < 3) {
+        append(buf, len, "(?:");
+        genFirstAlt(random, buf, len, depth + 1);
+        append(buf, len, ")");
+    } else if (choice == 2) {
+        append(buf, len, assertions[random.uintLessThan(usize, assertions.len)]);
+        return;
+    } else {
+        append(buf, len, atoms[random.uintLessThan(usize, atoms.len)]);
+    }
+    const quants = [_][]const u8{ "", "", "*", "+", "?", "{2}", "{1,3}", "{0,2}", "{2,}" };
+    const q = quants[random.uintLessThan(usize, quants.len)];
+    append(buf, len, q);
+    if (q.len > 0 and random.boolean()) append(buf, len, "?");
+}
+
+fn genFirstSeq(random: std.Random, buf: []u8, len: *usize, depth: usize) void {
+    const n = random.intRangeAtMost(usize, 1, 3);
+    var i: usize = 0;
+    while (i < n) : (i += 1) genFirstAtom(random, buf, len, depth);
+}
+
+fn genFirstAlt(random: std.Random, buf: []u8, len: *usize, depth: usize) void {
+    genFirstSeq(random, buf, len, depth);
+    while (random.uintLessThan(u8, 3) == 0) {
+        append(buf, len, "|");
+        genFirstSeq(random, buf, len, depth);
+    }
+}
+
+test "program: random leftmost-first programs match the priority VM" {
+    var prng = std.Random.DefaultPrng.init(0x1EF7_F125);
+    const random = prng.random();
+    const alphabet = "aabbcAx1 \n\xff_";
+    var compared: usize = 0;
+    var iteration: usize = 0;
+    while (iteration < 500) : (iteration += 1) {
+        var pattern: [96]u8 = undefined;
+        var plen: usize = 0;
+        genFirstAlt(random, &pattern, &plen, 0);
+        var inputs: [5][]const u8 = undefined;
+        var storage: [5][16]u8 = undefined;
+        for (&inputs, &storage) |*input, *buf| {
+            const n = random.uintAtMost(usize, buf.len);
+            for (buf[0..n]) |*c| c.* = alphabet[random.uintLessThan(usize, alphabet.len)];
+            input.* = buf[0..n];
+        }
+        const flags = flag_sets[random.uintLessThan(usize, flag_sets.len)];
+        if (try compareFirst(pattern[0..plen], flags, &inputs) == .compared) compared += 1;
+    }
+    try testing.expect(compared > 400);
+}
+
+test "program: corpus as leftmost-first programs matches the priority VM" {
+    var compared: usize = 0;
+    for (corpus_patterns) |pattern| {
+        for (flag_sets) |flags| {
+            if (try compareFirst(pattern, flags, &corpus_inputs) == .compared) compared += 1;
+        }
+    }
+    try testing.expect(compared > corpus_patterns.len * flag_sets.len * 3 / 4);
+}
+
+// Cases from benchmarks/pcre2/diff.sh with the spans PCRE2 reported for
+// them, so CI checks leftmost-first agreement with PCRE2 without PCRE2.
+test "program: leftmost-first programs agree with PCRE2 on recorded cases" {
+    const data = @embedFile("testdata/pcre2_leftmost_first.tsv");
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    var checked: usize = 0;
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(testing.allocator);
+    while (lines.next()) |line| {
+        if (line.len == 0 or line[0] == '#') continue;
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        const flag_text = fields.next().?;
+        const pattern_hex = fields.next().?;
+        const subject_hex = fields.next().?;
+        const want = fields.rest();
+        var pattern_buf: [256]u8 = undefined;
+        var subject_buf: [128]u8 = undefined;
+        const pattern = try std.fmt.hexToBytes(&pattern_buf, pattern_hex);
+        const subject = try std.fmt.hexToBytes(&subject_buf, subject_hex);
+        var flags: CompileFlags = .{ .bytes = true };
+        for (flag_text) |f| switch (f) {
+            'i' => flags.case_insensitive = true,
+            'm' => flags.multiline = true,
+            's' => flags.dot_all = true,
+            else => {},
+        };
+        var program = try Program.compileWithOptions(testing.allocator, pattern, flags, .{ .match_kind = .leftmost_first });
+        defer program.deinit(testing.allocator);
+        var scratch = try Scratch.init(testing.allocator, &program);
+        defer scratch.deinit(testing.allocator);
+        got.clearRetainingCapacity();
+        var it = program.iterator(&scratch, subject);
+        while (try it.next()) |m| {
+            if (got.items.len > 0) try got.append(testing.allocator, ' ');
+            try got.print(testing.allocator, "{d} {d}", .{ m.start, m.end });
+        }
+        errdefer std.debug.print("pattern \"{s}\" flags {s} subject {any}\n", .{ pattern, flag_text, subject });
+        try testing.expectEqualStrings(want, got.items);
+        checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 1000), checked);
+}
+
 test "program: the NFA fallback agrees with the DFA" {
     const patterns = [_][]const u8{ "[ab]*a[ab]{6}", "x[abcdef]*y", "\\bfoo\\b", "^\\w+$", "(foo|foobar)baz", "a{2,4}", "(?:ab)+e|cde" };
     const inputs = [_][]const u8{ "abababbbaabababa", "xay xbcy xdefy xbcbcy", "foo foobar foo", "line1\nline2", "foobarbaz foobaz", "aaaaa", "ababcde" };
@@ -496,11 +717,12 @@ test "limits: a 256-state cap keeps scratch memory under the documented bound" {
         const capacity = withDfaStates(&program, 256);
         const need = Scratch.bytesNeeded(capacity);
         try testing.expect(need <= Scratch.boundFor(capacity));
-        // The bound written out for D = 256 in the Scratch docs.
-        const n: usize = program.state_count;
+        // The bound written out for D = 256 in the Scratch docs, for N
+        // states (the reversed program's start included) and C classes.
+        const n: usize = capacity.states;
         const c: usize = program.class_count;
         const w = (n + 31) / 32;
-        try testing.expect(need <= 36 * n + 1024 * (c + w + 2) + 12 * w + 2056);
+        try testing.expect(need <= 56 * n + 1024 * (c + w + 10) + 16 * w + 2088);
     }
 }
 
@@ -771,8 +993,10 @@ test "serialise: corrupted blobs fail cleanly (randomised)" {
         }
     }
     // Some damage leaves a valid program (a flipped accepting bit, another
-    // in-range edge target), which then has to match without faulting.
-    try testing.expect(loaded > 100);
+    // in-range edge target), which then has to match without faulting. Most
+    // of the program blob is checked structure (both directions' edges, the
+    // class map against every byte set), so about 1 in 120 mutations loads.
+    try testing.expect(loaded > 60);
 }
 
 fn fuzzLoad(_: void, smith: *std.testing.Smith) anyerror!void {

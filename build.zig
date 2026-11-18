@@ -572,6 +572,22 @@ pub fn build(b: *std.Build) void {
     const basic_bench_step = b.step("bench-basic", "Run Regex API micro-benchmarks");
     basic_bench_step.dependOn(&b.addRunArtifact(basic_bench).step);
 
+    // The zig-regex half of benchmarks/pcre2/diff.sh (leftmost-first
+    // programs against PCRE2). ReleaseSafe: a differential run should trip
+    // safety checks, not skip them.
+    const pcre2_diff = b.addExecutable(.{
+        .name = "pcre2_diff",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/pcre2/diff.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    if (install_benchmarks) b.installArtifact(pcre2_diff);
+
     // Add prefix optimization benchmark executable
     const prefix_bench = b.addExecutable(.{
         .name = "prefix_benchmarks",

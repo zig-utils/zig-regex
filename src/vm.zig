@@ -212,14 +212,17 @@ pub const VM = struct {
 
     /// ECMAScript semantics: the match and captures of the highest-priority
     /// path, as the spec's backtracking order would find them (leftmost-first;
-    /// 22.2.2.3 MatchTwoAlternatives, 22.2.2.3.1 RepeatMatcher). A Pike VM:
+    /// 22.2.2.3 MatchTwoAlternatives, 22.2.2.3.1 RepeatMatcher). For an NFA
+    /// compiled without `ecmascript` it is the plain leftmost-first rule of a
+    /// backtracking engine (no RepeatMatcher empty-iteration rule), which
+    /// leftmost-first programs are tested against. A Pike VM:
     /// each step's threads are kept in priority order, each thread's closure
     /// is explored depth-first in transition order (the compiler emits the
     /// preferred edge first), a state belongs to the first path that reaches it
     /// in a step, and once a thread accepts every lower-priority thread is
     /// dropped. Only higher-priority threads keep running, so a later accept
     /// always outranks the one it replaces.
-    fn matchAtLeftmostFirst(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
+    pub fn matchAtLeftmostFirst(self: *VM, input: []const u8, start_pos: usize) !?MatchResult {
         var current_threads = self.cur_threads;
         var next_threads = self.nxt_threads;
         defer {

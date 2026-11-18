@@ -505,9 +505,9 @@ const RegexRow = struct {
     err: ?anyerror = null,
 };
 
-fn runPattern(gpa: std.mem.Allocator, io: Io, line: gen.PatternLine, hay: []const u8) !RegexRow {
+fn runPattern(gpa: std.mem.Allocator, io: Io, line: gen.PatternLine, hay: []const u8, kind: regex.program.MatchKind) !RegexRow {
     var row: RegexRow = .{ .name = line.name };
-    var program = regex.Program.compile(gpa, line.pattern, regexFlags(line)) catch |err| {
+    var program = regex.Program.compileWithOptions(gpa, line.pattern, regexFlags(line), .{ .match_kind = kind }) catch |err| {
         row.err = err;
         return row;
     };
@@ -537,7 +537,7 @@ fn regexTable(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, title: []const u8, 
     var total_ns: u64 = 0;
     for (lines) |line| {
         std.debug.print("  regex {s}\n", .{line.name});
-        const row = try runPattern(gpa, io, line, hay);
+        const row = try runPattern(gpa, io, line, hay, .leftmost_first);
         if (row.err) |err| {
             try w.print("| `{s}` | {t} | | | |\n", .{ row.name, err });
             continue;
@@ -559,7 +559,7 @@ fn regexSection(gpa: std.mem.Allocator, io: Io, w: *Io.Writer) !void {
     try w.print(
         \\## Byte-mode regex programs
         \\
-        \\Each pattern is compiled with `CompileFlags.bytes` into a `Program` and counts
+        \\Each pattern is compiled with `CompileFlags.bytes` into a leftmost-first `Program` and counts
         \\its non-overlapping matches over a {d} MiB corpus with one `Scratch` (default
         \\DFA cap). Each pattern's sample match is planted about every {d} bytes, cycling
         \\through the file. Program and Scratch are the serialised program and the
@@ -588,10 +588,12 @@ fn genMain(gpa: std.mem.Allocator, io: Io, args: []const []const u8) !void {
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = hay });
 }
 
-/// `regex-file <patterns.txt> <corpus>`: one TSV row per pattern:
-/// name, matches, best pass in ns, corpus bytes, program bytes.
+/// `regex-file <patterns.txt> <corpus> [first|longest]`: one TSV row per
+/// pattern: name, matches, best pass in ns, corpus bytes, program bytes.
+/// Programs are leftmost-first (PCRE2's semantics) unless `longest` is given.
 fn regexFileMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []const u8) !void {
-    if (args.len != 2) return error.BadArguments;
+    if (args.len != 2 and args.len != 3) return error.BadArguments;
+    const kind: regex.program.MatchKind = if (args.len == 3 and std.mem.eql(u8, args[2], "longest")) .leftmost_longest else .leftmost_first;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -599,7 +601,7 @@ fn regexFileMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []
     const hay = try Io.Dir.cwd().readFileAlloc(io, args[1], gpa, .unlimited);
     defer gpa.free(hay);
     for (try gen.parsePatternFile(arena, text)) |line| {
-        const row = try runPattern(gpa, io, line, hay);
+        const row = try runPattern(gpa, io, line, hay, kind);
         if (row.err) |err| {
             try w.print("{s}\terror:{t}\t0\t{d}\t0\n", .{ row.name, err, hay.len });
         } else {
