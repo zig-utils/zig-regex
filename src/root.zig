@@ -76,6 +76,9 @@ pub const RiskLevel = @import("pattern_analyzer.zig").RiskLevel;
 pub const analyzePattern = @import("pattern_analyzer.zig").analyzePattern;
 pub const analyzeAndValidate = @import("pattern_analyzer.zig").analyzeAndValidate;
 
+// Multi-literal search (Teddy, Aho-Corasick, sampled Bloom prefilter)
+pub const literals = @import("literals/root.zig");
+
 // C FFI
 pub const c_api = @import("c_api.zig");
 

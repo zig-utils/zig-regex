@@ -172,6 +172,28 @@ var regex = try Regex.compileWithFlags(allocator, "^hello", .{
 defer regex.deinit();
 ```
 
+### Multi-literal search
+
+`regex.literals` holds the engines for searching many fixed byte strings at
+once, shared by zig-anti-virus and zig-waf. Patterns may contain any bytes,
+0x00 and 0xff included, and every match reports the pattern's `id`. Each
+engine is built into a relocatable little-endian blob: write `owned.bytes` to
+disk, mmap it later and `load` it in place. Searching never allocates.
+
+```zig
+const lit = @import("regex").literals;
+
+const patterns = [_]lit.Pattern{
+    .{ .bytes = "select", .id = 1 },
+    .{ .bytes = "\x00\xffMZ", .id = 2 },
+};
+
+// Teddy: SIMD search for up to 64 literals.
+var teddy = try lit.Teddy.build(allocator, &patterns, .{ .ascii_case_insensitive = true });
+defer teddy.deinit(allocator);
+if (teddy.view.find(haystack, 0)) |m| std.debug.print("{d} at {d}..{d}\n", .{ m.pattern, m.start, m.end });
+```
+
 ## CLI
 
 zig-regex includes a command-line tool:

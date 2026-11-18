@@ -1,0 +1,198 @@
+//! Throughput benchmarks for the multi-literal engines in src/literals.
+//!
+//!   zig build bench-literals                 run every benchmark
+//!   zig build bench-literals -- teddy        run one group (teddy)
+//!
+//! Haystacks are deterministic (xorshift), so numbers compare across runs and
+//! machines. Each case reports the best of several timed passes in GB/s
+//! (10^9 bytes per second).
+
+const std = @import("std");
+const builtin = @import("builtin");
+const lit = @import("regex").literals;
+
+const Pattern = lit.Pattern;
+const Match = lit.Match;
+
+extern "c" fn memmem(big: [*]const u8, big_len: usize, little: [*]const u8, little_len: usize) ?[*]const u8;
+
+fn monotonicNs() u64 {
+    const clk: std.c.clockid_t = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => .UPTIME_RAW,
+        else => .MONOTONIC,
+    };
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(clk, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+const Rng = struct {
+    s: u64,
+    fn next(self: *Rng) u64 {
+        self.s ^= self.s << 13;
+        self.s ^= self.s >> 7;
+        self.s ^= self.s << 17;
+        return self.s;
+    }
+};
+
+const words = [_][]const u8{
+    "the",   "of",    "and",    "to",     "in",      "a",      "is",      "that",  "for",
+    "it",    "as",    "was",    "with",   "be",      "by",     "on",      "not",   "he",
+    "this",  "are",   "or",     "his",    "from",    "at",     "which",   "but",   "have",
+    "an",    "had",   "they",   "you",    "were",    "their",  "one",     "all",   "we",
+    "can",   "her",   "has",    "there",  "been",    "if",     "more",    "when",  "will",
+    "would", "who",   "so",     "no",     "she",     "other",  "its",     "may",   "these",
+    "about", "them",  "than",   "some",   "time",    "into",   "only",    "do",    "could",
+    "new",   "after", "first",  "also",   "made",    "two",    "like",    "over",  "such",
+    "most",  "where", "people", "before", "through", "should", "between", "under", "never",
+};
+
+fn randomBytes(gpa: std.mem.Allocator, len: usize, seed: u64) ![]u8 {
+    const buf = try gpa.alloc(u8, len);
+    var r: Rng = .{ .s = seed };
+    var i: usize = 0;
+    while (i + 8 <= len) : (i += 8) std.mem.writeInt(u64, buf[i..][0..8], r.next(), .little);
+    while (i < len) : (i += 1) buf[i] = @truncate(r.next());
+    return buf;
+}
+
+/// Words drawn from `words`, with one of `plants` (if any) about every 2 KiB.
+fn englishText(gpa: std.mem.Allocator, len: usize, seed: u64, plants: []const []const u8) ![]u8 {
+    const buf = try gpa.alloc(u8, len);
+    var r: Rng = .{ .s = seed };
+    var i: usize = 0;
+    while (i < len) {
+        const w = if (plants.len > 0 and r.next() % 400 == 0)
+            plants[r.next() % plants.len]
+        else
+            words[r.next() % words.len];
+        for (w) |c| {
+            if (i == len) break;
+            buf[i] = c;
+            i += 1;
+        }
+        if (i < len) {
+            buf[i] = if (r.next() % 12 == 0) '\n' else ' ';
+            i += 1;
+        }
+    }
+    return buf;
+}
+
+/// Run `f` until about 0.3 s have passed and return the best GB/s.
+fn measure(bytes: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx)) usize) struct { gbps: f64, result: usize } {
+    var best: u64 = std.math.maxInt(u64);
+    var result: usize = 0;
+    const start = monotonicNs();
+    var passes: usize = 0;
+    while (passes < 3 or monotonicNs() - start < 300_000_000) : (passes += 1) {
+        const t0 = monotonicNs();
+        result = f(ctx);
+        const dt = monotonicNs() - t0;
+        best = @min(best, dt);
+        std.mem.doNotOptimizeAway(result);
+    }
+    return .{ .gbps = @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(@max(best, 1))), .result = result };
+}
+
+fn report(name: []const u8, bytes: usize, gbps: f64, result: usize) void {
+    std.debug.print("  {s:<60} {d:>8.2} GB/s  ({d} MiB, result {d})\n", .{ name, gbps, bytes >> 20, result });
+}
+
+// ---------------------------------------------------------------- Teddy
+
+const TeddyCase = struct {
+    t: *const lit.Teddy,
+    hay: []const u8,
+    pats: []const Pattern,
+
+    fn countScan(c: *const TeddyCase) usize {
+        var n: usize = 0;
+        _ = c.t.scan(c.hay, &n, struct {
+            fn on(k: *usize, _: Match) bool {
+                k.* += 1;
+                return true;
+            }
+        }.on);
+        return n;
+    }
+
+    fn countFind(c: *const TeddyCase) usize {
+        var n: usize = 0;
+        var from: usize = 0;
+        while (c.t.find(c.hay, from)) |m| : (n += 1) from = m.start + 1;
+        return n;
+    }
+
+    /// The baseline: one libc memmem pass per pattern.
+    fn countMemmem(c: *const TeddyCase) usize {
+        var n: usize = 0;
+        for (c.pats) |p| {
+            var from: usize = 0;
+            while (from < c.hay.len) : (n += 1) {
+                const hit = memmem(c.hay.ptr + from, c.hay.len - from, p.bytes.ptr, p.bytes.len) orelse break;
+                from = @intFromPtr(hit) - @intFromPtr(c.hay.ptr) + 1;
+            }
+        }
+        return n;
+    }
+};
+
+fn benchTeddy(gpa: std.mem.Allocator) !void {
+    std.debug.print("teddy\n", .{});
+    const size = 16 << 20;
+    const rand = try randomBytes(gpa, size, 0x1234567);
+    defer gpa.free(rand);
+    const names = [_][]const u8{ "Sherlock", "Holmes", "Watson", "Moriarty", "Lestrade", "Hudson", "Adler", "Baskerville" };
+    const text = try englishText(gpa, size, 0x7654321, &names);
+    defer gpa.free(text);
+
+    var pats8: [8]Pattern = undefined;
+    for (names, 0..) |s, i| pats8[i] = .{ .bytes = s, .id = @intCast(i) };
+
+    var pats_bin: [8]Pattern = undefined;
+    const bin_store = try randomBytes(gpa, 8 * 6, 99);
+    defer gpa.free(bin_store);
+    for (0..8) |i| pats_bin[i] = .{ .bytes = bin_store[i * 6 ..][0..6], .id = @intCast(i) };
+
+    var pats32: [32]Pattern = undefined;
+    for (0..32) |i| pats32[i] = .{ .bytes = bin_store[(i % 8) * 6 ..][0 .. 3 + i % 4], .id = @intCast(i) };
+
+    const Set = struct { name: []const u8, pats: []const Pattern, nocase: bool };
+    const sets = [_]Set{
+        .{ .name = "8 words", .pats = &pats8, .nocase = false },
+        .{ .name = "8 words nocase", .pats = &pats8, .nocase = true },
+        .{ .name = "8 binary", .pats = &pats_bin, .nocase = false },
+        .{ .name = "32 binary", .pats = &pats32, .nocase = false },
+    };
+    const Hay = struct { name: []const u8, bytes: []const u8 };
+    const hays = [_]Hay{ .{ .name = "random", .bytes = rand }, .{ .name = "text", .bytes = text } };
+
+    var buf: [128]u8 = undefined;
+    for (sets) |set| {
+        var t = try lit.Teddy.build(gpa, set.pats, .{ .ascii_case_insensitive = set.nocase });
+        defer t.deinit(gpa);
+        for (hays) |h| {
+            const c: TeddyCase = .{ .t = &t.view, .hay = h.bytes, .pats = set.pats };
+            const s = measure(h.bytes.len, &c, TeddyCase.countScan);
+            report(try std.fmt.bufPrint(&buf, "{s}, {s}, scan", .{ set.name, h.name }), h.bytes.len, s.gbps, s.result);
+            const f = measure(h.bytes.len, &c, TeddyCase.countFind);
+            report(try std.fmt.bufPrint(&buf, "{s}, {s}, find loop", .{ set.name, h.name }), h.bytes.len, f.gbps, f.result);
+            if (!set.nocase) {
+                const m = measure(h.bytes.len, &c, TeddyCase.countMemmem);
+                report(try std.fmt.bufPrint(&buf, "{s}, {s}, naive multi-memmem", .{ set.name, h.name }), h.bytes.len, m.gbps, m.result);
+            }
+        }
+    }
+}
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = std.heap.c_allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const args = try init.minimal.args.toSlice(arena_state.allocator());
+    const only: ?[]const u8 = if (args.len >= 2) args[1] else null;
+    std.debug.print("literals benchmarks ({s}, {s})\n", .{ @tagName(builtin.cpu.arch), builtin.cpu.model.name });
+    if (only == null or std.mem.eql(u8, only.?, "teddy")) try benchTeddy(gpa);
+}

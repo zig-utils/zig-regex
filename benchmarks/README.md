@@ -183,3 +183,33 @@ Capture patterns *outside* the one-pass shape (alternation, overlapping
 boundaries, nullable atoms) still use the NFA. A general tagged/one-pass DFA
 would cover those. Beyond that: **Teddy-style SIMD multi-literal prefilters** and
 a zero-allocation `findAll`-style iterator.
+
+## Multi-literal engines (`src/literals`)
+
+`benchmarks/literals.zig` measures the engines shared by zig-anti-virus and
+zig-waf. Haystacks are 16 MiB and deterministic: `random` is xorshift bytes,
+`text` is words from a small English list with a pattern planted about every
+2 KiB. Each figure is the best pass in GB/s (10^9 bytes per second).
+
+```sh
+zig build bench-literals            # everything
+zig build bench-literals -- teddy   # one group: teddy
+```
+
+### Teddy (Apple M3 Pro, Zig 0.17.0-dev.1857, ReleaseFast)
+
+| Patterns | Haystack | `scan` | `find` loop | libc `memmem` per pattern |
+|---|---|---|---|---|
+| 8 words | random | 11.9 | 11.9 | 0.20 |
+| 8 words | text | 10.9 | 10.2 | 0.21 |
+| 8 words, ASCII nocase | random | 11.9 | 11.9 | |
+| 8 words, ASCII nocase | text | 5.4 | 5.5 | |
+| 8 binary (6 bytes) | random | 11.9 | 11.9 | 0.10 |
+| 32 binary (3 to 6 bytes) | random | 11.9 | 11.9 | 0.04 |
+
+The scan does 32 positions per step with `tbl` on aarch64 (`vpshufb` on AVX2,
+`pshufb` on SSSE3) and is compute bound at about 3 bytes per cycle. The nocase
+text case is slower because the folded fingerprint of `Sherlock` is `she`, a
+common word, so candidates are frequent; that is a real fingerprint collision,
+not overhead. A scan width of 16 measured about 6 percent slower and 64 about 3
+percent faster than the chosen 32.

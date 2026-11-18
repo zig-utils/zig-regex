@@ -470,6 +470,8 @@ pub fn build(b: *std.Build) void {
     const run_inline_modifiers_tests = b.addRunArtifact(inline_modifiers_tests);
     test_step.dependOn(&run_inline_modifiers_tests.step);
 
+    addLiterals(b, target, optimize, mod, test_step, install_benchmarks);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
@@ -677,4 +679,56 @@ pub fn build(b: *std.Build) void {
     const advanced_example_run = b.addRunArtifact(advanced_example);
     const advanced_example_step = b.step("advanced-example", "Run advanced features examples");
     advanced_example_step.dependOn(&advanced_example_run.step);
+}
+
+/// The multi-literal engines in src/literals: a fast `test-literals` loop, the
+/// differential suite (part of `test`), and the `bench-literals` benchmark.
+/// The unit tests in src/literals also run inside the root module's tests.
+fn addLiterals(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    mod: *std.Build.Module,
+    test_step: *std.Build.Step,
+    install_benchmarks: bool,
+) void {
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/literals/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    const diff_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/literals.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "regex", .module = mod }},
+        }),
+    });
+    const run_diff_tests = b.addRunArtifact(diff_tests);
+
+    const step = b.step("test-literals", "Run the multi-literal engine tests");
+    step.dependOn(&run_unit_tests.step);
+    step.dependOn(&run_diff_tests.step);
+    test_step.dependOn(&run_diff_tests.step);
+
+    const bench = b.addExecutable(.{
+        .name = "literals_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/literals.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "regex", .module = mod }},
+        }),
+    });
+    bench.root_module.link_libc = true;
+    if (install_benchmarks) b.installArtifact(bench);
+    const bench_run = b.addRunArtifact(bench);
+    bench_run.addPassthruArgs();
+    const bench_step = b.step("bench-literals", "Run the multi-literal engine benchmarks");
+    bench_step.dependOn(&bench_run.step);
 }
