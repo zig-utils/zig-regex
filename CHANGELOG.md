@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.1 - 2026-11-18
+
+- fix(program): compile repeated alternations and lazy repeats as programs (11ec9c0)
+
 ## v0.3.0 - 2026-11-18
 
 - perf(bench): measure every literal matcher and byte-mode regex against PCRE2 (9b77709)
