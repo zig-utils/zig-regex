@@ -530,3 +530,195 @@ test "limits: the backtracker's step budget is configurable" {
     defer linear.deinit();
     try testing.expectEqual(@as(?usize, null), linear.stepBudget());
 }
+
+// ---------------------------------------------------------------------------
+// Serialisation: programs written to bytes and loaded back without allocation.
+
+fn expectSameResults(a: *const Program, b: *const Program, inputs: []const []const u8) !void {
+    var sa = try Scratch.init(testing.allocator, a);
+    defer sa.deinit(testing.allocator);
+    var sb = try Scratch.init(testing.allocator, b);
+    defer sb.deinit(testing.allocator);
+    for (inputs) |input| {
+        try testing.expectEqual(try a.isMatch(&sa, input), try b.isMatch(&sb, input));
+        var ia = a.iterator(&sa, input);
+        var ib = b.iterator(&sb, input);
+        while (true) {
+            const ma = try ia.next();
+            const mb = try ib.next();
+            try testing.expectEqual(ma, mb);
+            if (ma == null) break;
+        }
+    }
+}
+
+test "serialise: every corpus pattern matches identically after a round trip" {
+    var storage: [1 << 16]u8 = undefined;
+    var round_trips: usize = 0;
+    for (corpus_patterns) |pattern| {
+        for (flag_sets) |flags| {
+            var original = Program.compile(testing.allocator, pattern, flags) catch continue;
+            defer original.deinit(testing.allocator);
+            const blob = original.bytes();
+            try testing.expect(blob.len + 3 <= storage.len);
+            // Load from an odd address, with trailing bytes after the
+            // program, the way a section of a larger mmapped file looks.
+            const copy = storage[1..][0 .. blob.len + 2];
+            @memcpy(copy[0..blob.len], blob);
+            copy[blob.len] = 0xAA;
+            copy[blob.len + 1] = 0x55;
+
+            var freezer = Freezer.init();
+            freezer.freeze();
+            var loaded = try Program.load(copy);
+            try freezer.thaw();
+            defer loaded.deinit(testing.allocator); // borrowed: frees nothing
+            try testing.expectEqual(blob.len, loaded.bytes().len);
+            try testing.expectEqualSlices(u8, blob, loaded.bytes());
+            try expectSameResults(&original, &loaded, &corpus_inputs);
+            round_trips += 1;
+        }
+    }
+    try testing.expect(round_trips > 300);
+}
+
+test "serialise: dupe owns a copy of a loaded program" {
+    var original = try Program.compile(testing.allocator, "\\x7fELF[\\x01\\x02]", .{ .bytes = true });
+    defer original.deinit(testing.allocator);
+    const borrowed = try testing.allocator.dupe(u8, original.bytes());
+    var loaded = try Program.load(borrowed);
+    var owned = try loaded.dupe(testing.allocator);
+    defer owned.deinit(testing.allocator);
+    testing.allocator.free(borrowed);
+    var scratch = try Scratch.init(testing.allocator, &owned);
+    defer scratch.deinit(testing.allocator);
+    try expectSpan(.{ 2, 7 }, try owned.find(&scratch, "ab\x7fELF\x02"));
+}
+
+test "serialise: malformed blobs are rejected with a precise error" {
+    var program = try Program.compile(testing.allocator, "ab[0-9]+\\b", .{});
+    defer program.deinit(testing.allocator);
+    const good = program.bytes();
+    var buf: [4096]u8 = undefined;
+    const blob = buf[0..good.len];
+
+    try testing.expectError(error.Truncated, Program.load(good[0..10]));
+    try testing.expectError(error.Truncated, Program.load(good[0 .. good.len - 1]));
+
+    @memcpy(blob, good);
+    blob[0] = 'X';
+    try testing.expectError(error.BadMagic, Program.load(blob));
+
+    @memcpy(blob, good);
+    std.mem.writeInt(u16, blob[4..6], 99, .little);
+    try testing.expectError(error.UnsupportedVersion, Program.load(blob));
+
+    @memcpy(blob, good);
+    blob[blob.len - 1] ^= 1;
+    try testing.expectError(error.ChecksumMismatch, Program.load(blob));
+
+    // A structural error with a recomputed checksum: an edge to a state that
+    // does not exist.
+    @memcpy(blob, good);
+    const edges_off = std.mem.readInt(u32, blob[40..44], .little);
+    std.mem.writeInt(u32, blob[edges_off..][0..4], 0xFFFF_FF00, .little);
+    fixChecksum(blob);
+    try testing.expectError(error.InvalidProgram, Program.load(blob));
+}
+
+/// Recompute a blob's CRC-32 (over the blob with the checksum field zeroed)
+/// so a mutation reaches the structural checks.
+fn fixChecksum(blob: []u8) void {
+    std.mem.writeInt(u32, blob[56..60], 0, .little);
+    std.mem.writeInt(u32, blob[56..60], std.hash.Crc32.hash(blob), .little);
+}
+
+/// Load a mutated blob: it must either fail cleanly or give a program that
+/// matches without faulting (safety checks catch any out-of-bounds access).
+fn loadMutated(blob: []const u8, inputs: []const []const u8) !bool {
+    const program = Program.load(blob) catch return false;
+    var capacity = program.capacity();
+    capacity.dfa_states = 64;
+    var scratch = try Scratch.initCapacity(testing.allocator, capacity);
+    defer scratch.deinit(testing.allocator);
+    scratch.step_budget = 1 << 16;
+    for (inputs) |input| {
+        _ = program.isMatch(&scratch, input) catch {};
+        var it = program.iterator(&scratch, input);
+        var n: usize = 0;
+        while (n < 16) : (n += 1) {
+            const m = (it.next() catch break) orelse break;
+            try testing.expect(m.start <= m.end and m.end <= input.len);
+        }
+    }
+    return true;
+}
+
+const seed_patterns = [_]struct { pattern: []const u8, flags: CompileFlags }{
+    .{ .pattern = "ab[0-9]+\\b", .flags = .{} },
+    .{ .pattern = "^(?:GET|POST) /[a-z]{1,8}$", .flags = .{ .multiline = true } },
+    .{ .pattern = "MZ.{2}\\x50\\x45[\\x00-\\x1f]*", .flags = .{ .bytes = true } },
+    .{ .pattern = "\\Bfoo|bar\\z", .flags = .{ .case_insensitive = true } },
+};
+const fuzz_inputs = [_][]const u8{ "", "ab12 ab3x", "GET /abc\nPOST /x", "MZ\x90\x00PE\x01\x02", "xfoo bar", "\xff\x00\n" };
+
+test "serialise: corrupted blobs fail cleanly (randomised)" {
+    var prng = std.Random.DefaultPrng.init(0x10AD);
+    const random = prng.random();
+    var buf: [8192]u8 = undefined;
+    var loaded: usize = 0;
+    for (seed_patterns) |seed| {
+        var program = try Program.compile(testing.allocator, seed.pattern, seed.flags);
+        defer program.deinit(testing.allocator);
+        const good = program.bytes();
+        var iteration: usize = 0;
+        while (iteration < 3000) : (iteration += 1) {
+            var len = good.len;
+            @memcpy(buf[0..len], good);
+            const mutations = random.intRangeAtMost(usize, 1, 4);
+            var k: usize = 0;
+            while (k < mutations and len > 0) : (k += 1) {
+                switch (random.uintLessThan(u8, 4)) {
+                    0 => buf[random.uintLessThan(usize, len)] ^= @as(u8, 1) << random.int(u3),
+                    1 => buf[random.uintLessThan(usize, len)] = random.int(u8),
+                    2 => len = random.uintAtMost(usize, len),
+                    else => {
+                        // A header word: counts, offsets and flags.
+                        const word = random.uintLessThan(usize, 16) * 4;
+                        if (word + 4 <= len) std.mem.writeInt(u32, buf[word..][0..4], random.int(u32), .little);
+                    },
+                }
+            }
+            // Half the time, repair the checksum so the structural checks
+            // see the damage instead of the CRC.
+            if (random.boolean() and len >= 64) fixChecksum(buf[0..len]);
+            if (try loadMutated(buf[0..len], &fuzz_inputs)) loaded += 1;
+        }
+    }
+    // Some damage leaves a valid program (a flipped accepting bit, another
+    // in-range edge target), which then has to match without faulting.
+    try testing.expect(loaded > 100);
+}
+
+fn fuzzLoad(_: void, smith: *std.testing.Smith) anyerror!void {
+    const seed = seed_patterns[smith.index(seed_patterns.len)];
+    var program = try Program.compile(testing.allocator, seed.pattern, seed.flags);
+    defer program.deinit(testing.allocator);
+    var buf: [8192]u8 = undefined;
+    const good = program.bytes();
+    var len = good.len;
+    @memcpy(buf[0..len], good);
+    while (!smith.eosWeightedSimple(1, 3)) {
+        const at = smith.index(len);
+        buf[at] = smith.value(u8);
+    }
+    if (smith.boolWeighted(1, 1)) len = smith.valueRangeAtMost(u32, 0, @intCast(len));
+    if (smith.boolWeighted(1, 3) and len >= 64) fixChecksum(buf[0..len]);
+    _ = try loadMutated(buf[0..len], &fuzz_inputs);
+}
+
+test "serialise: loader fuzz target" {
+    // `zig build test-program --fuzz` explores this with coverage guidance;
+    // a plain test run replays the corpus.
+    try std.testing.fuzz({}, fuzzLoad, .{ .corpus = &.{ "", "\x00\x01\x02\x03", "\xff\xff\xff\xff\xff\xff\xff\xff" } });
+}

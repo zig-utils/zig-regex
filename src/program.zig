@@ -18,6 +18,10 @@
 //! reports spans only (no capture groups) with the same semantics as
 //! `Regex.find`: the leftmost match, extended as far as possible.
 //!
+//! `Program.bytes` is the serialised program and `Program.load` reads one
+//! back from borrowed memory (an mmapped file, say) without allocating, after
+//! validating it.
+//!
 //! Matching runs a lazy DFA built in the scratch. When the DFA would need
 //! more states than the scratch holds it is reset and the current call
 //! finishes on an NFA simulation over the same program, so a pattern whose
@@ -41,6 +45,19 @@ pub const BuildError = error{
     /// More NFA states than a program can address.
     ProgramTooLarge,
     OutOfMemory,
+};
+
+pub const LoadError = error{
+    /// Shorter than the header, or than the length the header records.
+    Truncated,
+    /// Not a program blob.
+    BadMagic,
+    /// A blob layout this build does not read.
+    UnsupportedVersion,
+    /// The bytes do not match the recorded CRC-32: the blob was corrupted.
+    ChecksumMismatch,
+    /// The blob is well formed on the outside but inconsistent inside.
+    InvalidProgram,
 };
 
 pub const MatchError = error{
@@ -176,9 +193,12 @@ const ctx_prev_word: u8 = 2;
 const ctx_prev_nl: u8 = 4;
 
 /// A compiled pattern in its flat form. The struct is a view over `blob`;
-/// building a program allocates the blob, which `deinit` frees.
+/// building a program allocates the blob, which `deinit` frees. A program
+/// from `load` borrows the caller's bytes and has nothing to free.
 pub const Program = struct {
     blob: []const u8,
+    /// Whether `deinit` frees `blob` (false for `load`ed programs).
+    owned: bool,
     flags: u32,
     state_count: u32,
     edge_count: u32,
@@ -210,13 +230,45 @@ pub const Program = struct {
     /// Flatten a compiled regex into a program. The regex is not retained.
     pub fn fromRegex(allocator: std.mem.Allocator, re: *const Regex) BuildError!Program {
         const blob = try build(allocator, re);
-        return view(blob);
+        var program = view(blob);
+        program.owned = true;
+        return program;
     }
 
-    /// Free a program built by `compile` or `fromRegex`.
+    /// Free a program built by `compile`, `fromRegex` or `dupe`. Does nothing
+    /// for a program from `load`, whose bytes belong to the caller.
     pub fn deinit(self: *Program, allocator: std.mem.Allocator) void {
-        allocator.free(self.blob);
+        if (self.owned) allocator.free(self.blob);
         self.* = undefined;
+    }
+
+    /// The serialised program: write these bytes anywhere (a file, a
+    /// database section) and `load` them later. They are position
+    /// independent, little-endian, versioned and checksummed.
+    pub fn bytes(self: *const Program) []const u8 {
+        return self.blob;
+    }
+
+    /// A program over serialised bytes, without allocating or copying: the
+    /// result borrows `blob` (for example an mmapped region), which must
+    /// outlive it and stay unchanged. `blob` may extend past the program; the
+    /// header records its length, and `bytes().len` reports it.
+    ///
+    /// Everything memory safety depends on is validated: header, section
+    /// layout, every state's edge range, every edge's target and argument,
+    /// and the byte-class map against each byte set and assertion. A CRC-32
+    /// over the whole program rejects accidental corruption. The blob may sit
+    /// at any address: all reads are explicit little-endian loads.
+    pub fn load(blob: []const u8) LoadError!Program {
+        const program_bytes = try validate(blob);
+        return view(program_bytes);
+    }
+
+    /// An owned copy of this program (for example of a `load`ed one).
+    pub fn dupe(self: *const Program, allocator: std.mem.Allocator) error{OutOfMemory}!Program {
+        var copy = view(try allocator.dupe(u8, self.blob));
+        copy.owned = true;
+        return copy;
     }
 
     /// The sizes a scratch needs to match this program.
@@ -411,6 +463,7 @@ fn view(blob: []const u8) Program {
     const first_off = readU32(blob, off_first);
     var program = Program{
         .blob = blob,
+        .owned = false,
         .flags = flags,
         .state_count = state_count,
         .edge_count = edge_count,
@@ -446,6 +499,107 @@ fn view(blob: []const u8) Program {
         }
     }
     return program;
+}
+
+/// Check a serialised program and return exactly its bytes. See `load`.
+fn validate(input: []const u8) LoadError![]const u8 {
+    if (input.len < header_size) return error.Truncated;
+    if (!std.mem.eql(u8, input[off_magic..][0..4], magic)) return error.BadMagic;
+    if (std.mem.readInt(u16, input[off_version..][0..2], .little) != format_version) return error.UnsupportedVersion;
+    if (std.mem.readInt(u16, input[off_header_size..][0..2], .little) != header_size) return error.InvalidProgram;
+    const total = readU32(input, off_total);
+    if (total < header_size) return error.InvalidProgram;
+    if (total > input.len) return error.Truncated;
+    const blob = input[0..total];
+    if (readU32(blob, off_checksum) != checksumOf(blob)) return error.ChecksumMismatch;
+
+    const flags = readU32(blob, off_flags);
+    if (flags & ~pf_known != 0) return error.InvalidProgram;
+    const state_count: u64 = readU32(blob, off_state_count);
+    const edge_count: u64 = readU32(blob, off_edge_count);
+    const set_count: u64 = readU32(blob, off_set_count);
+    const start = readU32(blob, off_start);
+    const class_count = readU32(blob, off_class_count);
+    if (state_count == 0 or state_count > max_program_states) return error.InvalidProgram;
+    if (start >= state_count) return error.InvalidProgram;
+    if (class_count == 0 or class_count > 256) return error.InvalidProgram;
+
+    // The sections sit back to back in a fixed order; anything else (gaps,
+    // overlaps, a section past the end) is rejected.
+    const states_off: u64 = header_size;
+    const edges_off = states_off + state_count * state_record;
+    const sets_off = edges_off + edge_count * edge_record;
+    const classes_off = sets_off + set_count * set_record;
+    const has_first = flags & pf_first_bytes != 0;
+    const first_off: u64 = if (has_first) classes_off + 256 else 0;
+    const expected_total = classes_off + 256 + @as(u64, if (has_first) set_record else 0);
+    if (readU32(blob, off_states) != states_off or readU32(blob, off_edges) != edges_off or
+        readU32(blob, off_sets) != sets_off or readU32(blob, off_classes) != classes_off or
+        readU32(blob, off_first) != first_off or total != expected_total)
+        return error.InvalidProgram;
+
+    const states = blob[@intCast(states_off)..@intCast(edges_off)];
+    const edges = blob[@intCast(edges_off)..@intCast(sets_off)];
+    const sets = blob[@intCast(sets_off)..@intCast(classes_off)];
+    const classes = blob[@intCast(classes_off)..][0..256];
+
+    var i: u64 = 0;
+    while (i < state_count) : (i += 1) {
+        const first: u64 = readU32(states, @intCast(i * state_record));
+        const count: u64 = readU32(states, @intCast(i * state_record + 4)) & ~accepting_bit;
+        if (first + count > edge_count) return error.InvalidProgram;
+    }
+
+    // Edges, and the assertion flags they imply.
+    var implied: u32 = 0;
+    i = 0;
+    while (i < edge_count) : (i += 1) {
+        const target = readU32(edges, @intCast(i * edge_record));
+        const op = readU32(edges, @intCast(i * edge_record + 4));
+        if (target >= state_count) return error.InvalidProgram;
+        const arg = op >> 8;
+        switch (@as(u8, @truncate(op))) {
+            edge_epsilon => if (arg != 0) return error.InvalidProgram,
+            edge_bytes => if (arg >= set_count) return error.InvalidProgram,
+            edge_assert => {
+                if (arg > @intFromEnum(Assertion.non_word_boundary)) return error.InvalidProgram;
+                switch (@as(Assertion, @enumFromInt(arg))) {
+                    .start_text => implied |= pf_assert_start,
+                    .start_line => {
+                        implied |= pf_assert_start;
+                        if (flags & pf_multiline != 0) implied |= pf_assert_line_start;
+                    },
+                    .word_boundary, .non_word_boundary => implied |= pf_assert_word,
+                    .end_line, .end_text => {},
+                }
+            },
+            else => return error.InvalidProgram,
+        }
+    }
+    const assert_flags = pf_assert_start | pf_assert_word | pf_assert_line_start;
+    if (flags & assert_flags != implied) return error.InvalidProgram;
+
+    // Byte classes: every class used, and every byte of a class alike for
+    // every byte set and every assertion the program observes, which is what
+    // lets the DFA test one representative byte per class.
+    var rep: [256]u16 = @splat(0xFFFF);
+    for (classes, 0..) |class, b| {
+        if (class >= class_count) return error.InvalidProgram;
+        if (rep[class] == 0xFFFF) rep[class] = @intCast(b);
+    }
+    for (rep[0..class_count]) |r| if (r == 0xFFFF) return error.InvalidProgram;
+    var b: usize = 0;
+    while (b < 256) : (b += 1) {
+        const r: u8 = @intCast(rep[classes[b]]);
+        if (flags & pf_assert_word != 0 and isWordByte(@intCast(b)) != isWordByte(r)) return error.InvalidProgram;
+        if (flags & pf_multiline != 0 and (b == '\n') != (r == '\n')) return error.InvalidProgram;
+        var set: u64 = 0;
+        while (set < set_count) : (set += 1) {
+            const row = sets[@intCast(set * set_record)..][0..set_record];
+            if (byteSetHas(row, @intCast(b)) != byteSetHas(row, r)) return error.InvalidProgram;
+        }
+    }
+    return blob;
 }
 
 // ---------------------------------------------------------------------------

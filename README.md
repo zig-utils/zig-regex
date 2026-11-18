@@ -313,6 +313,29 @@ const hit = program.isMatch(&scratch, data) catch |err| switch (err) {
   `re.setStepBudget(n)` (default 10,000,000 steps); running out fails with
   `error.Timeout`.
 
+#### Storing programs (serialisation)
+
+A program's bytes are its serialised form: position independent (offsets,
+no pointers), little-endian, versioned and protected by a CRC-32. Write them
+into a file or a database section, then load them back without allocating:
+
+```zig
+const blob: []const u8 = program.bytes(); // store these bytes anywhere
+
+// Later, for example over an mmapped region (any alignment):
+const loaded = try regex.Program.load(mapped[offset..]); // borrows `mapped`
+_ = try loaded.isMatch(&scratch, data);
+// `loaded.bytes().len` is the program's length within the region;
+// `loaded.dupe(allocator)` makes an owned copy.
+```
+
+`Program.load` checks the header, the version, the checksum and every
+structural invariant matching relies on (section layout, edge ranges and
+targets, byte-set indices, the byte-class map) and fails with
+`error.Truncated`, `BadMagic`, `UnsupportedVersion`, `ChecksumMismatch` or
+`InvalidProgram`, never with a fault. A loaded program borrows its bytes:
+they must outlive it and stay unchanged.
+
 ### Required Literal Factors (prefilters)
 
 `requiredFactors` reports literal strings every match must contain, so a
