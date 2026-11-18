@@ -2,6 +2,8 @@
 //! leftmost-first programs against PCRE2.
 //!
 //!   pcre2_diff gen <count> <seed>           random cases on stdout
+//!   (gen-bt, check-bt and fixture-bt do the same for `regex.bt` programs,
+//!   with backreferences, lookaround, atomic groups and large repeats)
 //!   pcre2_diff check <cases.tsv> <spans.tsv> agreement counts and the first
 //!                                            disagreements
 //!   pcre2_diff fixture <cases.tsv> <spans.tsv> <count>
@@ -26,9 +28,59 @@ const Io = std.Io;
 
 const max_pattern = 96;
 
+/// `gen-bt`/`check-bt`: the grammar also emits backreferences, lookahead,
+/// lookbehind, atomic groups and large counted repeats, and cases run as
+/// `regex.bt` backtracking programs.
+var bt_mode = false;
+
+fn genLookbehindBody(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
+    // Bounded length, as PCRE2 requires of a lookbehind.
+    const n = 1 + random.uintLessThan(usize, 3);
+    for (0..n) |_| {
+        try out.appendSlice(gpa, ([_][]const u8{ "a", "b", "c", " ", ".", "[ab]", "\\w", "\\b" })[random.uintLessThan(usize, 8)]);
+        if (random.uintLessThan(u8, 4) == 0) try out.appendSlice(gpa, "{1,2}");
+    }
+    if (random.uintLessThan(u8, 3) == 0) {
+        try out.append(gpa, '|');
+        try out.append(gpa, "ab"[random.uintLessThan(usize, 2)]);
+    }
+}
+
 fn genAtom(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Allocator, depth: usize) !void {
-    const pick = random.uintLessThan(u8, if (depth > 2) 15 else 20);
+    const pick = if (bt_mode and random.uintLessThan(u8, 4) == 0)
+        20 + random.uintLessThan(u8, 6)
+    else
+        random.uintLessThan(u8, if (depth > 2) 15 else 20);
     switch (pick) {
+        // A backreference to a group opened earlier in the pattern.
+        20 => {
+            var groups: usize = 0;
+            for (out.items, 0..) |c, k| {
+                if (c == '(' and (k + 1 == out.items.len or out.items[k + 1] != '?') and (k == 0 or out.items[k - 1] != '\\')) groups += 1;
+            }
+            if (groups == 0) return out.append(gpa, 'a');
+            try out.print(gpa, "\\{d}", .{1 + random.uintLessThan(usize, @min(groups, 3))});
+        },
+        21, 22 => {
+            try out.appendSlice(gpa, if (random.boolean()) "(?=" else "(?!");
+            try genAlt(random, out, gpa, depth + 1);
+            try out.append(gpa, ')');
+        },
+        23 => {
+            try out.appendSlice(gpa, if (random.boolean()) "(?<=" else "(?<!");
+            try genLookbehindBody(random, out, gpa);
+            try out.append(gpa, ')');
+        },
+        24 => {
+            try out.appendSlice(gpa, "(?>");
+            try genAlt(random, out, gpa, depth + 1);
+            try out.append(gpa, ')');
+        },
+        25 => {
+            try out.appendSlice(gpa, ([_][]const u8{ "(?:ab|a)", "[ab]", "(a|b)" })[random.uintLessThan(usize, 3)]);
+            try out.appendSlice(gpa, ([_][]const u8{ "{20,}", "{5,30}", "{12}" })[random.uintLessThan(usize, 3)]);
+            return;
+        },
         0...4 => try out.append(gpa, "abc"[random.uintLessThan(usize, 3)]),
         5 => try out.append(gpa, '.'),
         6 => try out.appendSlice(gpa, ([_][]const u8{ "[ab]", "[^a]", "[a-c]", "[^\\n]", "\\w", "\\W", "\\d", "\\s" })[random.uintLessThan(usize, 8)]),
@@ -54,7 +106,8 @@ fn genQuantified(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Alloc
     // A quantifier may not follow an assertion.
     const assertion = atom.len > 0 and (atom[0] == '^' or atom[0] == '$' or
         (atom.len == 2 and atom[0] == '\\' and (atom[1] == 'b' or atom[1] == 'B' or atom[1] == 'A' or atom[1] == 'z')));
-    const directive = std.mem.startsWith(u8, atom, "(?") and std.mem.indexOfScalar(u8, atom, ':') == null;
+    const directive = (std.mem.startsWith(u8, atom, "(?") and std.mem.indexOfScalar(u8, atom, ':') == null) or
+        (atom.len > 0 and atom[atom.len - 1] == '}');
     if (assertion or directive or random.uintLessThan(u8, 3) != 0) return;
     const quantifiers = [_][]const u8{ "*", "+", "?", "{2}", "{1,3}", "{0,2}", "{2,}", "{,2}" };
     try out.appendSlice(gpa, quantifiers[random.uintLessThan(usize, quantifiers.len)]);
@@ -134,6 +187,19 @@ pub fn parseCase(arena: std.mem.Allocator, line: []const u8) !Case {
 /// The program's `g`-style spans as PCRE2's line prints them, or null when
 /// zig-regex does not compile the pattern as a program.
 fn programSpans(gpa: std.mem.Allocator, case: Case, out: *std.ArrayList(u8)) !?void {
+    if (bt_mode) {
+        var p = regex.bt.Program.compile(gpa, case.pattern, case.flags) catch return null;
+        defer p.deinit(gpa);
+        var s = try regex.bt.Scratch.init(gpa, &p);
+        defer s.deinit(gpa);
+        var it = p.iterator(&s, case.subject);
+        var first = true;
+        while (it.next() catch |err| return err) |m| {
+            try out.print(gpa, "{s}{d} {d}", .{ if (first) "" else " ", m.start, m.end });
+            first = false;
+        }
+        return;
+    }
     var program = regex.Program.compileWithOptions(gpa, case.pattern, case.flags, .{ .match_kind = .leftmost_first }) catch return null;
     defer program.deinit(gpa);
     var scratch = try regex.Scratch.init(gpa, &program);
@@ -161,6 +227,7 @@ fn checkMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []cons
     var agree: usize = 0;
     var pcre_error: usize = 0;
     var not_program: usize = 0;
+    var limited: usize = 0;
     var shown: usize = 0;
     var got: std.ArrayList(u8) = .empty;
     defer got.deinit(gpa);
@@ -173,7 +240,14 @@ fn checkMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []cons
             continue;
         }
         got.clearRetainingCapacity();
-        if (try programSpans(gpa, case, &got) == null) {
+        const compiled = programSpans(gpa, case, &got) catch |err| switch (err) {
+            error.BudgetExceeded, error.StackExhausted => {
+                limited += 1;
+                continue;
+            },
+            else => return err,
+        };
+        if (compiled == null) {
             not_program += 1;
             continue;
         }
@@ -195,8 +269,8 @@ fn checkMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []cons
         }
     }
     if (fixture_count != null) return;
-    try w.print("compared {d}: {d} agree, {d} differ; {d} not compiled as programs, {d} PCRE2 errors\n", .{
-        total, agree, total - agree, not_program, pcre_error,
+    try w.print("compared {d}: {d} agree, {d} differ; {d} not compiled as programs, {d} PCRE2 errors, {d} zig-regex limits\n", .{
+        total, agree, total - agree, not_program, pcre_error, limited,
     });
 }
 
@@ -209,9 +283,11 @@ pub fn main(init: std.process.Init) !void {
     const w = &out.interface;
     defer w.flush() catch {};
     const cmd: []const u8 = if (args.len >= 2) args[1] else "";
-    if (std.mem.eql(u8, cmd, "gen")) return genMain(gpa, w, args[2..]);
+    bt_mode = std.mem.endsWith(u8, cmd, "-bt");
+    if (std.mem.eql(u8, cmd, "gen") or std.mem.eql(u8, cmd, "gen-bt")) return genMain(gpa, w, args[2..]);
+    if (std.mem.eql(u8, cmd, "check-bt")) return checkMain(gpa, io, w, args[2..]);
     if (std.mem.eql(u8, cmd, "check")) return checkMain(gpa, io, w, args[2..]);
-    if (std.mem.eql(u8, cmd, "fixture")) return checkMain(gpa, io, w, args[2..]);
+    if (std.mem.eql(u8, cmd, "fixture") or std.mem.eql(u8, cmd, "fixture-bt")) return checkMain(gpa, io, w, args[2..]);
     std.debug.print("usage: pcre2_diff gen <count> <seed> | check <cases.tsv> <spans.tsv> | fixture <cases.tsv> <spans.tsv> <count>\n", .{});
     return error.BadArguments;
 }

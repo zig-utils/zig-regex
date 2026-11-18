@@ -16,6 +16,10 @@ set -euo pipefail
 
 count="${1:-20000}"
 seed="${2:-1}"
+# MODE=bt tests regex.bt backtracking programs (backreferences, lookaround,
+# atomic groups, large counted repeats) instead of Thompson programs.
+suffix=""
+if [ "${MODE:-}" = "bt" ]; then suffix="-bt"; fi
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 work="$root/.zig-cache/pcre2-diff"
@@ -49,6 +53,6 @@ if [ -n "$prefix" ]; then
 fi
 cc -O2 -o "$work/pcre2_spans" benchmarks/pcre2/pcre2_spans.c "${cflags[@]}" "${libs[@]}"
 
-"$diff_tool" gen "$count" "$seed" >"$work/cases.tsv"
+"$diff_tool" "gen$suffix" "$count" "$seed" >"$work/cases.tsv"
 "$work/pcre2_spans" <"$work/cases.tsv" >"$work/spans.tsv"
-"$diff_tool" check "$work/cases.tsv" "$work/spans.tsv"
+"$diff_tool" "check$suffix" "$work/cases.tsv" "$work/spans.tsv"

@@ -27,6 +27,9 @@ pub const ErrorHelper = @import("errors.zig").ErrorHelper;
 pub const program = @import("program.zig");
 pub const Program = program.Program;
 pub const Scratch = program.Scratch;
+// Bounded-backtracking programs: serialisable, allocation-free and
+// step-budgeted, for backreferences, lookaround and atomic groups
+pub const bt = @import("bt.zig");
 
 // Required literal factors for prefilters
 pub const factors = @import("factors.zig");

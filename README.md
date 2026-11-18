@@ -369,6 +369,58 @@ unchanged. The layout is version 2 (`program.format_version`); blobs written
 by 0.3.x are version 1 and fail with `error.UnsupportedVersion`, so rebuild
 stored programs from their patterns.
 
+### Backtracking programs (`regex.bt`)
+
+Backreferences, lookahead, lookbehind, atomic groups and counted repeats too
+large to unroll are not regular, so a `Program` refuses them
+(`error.UnsupportedByProgram`, or `ProgramTooLarge` for `x{50000,}`).
+`regex.bt` compiles them into a bounded-backtracking program with the same
+guarantees: one relocatable, checksummed blob loaded in place without
+allocating, a `Scratch` sized once, no recursion, and a per-search step
+budget. Matching is PCRE's (leftmost-first, alternatives in order).
+
+```zig
+const bt = @import("regex").bt;
+
+var sig = try bt.Program.compile(allocator, "(?P<k>[a-z]{4})=\\d+;(?P=k)(?!\\x00)", .{ .bytes = true });
+defer sig.deinit(allocator);
+var scratch = try bt.Scratch.init(allocator, &sig); // slots, counters, 16 Ki stack frames
+defer scratch.deinit(allocator);
+scratch.step_budget = 1_000_000;                    // default 10,000,000; always finite
+
+const hit = sig.find(&scratch, data) catch |err| switch (err) {
+    error.BudgetExceeded, error.StackExhausted => return .limit_event, // never "no match"
+    else => return err,
+};
+_ = hit; // ?Span
+
+const blob = sig.bytes();                   // store it; later:
+const loaded = try bt.Program.load(blob);   // validated, borrowed, no allocation
+_ = loaded;
+```
+
+- Byte mode only. Counted repeats keep a counter (`x{50000,}` is a few
+  instructions), and a run of a single byte set backtracks one byte at a time
+  from one stack frame.
+- A repeated group stops after an iteration that matched empty, as in PCRE.
+  A backreference inside its own group sees the previous iteration's
+  capture. Lookbehind bodies need a bounded length (at most 65,535 bytes),
+  variable lengths included.
+- `Scratch.bytesNeeded` is exact: 8 bytes per capture slot (three per
+  backreferenced group), 16 per counter and 24 per stack frame
+  (`Capacity.frames`, default 16,384). A full stack ends the search with
+  `error.StackExhausted`.
+- `load` validates every opcode, jump target, set, slot and counter index and
+  the pairing of lookaround and atomic markers; a forged blob can give wrong
+  answers but cannot read out of bounds, and the step budget bounds even a
+  forged loop.
+- `benchmarks/pcre2/diff.sh` with `MODE=bt` differential-tests these programs
+  against PCRE2 (see docs/BENCHMARKS.md).
+
+An atomic group whose body always matches one length (`(?>abc)`,
+`(?>[a-f]{4})`) has a single end, so `Regex` and `Program` run it as a plain
+group; any other atomic group needs the backtracker (`Regex`) or `regex.bt`.
+
 ### Required Literal Factors (prefilters)
 
 `requiredFactors` reports literal strings every match must contain, so a

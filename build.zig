@@ -321,6 +321,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_program_tests = b.addRunArtifact(program_tests);
 
+    const bt_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/bt.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_bt_tests = b.addRunArtifact(bt_tests);
+
     const factors_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/factors.zig"),
@@ -414,6 +426,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lazy_quantifiers_tests.step);
     test_step.dependOn(&run_bytes_mode_tests.step);
     test_step.dependOn(&run_program_tests.step);
+    test_step.dependOn(&run_bt_tests.step);
     test_step.dependOn(&run_factors_tests.step);
     test_step.dependOn(&run_fuzz_tests.step);
     test_step.dependOn(&run_benchmarks_tests.step);
@@ -438,6 +451,7 @@ pub fn build(b: *std.Build) void {
     test_core_step.dependOn(&run_bytes_mode_tests.step);
 
     test_core_step.dependOn(&run_program_tests.step);
+    test_core_step.dependOn(&run_bt_tests.step);
     test_core_step.dependOn(&run_factors_tests.step);
 
     const bytes_mode_step = b.step("test-bytes", "Run byte-mode compilation tests");
@@ -445,6 +459,9 @@ pub fn build(b: *std.Build) void {
 
     const program_step = b.step("test-program", "Run flat program and scratch matcher tests");
     program_step.dependOn(&run_program_tests.step);
+
+    const bt_step = b.step("test-bt", "Run bounded-backtracking program tests");
+    bt_step.dependOn(&run_bt_tests.step);
 
     const factors_step = b.step("test-factors", "Run required literal factor tests");
     factors_step.dependOn(&run_factors_tests.step);

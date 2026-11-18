@@ -15,6 +15,11 @@
  * the conventions zig-regex uses (`$` only at the very end; `^` after every
  * newline, a final one included), so the comparison measures match-kind
  * semantics, not those two anchor conventions.
+ *
+ * With PCRE2_NO_START_OPTIMIZE set in the environment, patterns are compiled
+ * with PCRE2_NO_START_OPTIMIZE: PCRE2's start-of-match optimizations change
+ * some results for backreferences to a group that is still unset
+ * (`(x|\1*?)a` does not match "a" with them and does without).
  */
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
@@ -57,6 +62,7 @@ int main(void) {
         if (plen < 0 || slen < 0) { puts("error"); continue; }
 
         uint32_t options = PCRE2_DOLLAR_ENDONLY | PCRE2_ALT_CIRCUMFLEX;
+        if (getenv("PCRE2_NO_START_OPTIMIZE")) options |= PCRE2_NO_START_OPTIMIZE;
         if (strchr(flags, 'i')) options |= PCRE2_CASELESS;
         if (strchr(flags, 'm')) options |= PCRE2_MULTILINE;
         if (strchr(flags, 's')) options |= PCRE2_DOTALL;

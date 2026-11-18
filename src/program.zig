@@ -11,8 +11,10 @@
 //! then reused for every match on its thread; no match ever allocates.
 //!
 //! Programs cover the patterns the Thompson engine runs: everything except
-//! backreferences, general lookaround and Unicode property escapes, which
-//! need the backtracking engine. `Program.fromRegex` reports those with
+//! backreferences, general lookaround, atomic groups with more than one
+//! possible match length and Unicode property escapes, which need a
+//! backtracking engine (`regex.bt` compiles them into a serialisable,
+//! budgeted backtracking program). `Program.fromRegex` reports those with
 //! `error.UnsupportedByProgram`, as it does for a regex the backtracker got
 //! only to order captures, alternatives or lazy repeats, or to scope inline
 //! modifiers. `Program.compile` compiles for spans: it drops capture groups
