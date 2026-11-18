@@ -314,6 +314,52 @@ test "program: capture groups inside alternations still compile" {
     try testing.expectError(error.UnsupportedByProgram, Program.compile(testing.allocator, "(a|b)\\1", .{}));
 }
 
+test "program: repeated alternations and lazy repeats compile for spans" {
+    // `Regex` routes these to the backtracker for leftmost-first match ends; a
+    // program reports leftmost-longest spans, which neither changes, so
+    // `Program.compile` takes the Thompson route (ClamAV PCRE and YARA regexes
+    // use these forms constantly).
+    const Case = struct { pattern: []const u8, flags: CompileFlags, input: []const u8, span: ?[2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(?:\\x90|\\xcc){4,}", .flags = .{ .bytes = true }, .input = "MZ\x90\xcc\x90\x90\xcc!", .span = .{ 2, 7 } },
+        .{ .pattern = "(?:\\x90|\\xcc){4,}", .flags = .{ .bytes = true }, .input = "MZ\x90\xcc\x90!", .span = null },
+        .{ .pattern = "(\\x90|\\xcc){4,}", .flags = .{ .bytes = true }, .input = "\xcc\xcc\xcc\xcc", .span = .{ 0, 4 } },
+        .{ .pattern = "(?:ab|cd)+x", .flags = .{}, .input = "zzabcdabx", .span = .{ 2, 9 } },
+        .{ .pattern = "(?:a|b)*c", .flags = .{}, .input = "xxbabac", .span = .{ 2, 7 } },
+        .{ .pattern = "(?:abc|de){2,5}", .flags = .{}, .input = "-dedeabc-", .span = .{ 1, 8 } },
+        .{ .pattern = "(?:%[0-9a-f]{2}|\\\\x[0-9a-f]{2})+", .flags = .{ .bytes = true, .case_insensitive = true }, .input = "q=%41\\x42%4a;", .span = .{ 2, 12 } },
+        // Lazy repeats: same leftmost start; the end is the longest, as for every program.
+        .{ .pattern = "a(?:b|c)+?d", .flags = .{}, .input = "xabcbd", .span = .{ 1, 6 } },
+        .{ .pattern = "<script.+?>", .flags = .{ .case_insensitive = true }, .input = "<p><SCRIPT src=x>y>", .span = .{ 3, 19 } },
+        .{ .pattern = "a+?", .flags = .{}, .input = "baaa", .span = .{ 1, 4 } },
+    };
+    for (cases) |c| {
+        var program = Program.compile(testing.allocator, c.pattern, c.flags) catch |err| {
+            std.debug.print("{s}: {t}\n", .{ c.pattern, err });
+            return err;
+        };
+        defer program.deinit(testing.allocator);
+        var scratch = try Scratch.init(testing.allocator, &program);
+        defer scratch.deinit(testing.allocator);
+        const got = try program.find(&scratch, c.input);
+        if (c.span) |want| {
+            try testing.expectEqual(want, [2]usize{ got.?.start, got.?.end });
+        } else try testing.expect(got == null);
+        // Whether a match exists, and where the leftmost starts, agree with `Regex`.
+        var re = try Regex.compileWithFlags(testing.allocator, c.pattern, c.flags);
+        defer re.deinit();
+        try testing.expectEqual(c.span != null, try re.isMatch(c.input));
+        if (try re.find(c.input)) |m| {
+            var mm = m;
+            defer mm.deinit(testing.allocator);
+            try testing.expectEqual(got.?.start, m.start);
+        }
+    }
+    // Nested quantifiers are linear on the Thompson route: no risk-policy refusal for programs.
+    var nested = try Program.compile(testing.allocator, "(a*)*b", .{});
+    defer nested.deinit(testing.allocator);
+}
+
 test "program: the NFA fallback agrees with the DFA" {
     const patterns = [_][]const u8{ "[ab]*a[ab]{6}", "x[abcdef]*y", "\\bfoo\\b", "^\\w+$", "(foo|foobar)baz", "a{2,4}", "(?:ab)+e|cde" };
     const inputs = [_][]const u8{ "abababbbaabababa", "xay xbcy xdefy xbcbcy", "foo foobar foo", "line1\nline2", "foobarbaz foobaz", "aaaaa", "ababcde" };

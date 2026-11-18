@@ -189,9 +189,14 @@ pub const Regex = struct {
         // quantified capture boundaries overlap, ECMAScript capture precedence
         // needs the capture-aware backtracker.
         var onepass_plan: ?*onepass.Plan = null;
-        const ordered_captures = flags.ecmascript and
+        // A capture-free compile for a `Program` reports spans only, with the Thompson
+        // engine's leftmost-longest ends. Alternation order and lazy edges decide which of
+        // several matches a backtracker reports, never whether one exists or where the
+        // leftmost one starts, so they are no reason to leave the Thompson route here.
+        const span_only = !captures;
+        const ordered_captures = span_only or (flags.ecmascript and
             (tree.capture_count == 0 or hasSingleEntryCaptures(tree.root, false) or
-                (tree.capture_count == 1 and hasSpanningAssertionCapture(tree.root)));
+                (tree.capture_count == 1 and hasSpanningAssertionCapture(tree.root))));
         var needs_backtracking = requiresBacktracking(tree.root, flags, ordered_captures);
         if (!needs_backtracking and tree.capture_count > 0) {
             onepass_plan = try onepass.build(allocator, tree.root, tree.capture_count, flags);
@@ -209,7 +214,7 @@ pub const Regex = struct {
         // (`compiler.max_nfa_states`). So an ECMAScript pattern bound for them is
         // not refused -- /(a*)*/ is valid JavaScript -- while other dialects keep
         // refusing critical patterns on every engine.
-        if (!flags.ecmascript or needs_backtracking) {
+        if ((!flags.ecmascript and !span_only) or needs_backtracking) {
             const pattern_analyzer = @import("pattern_analyzer.zig");
             try pattern_analyzer.analyzeAndValidate(allocator, tree.root, .high);
         }
