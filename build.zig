@@ -309,6 +309,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_bytes_mode_tests = b.addRunArtifact(bytes_mode_tests);
 
+    const program_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/program.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    const run_program_tests = b.addRunArtifact(program_tests);
+
     const lazy_quantifiers_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/lazy_quantifiers.zig"),
@@ -389,6 +401,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_named_captures_tests.step);
     test_step.dependOn(&run_lazy_quantifiers_tests.step);
     test_step.dependOn(&run_bytes_mode_tests.step);
+    test_step.dependOn(&run_program_tests.step);
     test_step.dependOn(&run_fuzz_tests.step);
     test_step.dependOn(&run_benchmarks_tests.step);
 
@@ -411,8 +424,13 @@ pub fn build(b: *std.Build) void {
     test_core_step.dependOn(&run_lazy_quantifiers_tests.step);
     test_core_step.dependOn(&run_bytes_mode_tests.step);
 
+    test_core_step.dependOn(&run_program_tests.step);
+
     const bytes_mode_step = b.step("test-bytes", "Run byte-mode compilation tests");
     bytes_mode_step.dependOn(&run_bytes_mode_tests.step);
+
+    const program_step = b.step("test-program", "Run flat program and scratch matcher tests");
+    program_step.dependOn(&run_program_tests.step);
 
     // Regression tests for specific fixes
     const regression_tests = b.addTest(.{
@@ -577,6 +595,23 @@ pub fn build(b: *std.Build) void {
     if (findall_bench_arg) |arg| findall_bench_run.addArg(arg);
     const findall_bench_step = b.step("bench-findall", "Run findAll throughput benchmark (issue #10)");
     findall_bench_step.dependOn(&findall_bench_run.step);
+
+    const scratch_bench = b.addExecutable(.{
+        .name = "scratch_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/scratch_matcher.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "regex", .module = mod },
+            },
+        }),
+    });
+    // clock_gettime for monotonic timing.
+    scratch_bench.root_module.link_libc = true;
+    if (install_benchmarks) b.installArtifact(scratch_bench);
+    const scratch_bench_step = b.step("bench-scratch", "Compare the allocation-free Program/Scratch matcher with Regex.Matcher");
+    scratch_bench_step.dependOn(&b.addRunArtifact(scratch_bench).step);
 
     // `zg` — ripgrep-style grep used to reproduce the issue #10 benchmarks
     // (multi-file corpus and single large file) head to head against `rg`.

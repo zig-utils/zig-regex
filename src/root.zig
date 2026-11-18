@@ -23,6 +23,11 @@ pub const CompileErrorReason = @import("errors.zig").CompileErrorReason;
 pub const ErrorContext = @import("errors.zig").ErrorContext;
 pub const ErrorHelper = @import("errors.zig").ErrorHelper;
 
+// Flat, relocatable programs and the allocation-free matcher
+pub const program = @import("program.zig");
+pub const Program = program.Program;
+pub const Scratch = program.Scratch;
+
 // Performance and debugging
 pub const Profiler = @import("profiling.zig").Profiler;
 pub const ScopedTimer = @import("profiling.zig").ScopedTimer;
@@ -86,6 +91,7 @@ pub const c_api = @import("c_api.zig");
 pub const common = @import("common.zig");
 pub const parser = @import("parser.zig");
 pub const compiler = @import("compiler.zig");
+pub const vm = @import("vm.zig");
 pub const utf8_class = @import("utf8_class.zig");
 pub const optimizer = @import("optimizer.zig");
 pub const reverse = @import("reverse.zig");

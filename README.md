@@ -239,6 +239,50 @@ In byte mode:
 - `\p{..}`, `\P{..}` and `\u` escapes, and the `unicode`, `unicode_sets` and
   `ecmascript` flags, are rejected with `error.UnsupportedInBytesMode`.
 
+### Allocation-Free Matching (`Program` and `Scratch`)
+
+A `Program` is a compiled pattern flattened into one immutable byte blob, so
+a single program can be shared read-only by every thread. All mutable
+matching state (the lazy DFA cache, NFA thread lists) lives in a `Scratch`
+that each thread creates once and reuses. Matching never allocates.
+
+```zig
+const regex = @import("regex");
+
+var program = try regex.Program.compile(allocator, "MZ.{2}\\x50\\x45", .{ .bytes = true });
+defer program.deinit(allocator);
+
+// Once per thread. `Scratch.initBuffer` takes caller memory instead.
+var scratch = try regex.Scratch.init(allocator, &program);
+defer scratch.deinit(allocator);
+
+_ = try program.isMatch(&scratch, data);           // bool
+if (try program.find(&scratch, data)) |span| {     // ?Span{ start, end }
+    _ = data[span.start..span.end];
+}
+var it = program.iterator(&scratch, data);         // every match, no allocation
+while (try it.next()) |span| _ = span;
+var spans: [64]regex.program.Span = undefined;
+const n = try program.findAll(&scratch, data, &spans); // error.NoSpaceLeft if more
+_ = n;
+```
+
+- `Program.fromRegex(allocator, &re)` flattens an already compiled `Regex`.
+- Programs cover every pattern the Thompson engine runs. Patterns that need
+  the backtracking engine (backreferences, general lookaround, lazy
+  quantifiers outside ECMAScript mode, scoped inline modifiers, Unicode
+  property escapes) and ECMAScript mode return `error.UnsupportedByProgram`.
+- Results are spans without capture groups. Match ends follow the Thompson
+  engine (the leftmost match, extended as far as possible). `Regex.find`
+  agrees, except on its literal-alternation fast path, which reports the
+  first alternative in source order (`a|ab` finds `a`).
+- One scratch can serve several programs: size it with
+  `Scratch.initCapacity(allocator, a.capacity().max(b.capacity()))`. A
+  program larger than the scratch returns `error.ScratchTooSmall`.
+- When a pattern's DFA outgrows the scratch's state cache, the cache resets
+  and that call finishes on an NFA simulation of the same program, still in
+  time linear in the input.
+
 ## CLI
 
 zig-regex includes a command-line tool:
