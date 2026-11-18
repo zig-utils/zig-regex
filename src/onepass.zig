@@ -173,9 +173,14 @@ const Builder = struct {
 
     /// Flatten `node` into segments + capture markers. Returns false if the node
     /// is not part of the supported shape.
-    fn flatten(self: *Builder, node: *ast.Node) !bool {
+    ///
+    /// A sequence nests once per element, so its right spine (and a
+    /// non-capturing group's child) is walked in a loop rather than by
+    /// recursion: a long flat pattern overflowed the stack here (#48).
+    fn flatten(self: *Builder, root: *ast.Node) !bool {
         var table: [256]bool = undefined;
-        switch (node.node_type) {
+        var node = root;
+        while (true) switch (node.node_type) {
             .literal, .char_class, .any => {
                 _ = self.baseTable(node, &table);
                 try self.pushSegment(table, 1, 1);
@@ -211,7 +216,7 @@ const Builder = struct {
             },
             .concat => {
                 if (!try self.flatten(node.data.concat.left)) return false;
-                return try self.flatten(node.data.concat.right);
+                node = node.data.concat.right;
             },
             .group => {
                 const grp = node.data.group;
@@ -223,12 +228,11 @@ const Builder = struct {
                     if (!try self.flatten(grp.child)) return false;
                     self.ends.items[idx - 1] = self.segs.items.len - 1;
                     return true;
-                } else {
-                    return try self.flatten(grp.child);
                 }
+                node = grp.child;
             },
             else => return false, // alternation, anchor, backref, lookaround, ...
-        }
+        };
     }
 };
 

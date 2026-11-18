@@ -737,6 +737,38 @@ pub const AST = struct {
     }
 };
 
+/// The two children of a sequence or alternation, split so a walker can loop
+/// on `next` and recurse only on `side`. The parser nests a sequence to the
+/// right (one level per element) and an alternation to the left (one level per
+/// branch), so `next` is that spine and `side` one element or branch, whose
+/// depth is bounded by how deep the pattern nests. Either associativity works.
+pub const SpineStep = struct { next: *Node, side: *Node };
+
+pub fn spine(node: *Node) SpineStep {
+    const left, const right = switch (node.node_type) {
+        .concat => .{ node.data.concat.left, node.data.concat.right },
+        .alternation => .{ node.data.alternation.left, node.data.alternation.right },
+        else => unreachable,
+    };
+    if (left.node_type == node.node_type and right.node_type != node.node_type)
+        return .{ .next = left, .side = right };
+    return .{ .next = right, .side = left };
+}
+
+/// The single child of a node that has one, or null.
+pub fn onlyChild(node: *Node) ?*Node {
+    return switch (node.node_type) {
+        .group => node.data.group.child,
+        .star => node.data.star.child,
+        .plus => node.data.plus.child,
+        .optional => node.data.optional.child,
+        .repeat => node.data.repeat.child,
+        .lookahead => node.data.lookahead.child,
+        .lookbehind => node.data.lookbehind.child,
+        else => null,
+    };
+}
+
 test "create literal node" {
     const allocator = std.testing.allocator;
     const span = common.Span.init(0, 1);

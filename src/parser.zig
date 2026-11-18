@@ -694,61 +694,82 @@ pub const Parser = struct {
         try self.validateDuplicateGroupNamesBranch(root, &names);
     }
 
+    /// Check `node` against the names already defined on its path. Each
+    /// alternative starts from its own copy of the names before it.
+    ///
+    /// The validators below walk sequences and alternations along their spine
+    /// instead of recursing into both children: a concatenation nests once per
+    /// element and an alternation once per branch, so recursing on both overflowed
+    /// the stack for a literal of about 20,000 bytes (#48). Recursion is left for
+    /// the element or branch itself, which is bounded by how deep the pattern
+    /// nests. Sequences are walked in source order, which the duplicate check
+    /// depends on.
     fn validateDuplicateGroupNamesBranch(
         self: *Parser,
-        node: *ast.Node,
+        root: *ast.Node,
         names: *std.StringHashMapUnmanaged(void),
     ) !void {
-        switch (node.data) {
-            .group => |group| {
-                if (group.name) |name| {
-                    if (names.contains(name)) return self.fail(RegexError.DuplicateGroupName, .duplicate_group_specifier_name);
-                    try names.put(self.allocator, name, {});
-                }
-                try self.validateDuplicateGroupNamesBranch(group.child, names);
-            },
-            .concat => |concat| {
-                try self.validateDuplicateGroupNamesBranch(concat.left, names);
-                try self.validateDuplicateGroupNamesBranch(concat.right, names);
-            },
-            .alternation => |alt| {
-                var left_names = try self.cloneNameSet(names);
-                defer left_names.deinit(self.allocator);
-                var right_names = try self.cloneNameSet(names);
-                defer right_names.deinit(self.allocator);
-                try self.validateDuplicateGroupNamesBranch(alt.left, &left_names);
-                try self.validateDuplicateGroupNamesBranch(alt.right, &right_names);
-            },
-            .star, .plus, .optional => |quant| try self.validateDuplicateGroupNamesBranch(quant.child, names),
-            .repeat => |repeat| try self.validateDuplicateGroupNamesBranch(repeat.child, names),
-            .lookahead, .lookbehind => |assertion| try self.validateDuplicateGroupNamesBranch(assertion.child, names),
-            else => {},
+        var node = root;
+        while (true) {
+            switch (node.data) {
+                .group => |group| {
+                    if (group.name) |name| {
+                        if (names.contains(name)) return self.fail(RegexError.DuplicateGroupName, .duplicate_group_specifier_name);
+                        try names.put(self.allocator, name, {});
+                    }
+                    node = group.child;
+                },
+                .concat => |concat| {
+                    try self.validateDuplicateGroupNamesBranch(concat.left, names);
+                    node = concat.right;
+                },
+                .alternation => |alt| {
+                    // An alternation only copies the names it is given, so a
+                    // nested alternation (the left spine) can take them as is.
+                    try self.validateAlternative(alt.right, names);
+                    if (alt.left.node_type != .alternation) return self.validateAlternative(alt.left, names);
+                    node = alt.left;
+                },
+                .star, .plus, .optional => |quant| node = quant.child,
+                .repeat => |repeat| node = repeat.child,
+                .lookahead, .lookbehind => |assertion| node = assertion.child,
+                else => return,
+            }
         }
+    }
+
+    /// `validateDuplicateGroupNamesBranch` on a copy of `names`.
+    fn validateAlternative(self: *Parser, node: *ast.Node, names: *const std.StringHashMapUnmanaged(void)) RegexError!void {
+        var branch_names = try self.cloneNameSet(names);
+        defer branch_names.deinit(self.allocator);
+        try self.validateDuplicateGroupNamesBranch(node, &branch_names);
+    }
+
+    /// The node a validator walks next after `node`, and the child it visits
+    /// by recursion (the element or branch beside a spine, see `ast.spine`).
+    fn walkStep(node: *ast.Node) struct { ?*ast.Node, ?*ast.Node } {
+        return switch (node.node_type) {
+            .concat, .alternation => blk: {
+                const step = ast.spine(node);
+                break :blk .{ step.next, step.side };
+            },
+            else => .{ ast.onlyChild(node), null },
+        };
     }
 
     /// Collect every defined capture-group name from the AST into `names`.
     fn collectGroupNames(
         self: *Parser,
-        node: *ast.Node,
+        root: *ast.Node,
         names: *std.StringHashMapUnmanaged(void),
     ) std.mem.Allocator.Error!void {
-        switch (node.data) {
-            .group => |group| {
-                if (group.name) |name| try names.put(self.allocator, name, {});
-                try self.collectGroupNames(group.child, names);
-            },
-            .concat => |concat| {
-                try self.collectGroupNames(concat.left, names);
-                try self.collectGroupNames(concat.right, names);
-            },
-            .alternation => |alt| {
-                try self.collectGroupNames(alt.left, names);
-                try self.collectGroupNames(alt.right, names);
-            },
-            .star, .plus, .optional => |quant| try self.collectGroupNames(quant.child, names),
-            .repeat => |repeat| try self.collectGroupNames(repeat.child, names),
-            .lookahead, .lookbehind => |assertion| try self.collectGroupNames(assertion.child, names),
-            else => {},
+        var current: ?*ast.Node = root;
+        while (current) |node| {
+            if (node.data == .group) {
+                if (node.data.group.name) |name| try names.put(self.allocator, name, {});
+            }
+            current, const other = walkStep(node);
+            if (other) |o| try self.collectGroupNames(o, names);
         }
     }
 
@@ -761,50 +782,31 @@ pub const Parser = struct {
 
     fn checkNamedBackrefs(
         self: *Parser,
-        node: *ast.Node,
+        root: *ast.Node,
         names: *const std.StringHashMapUnmanaged(void),
     ) RegexError!void {
-        switch (node.data) {
-            .concat => |concat| {
-                try self.checkNamedBackrefs(concat.left, names);
-                try self.checkNamedBackrefs(concat.right, names);
-            },
-            .alternation => |alt| {
-                try self.checkNamedBackrefs(alt.left, names);
-                try self.checkNamedBackrefs(alt.right, names);
-            },
-            .star, .plus, .optional => |quant| try self.checkNamedBackrefs(quant.child, names),
-            .repeat => |repeat| try self.checkNamedBackrefs(repeat.child, names),
-            .group => |group| try self.checkNamedBackrefs(group.child, names),
-            .lookahead, .lookbehind => |assertion| try self.checkNamedBackrefs(assertion.child, names),
-            .backref => |backref| {
-                if (backref.name) |nm| {
+        var current: ?*ast.Node = root;
+        while (current) |node| {
+            if (node.data == .backref) {
+                if (node.data.backref.name) |nm| {
                     if (!names.contains(nm)) return self.fail(RegexError.InvalidBackreference, .invalid_named_backreference);
                 }
-            },
-            else => {},
+            }
+            current, const other = walkStep(node);
+            if (other) |o| try self.checkNamedBackrefs(o, names);
         }
     }
 
-    fn validateUnicodeBackrefs(self: *Parser, node: *ast.Node) RegexError!void {
-        switch (node.data) {
-            .concat => |concat| {
-                try self.validateUnicodeBackrefs(concat.left);
-                try self.validateUnicodeBackrefs(concat.right);
-            },
-            .alternation => |alt| {
-                try self.validateUnicodeBackrefs(alt.left);
-                try self.validateUnicodeBackrefs(alt.right);
-            },
-            .star, .plus, .optional => |quant| try self.validateUnicodeBackrefs(quant.child),
-            .repeat => |repeat| try self.validateUnicodeBackrefs(repeat.child),
-            .group => |group| try self.validateUnicodeBackrefs(group.child),
-            .lookahead, .lookbehind => |assertion| try self.validateUnicodeBackrefs(assertion.child),
-            .backref => |backref| {
+    fn validateUnicodeBackrefs(self: *Parser, root: *ast.Node) RegexError!void {
+        var current: ?*ast.Node = root;
+        while (current) |node| {
+            if (node.data == .backref) {
+                const backref = node.data.backref;
                 if (backref.name == null and (backref.index == 0 or backref.index > self.capture_count))
                     return self.fail(RegexError.InvalidBackreference, .invalid_backreference_for_unicode_pattern);
-            },
-            else => {},
+            }
+            current, const other = walkStep(node);
+            if (other) |o| try self.validateUnicodeBackrefs(o);
         }
     }
 

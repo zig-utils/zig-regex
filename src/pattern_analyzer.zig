@@ -107,25 +107,23 @@ pub const PatternAnalyzer = struct {
         return .safe;
     }
 
-    fn analyzeNode(self: *PatternAnalyzer, node: *ast.Node, inside_quantifier: bool) std.mem.Allocator.Error!void {
-        switch (node.node_type) {
+    fn analyzeNode(self: *PatternAnalyzer, root: *ast.Node, inside_quantifier: bool) std.mem.Allocator.Error!void {
+        // Sequences and groups are walked in a loop, for the reason `ast.spine`
+        // documents: a long flat pattern overflowed the stack here (#48).
+        var node = root;
+        while (true) switch (node.node_type) {
             .star, .plus, .optional, .repeat => {
                 self.quantifier_depth += 1;
                 defer self.quantifier_depth -= 1;
-                try self.analyzeQuantifier(node, inside_quantifier);
+                return self.analyzeQuantifier(node, inside_quantifier);
             },
-            .alternation => {
-                try self.analyzeAlternation(node);
-            },
+            .alternation => return self.analyzeAlternation(node),
             .concat => {
-                const concat = node.data.concat;
-                try self.analyzeNode(concat.left, inside_quantifier);
-                try self.analyzeNode(concat.right, inside_quantifier);
+                const step = ast.spine(node);
+                try self.analyzeNode(step.side, inside_quantifier);
+                node = step.next;
             },
-            .group => {
-                const group = node.data.group;
-                try self.analyzeNode(group.child, inside_quantifier);
-            },
+            .group => node = node.data.group.child,
             .lookahead, .lookbehind => {
                 // Lookarounds require backtracking
                 self.can_use_thompson = false;
@@ -138,19 +136,18 @@ pub const PatternAnalyzer = struct {
                         // so it cannot repartition earlier iterations. Analyze
                         // the body itself: a failed body attempt can still be
                         // catastrophic. The native step counter stays active.
-                        try self.analyzeNode(body, false);
-                        return;
+                        return self.analyzeNode(body, false);
                     }
                 }
-                try self.analyzeNode(lookaround.child, inside_quantifier);
+                node = lookaround.child;
             },
             .backref => {
                 // Backreferences require backtracking
                 self.can_use_thompson = false;
-                try self.addIssue("Pattern contains backreference (requires backtracking)");
+                return self.addIssue("Pattern contains backreference (requires backtracking)");
             },
-            else => {},
-        }
+            else => return,
+        };
     }
 
     fn unconditionalAssertionStar(root: *ast.Node) ?*ast.Node {
@@ -253,19 +250,25 @@ pub const PatternAnalyzer = struct {
         }
     }
 
-    fn analyzeAlternation(self: *PatternAnalyzer, node: *ast.Node) std.mem.Allocator.Error!void {
-        const alternation = node.data.alternation;
+    fn analyzeAlternation(self: *PatternAnalyzer, root: *ast.Node) std.mem.Allocator.Error!void {
+        // Each `|` along the spine, one branch at a time (see `ast.spine`).
+        var node = root;
+        while (node.node_type == .alternation) {
+            const alternation = node.data.alternation;
 
-        // Check for ambiguous alternation (overlapping branches)
-        if (self.detectAmbiguousAlternation(alternation.left, alternation.right)) {
-            self.explosion_factor *= 10000.0; // High risk - can cause significant backtracking
-            try self.addIssue("HIGH: Ambiguous alternation detected (overlapping branches)");
-            try self.addRecommendation("Ensure alternation branches don't overlap");
-            try self.addRecommendation("Example: Replace (a|a)* with a*");
+            // Check for ambiguous alternation (overlapping branches)
+            if (self.detectAmbiguousAlternation(alternation.left, alternation.right)) {
+                self.explosion_factor *= 10000.0; // High risk - can cause significant backtracking
+                try self.addIssue("HIGH: Ambiguous alternation detected (overlapping branches)");
+                try self.addRecommendation("Ensure alternation branches don't overlap");
+                try self.addRecommendation("Example: Replace (a|a)* with a*");
+            }
+
+            const step = ast.spine(node);
+            try self.analyzeNode(step.side, false);
+            node = step.next;
         }
-
-        try self.analyzeNode(alternation.left, false);
-        try self.analyzeNode(alternation.right, false);
+        try self.analyzeNode(node, false);
     }
 
     fn isQuantifier(self: *PatternAnalyzer, node: *ast.Node) bool {
@@ -362,39 +365,34 @@ pub const PatternAnalyzer = struct {
     }
 
     /// Whether `node`'s subtree contains any unbounded quantifier.
-    fn containsUnboundedQuantifier(self: *PatternAnalyzer, node: *ast.Node) bool {
-        if (self.isUnboundedQuant(node)) return true;
-        switch (node.node_type) {
-            .star => return self.containsUnboundedQuantifier(node.data.star.child),
-            .plus => return self.containsUnboundedQuantifier(node.data.plus.child),
-            .optional => return self.containsUnboundedQuantifier(node.data.optional.child),
-            .repeat => return self.containsUnboundedQuantifier(node.data.repeat.child),
-            .concat => return self.containsUnboundedQuantifier(node.data.concat.left) or
-                self.containsUnboundedQuantifier(node.data.concat.right),
-            .alternation => return self.containsUnboundedQuantifier(node.data.alternation.left) or
-                self.containsUnboundedQuantifier(node.data.alternation.right),
-            .group => return self.containsUnboundedQuantifier(node.data.group.child),
-            else => return false,
+    fn containsUnboundedQuantifier(self: *PatternAnalyzer, root: *ast.Node) bool {
+        var node = root;
+        while (true) {
+            if (self.isUnboundedQuant(node)) return true;
+            switch (node.node_type) {
+                .star, .plus, .optional, .repeat, .group => node = ast.onlyChild(node).?,
+                .concat, .alternation => {
+                    const step = ast.spine(node);
+                    if (self.containsUnboundedQuantifier(step.side)) return true;
+                    node = step.next;
+                },
+                else => return false,
+            }
         }
     }
 
-    fn containsQuantifier(self: *PatternAnalyzer, node: *ast.Node) bool {
-        switch (node.node_type) {
+    fn containsQuantifier(self: *PatternAnalyzer, root: *ast.Node) bool {
+        var node = root;
+        while (true) switch (node.node_type) {
             .star, .plus, .optional, .repeat => return true,
-            .concat => {
-                const concat = node.data.concat;
-                return self.containsQuantifier(concat.left) or self.containsQuantifier(concat.right);
+            .concat, .alternation => {
+                const step = ast.spine(node);
+                if (self.containsQuantifier(step.side)) return true;
+                node = step.next;
             },
-            .alternation => {
-                const alternation = node.data.alternation;
-                return self.containsQuantifier(alternation.left) or self.containsQuantifier(alternation.right);
-            },
-            .group => {
-                const group = node.data.group;
-                return self.containsQuantifier(group.child);
-            },
+            .group => node = node.data.group.child,
             else => return false,
-        }
+        };
     }
 
     fn isAtomicGroup(self: *PatternAnalyzer, node: *ast.Node) bool {
@@ -612,23 +610,27 @@ pub const PatternAnalyzer = struct {
         return false;
     }
 
-    fn nodesAreIdentical(self: *PatternAnalyzer, left: *ast.Node, right: *ast.Node) bool {
-        if (left.node_type != right.node_type) return false;
-
-        return switch (left.node_type) {
-            .literal => left.data.literal == right.data.literal,
-            .any => true,
-            .star => self.nodesAreIdentical(left.data.star.child, right.data.star.child),
-            .plus => self.nodesAreIdentical(left.data.plus.child, right.data.plus.child),
-            .optional => self.nodesAreIdentical(left.data.optional.child, right.data.optional.child),
-            .concat => {
-                const left_concat = left.data.concat;
-                const right_concat = right.data.concat;
-                return self.nodesAreIdentical(left_concat.left, right_concat.left) and
-                    self.nodesAreIdentical(left_concat.right, right_concat.right);
-            },
-            else => false,
-        };
+    fn nodesAreIdentical(self: *PatternAnalyzer, left_root: *ast.Node, right_root: *ast.Node) bool {
+        // Sequences compare element by element along the right spine.
+        var left = left_root;
+        var right = right_root;
+        while (true) {
+            if (left.node_type != right.node_type) return false;
+            switch (left.node_type) {
+                .literal => return left.data.literal == right.data.literal,
+                .any => return true,
+                .star, .plus, .optional => {
+                    left = ast.onlyChild(left).?;
+                    right = ast.onlyChild(right).?;
+                },
+                .concat => {
+                    if (!self.nodesAreIdentical(left.data.concat.left, right.data.concat.left)) return false;
+                    left = left.data.concat.right;
+                    right = right.data.concat.right;
+                },
+                else => return false,
+            }
+        }
     }
 
     fn addIssue(self: *PatternAnalyzer, issue: []const u8) !void {

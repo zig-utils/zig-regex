@@ -2653,17 +2653,21 @@ pub const Regex = struct {
 /// Append the literal/anchor leaves of a concatenation spine to `out`, in
 /// order. Returns false if any node isn't a literal, anchor, concat, or empty —
 /// i.e. the pattern isn't a plain literal wrapped in zero-width assertions.
-fn flattenBoundedLeaves(node: *ast.Node, out: *std.ArrayList(*ast.Node), allocator: std.mem.Allocator) bool {
-    switch (node.node_type) {
-        .concat => return flattenBoundedLeaves(node.data.concat.left, out, allocator) and
-            flattenBoundedLeaves(node.data.concat.right, out, allocator),
+fn flattenBoundedLeaves(root: *ast.Node, out: *std.ArrayList(*ast.Node), allocator: std.mem.Allocator) bool {
+    // In source order along the right spine (#48).
+    var node = root;
+    while (true) switch (node.node_type) {
+        .concat => {
+            if (!flattenBoundedLeaves(node.data.concat.left, out, allocator)) return false;
+            node = node.data.concat.right;
+        },
         .literal, .anchor => {
             out.append(allocator, node) catch return false;
             return true;
         },
         .empty => return true,
         else => return false,
-    }
+    };
 }
 
 /// Detect a `\bfn\b`-style pattern: a fixed literal (>= 2 bytes, for
@@ -2774,90 +2778,103 @@ fn hasSingleEntryCaptures(node: *ast.Node, repeated: bool) bool {
 // The ECMAScript priority-ordered VM honors lazy edges and alternation order.
 // Admit capture-free and single-entry capture paths, or one spanning capture
 // with boundary assertions. Repeated capture histories retain the fallback.
-fn requiresBacktracking(node: *ast.Node, flags: common.CompileFlags, ordered_quantifiers: bool) bool {
-    switch (node.node_type) {
-        // These features require backtracking
-        .lookahead, .lookbehind => {
-            const a = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
-            return !flags.ecmascript or flags.case_insensitive or flags.unicode or flags.unicode_sets or
-                compiler.fixedAsciiLiteral(a.child) == null;
-        },
-        .backref, .unicode_property => return true,
+fn requiresBacktracking(root: *ast.Node, flags: common.CompileFlags, ordered_quantifiers: bool) bool {
+    // Sequences and alternations are walked along their spine, recursing only
+    // into the element or branch beside it (see `spine`), so a long flat
+    // pattern does not overflow the stack (#48).
+    var node = root;
+    // Set while walking down an alternation's spine whose capture check has
+    // already been answered for every branch below.
+    var branches_checked = false;
+    while (true) {
+        const in_checked_spine = branches_checked;
+        branches_checked = false;
+        switch (node.node_type) {
+            // These features require backtracking
+            .lookahead, .lookbehind => {
+                const a = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
+                return !flags.ecmascript or flags.case_insensitive or flags.unicode or flags.unicode_sets or
+                    compiler.fixedAsciiLiteral(a.child) == null;
+            },
+            .backref, .unicode_property => return true,
 
-        // Under `/iu`, ECMAScript word-boundary assertions treat characters
-        // that canonicalize to ASCII word characters (U+017F, U+212A) as word
-        // characters. The byte DFA only tracks ASCII word bytes.
-        .anchor => return flags.unicode and flags.case_insensitive and
-            (node.data.anchor == .word_boundary or node.data.anchor == .non_word_boundary),
+            // Under `/iu`, ECMAScript word-boundary assertions treat characters
+            // that canonicalize to ASCII word characters (U+017F, U+212A) as word
+            // characters. The byte DFA only tracks ASCII word bytes.
+            .anchor => return flags.unicode and flags.case_insensitive and
+                (node.data.anchor == .word_boundary or node.data.anchor == .non_word_boundary),
 
-        .char_class => return flags.unicode and flags.case_insensitive and
-            isAsciiWordClass(node.data.char_class),
+            .char_class => return flags.unicode and flags.case_insensitive and
+                isAsciiWordClass(node.data.char_class),
 
-        // A positive `class_set` (`\s`, `/v` Unicode brackets) lowers to a
-        // UTF-8 byte automaton when it's a union of code-point ranges. Negated
-        // Unicode sets must stay code-point based: the byte automaton can match
-        // a single WTF-8 surrogate code unit from an astral pair, while
-        // ECMAScript `/u` classes consume the whole code point.
-        // Case-invariant sets (including \s) need no extra folding. Keep
-        // case-sensitive membership on the NFA rather than rejecting valid
-        // nested quantifiers through the backtracking risk policy.
-        .class_set => return (flags.case_insensitive and
-            (!flags.ecmascript or !@import("utf8_class.zig").caseInvariant(node.data.class_set))) or
-            ((flags.unicode or flags.unicode_sets) and @import("utf8_class.zig").containsComplement(node.data.class_set)) or
-            !@import("utf8_class.zig").compilable(node.data.class_set),
+            // A positive `class_set` (`\s`, `/v` Unicode brackets) lowers to a
+            // UTF-8 byte automaton when it's a union of code-point ranges. Negated
+            // Unicode sets must stay code-point based: the byte automaton can match
+            // a single WTF-8 surrogate code unit from an astral pair, while
+            // ECMAScript `/u` classes consume the whole code point.
+            // Case-invariant sets (including \s) need no extra folding. Keep
+            // case-sensitive membership on the NFA rather than rejecting valid
+            // nested quantifiers through the backtracking risk policy.
+            .class_set => return (flags.case_insensitive and
+                (!flags.ecmascript or !@import("utf8_class.zig").caseInvariant(node.data.class_set))) or
+                ((flags.unicode or flags.unicode_sets) and @import("utf8_class.zig").containsComplement(node.data.class_set)) or
+                !@import("utf8_class.zig").compilable(node.data.class_set),
 
-        // Check for lazy quantifiers
-        .star, .plus, .optional => {
-            const greedy = switch (node.node_type) {
-                .star => node.data.star.greedy,
-                .plus => node.data.plus.greedy,
-                .optional => node.data.optional.greedy,
-                else => unreachable,
-            };
-            if (!greedy and !ordered_quantifiers) return true;
+            // Check for lazy quantifiers
+            .star, .plus, .optional => {
+                const greedy = switch (node.node_type) {
+                    .star => node.data.star.greedy,
+                    .plus => node.data.plus.greedy,
+                    .optional => node.data.optional.greedy,
+                    else => unreachable,
+                };
+                if (!greedy and !ordered_quantifiers) return true;
 
-            // Recursively check child
-            const child = switch (node.node_type) {
-                .star => node.data.star.child,
-                .plus => node.data.plus.child,
-                .optional => node.data.optional.child,
-                else => unreachable,
-            };
-            if (!ordered_quantifiers and containsAlternation(child)) return true;
-            return requiresBacktracking(child, flags, ordered_quantifiers);
-        },
-        .repeat => {
-            if (!node.data.repeat.greedy and !ordered_quantifiers) return true;
-            if (node.data.repeat.bounds.min > MAX_NFA_REPEAT_EXPANSION) return true;
-            if (node.data.repeat.bounds.max) |max| {
-                if (max > MAX_NFA_REPEAT_EXPANSION) return true;
-            }
-            if (!ordered_quantifiers and containsAlternation(node.data.repeat.child)) return true;
-            return requiresBacktracking(node.data.repeat.child, flags, ordered_quantifiers);
-        },
+                const child = switch (node.node_type) {
+                    .star => node.data.star.child,
+                    .plus => node.data.plus.child,
+                    .optional => node.data.optional.child,
+                    else => unreachable,
+                };
+                if (!ordered_quantifiers and containsAlternation(child)) return true;
+                node = child;
+            },
+            .repeat => {
+                if (!node.data.repeat.greedy and !ordered_quantifiers) return true;
+                if (node.data.repeat.bounds.min > MAX_NFA_REPEAT_EXPANSION) return true;
+                if (node.data.repeat.bounds.max) |max| {
+                    if (max > MAX_NFA_REPEAT_EXPANSION) return true;
+                }
+                if (!ordered_quantifiers and containsAlternation(node.data.repeat.child)) return true;
+                node = node.data.repeat.child;
+            },
 
-        // Recursively check compound nodes
-        .concat => {
-            return requiresBacktracking(node.data.concat.left, flags, ordered_quantifiers) or
-                requiresBacktracking(node.data.concat.right, flags, ordered_quantifiers);
-        },
-        .alternation => {
-            if (containsCapture(node) and !ordered_quantifiers) return true;
-            return requiresBacktracking(node.data.alternation.left, flags, ordered_quantifiers) or
-                requiresBacktracking(node.data.alternation.right, flags, ordered_quantifiers);
-        },
-        // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
-        // which only the backtracking engine honors.
-        .group => return node.data.group.mod != null or requiresBacktracking(node.data.group.child, flags, ordered_quantifiers),
+            .concat, .alternation => {
+                if (node.node_type == .alternation and !ordered_quantifiers and !in_checked_spine) {
+                    if (containsCapture(node)) return true;
+                }
+                const step = ast.spine(node);
+                if (requiresBacktracking(step.side, flags, ordered_quantifiers)) return true;
+                // No branch below a capture-free alternation holds a capture.
+                branches_checked = node.node_type == .alternation and step.next.node_type == .alternation;
+                node = step.next;
+            },
+            // A group carrying inline modifiers `(?i:...)` adjusts flags per-scope,
+            // which only the backtracking engine honors.
+            .group => {
+                if (node.data.group.mod != null) return true;
+                node = node.data.group.child;
+            },
 
-        // The byte NFA can lower ordinary UTF-8 code points directly. In
-        // ECMAScript Unicode mode, however, adjacent WTF-8 high/low surrogate
-        // encodings form one code point and must be consumed atomically; the
-        // backtracker's common.dotMatchLen path implements that rule.
-        .any => return flags.unicode,
+            // The byte NFA can lower ordinary UTF-8 code points directly. In
+            // ECMAScript Unicode mode, however, adjacent WTF-8 high/low surrogate
+            // encodings form one code point and must be consumed atomically; the
+            // backtracker's common.dotMatchLen path implements that rule.
+            .any => return flags.unicode,
 
-        // These don't require backtracking
-        .literal, .empty => return false,
+            // These don't require backtracking
+            .literal, .empty => return false,
+        }
     }
 }
 
@@ -2870,19 +2887,19 @@ fn isAsciiWordClass(char_class: common.CharClass) bool {
     return true;
 }
 
-fn containsAlternation(node: *ast.Node) bool {
-    return switch (node.node_type) {
-        .alternation => true,
-        .concat => containsAlternation(node.data.concat.left) or containsAlternation(node.data.concat.right),
-        .star => containsAlternation(node.data.star.child),
-        .plus => containsAlternation(node.data.plus.child),
-        .optional => containsAlternation(node.data.optional.child),
-        .repeat => containsAlternation(node.data.repeat.child),
-        .group => containsAlternation(node.data.group.child),
-        .lookahead => containsAlternation(node.data.lookahead.child),
-        .lookbehind => containsAlternation(node.data.lookbehind.child),
-        else => false,
-    };
+fn containsAlternation(root: *ast.Node) bool {
+    var node = root;
+    while (true) {
+        switch (node.node_type) {
+            .alternation => return true,
+            .concat => {
+                const step = ast.spine(node);
+                if (containsAlternation(step.side)) return true;
+                node = step.next;
+            },
+            else => node = ast.onlyChild(node) orelse return false,
+        }
+    }
 }
 
 const ByteSet = [256]bool;
@@ -2933,16 +2950,33 @@ fn byteSetsOverlap(a: ByteSet, b: ByteSet) bool {
 }
 
 fn canMatchEmpty(node: *ast.Node) bool {
-    return switch (node.node_type) {
-        .empty, .anchor, .lookahead, .lookbehind => true,
-        .literal, .any, .char_class, .backref, .unicode_property, .class_set => false,
-        .star, .optional => true,
-        .plus => canMatchEmpty(node.data.plus.child),
-        .repeat => node.data.repeat.bounds.min == 0 or canMatchEmpty(node.data.repeat.child),
-        .group => canMatchEmpty(node.data.group.child),
-        .concat => canMatchEmpty(node.data.concat.left) and canMatchEmpty(node.data.concat.right),
-        .alternation => canMatchEmpty(node.data.alternation.left) or canMatchEmpty(node.data.alternation.right),
-    };
+    switch (node.node_type) {
+        .empty, .anchor, .lookahead, .lookbehind => return true,
+        .literal, .any, .char_class, .backref, .unicode_property, .class_set => return false,
+        .star, .optional => return true,
+        .plus => return canMatchEmpty(node.data.plus.child),
+        .repeat => return node.data.repeat.bounds.min == 0 or canMatchEmpty(node.data.repeat.child),
+        .group => return canMatchEmpty(node.data.group.child),
+        .concat => {
+            // Along the spine, for the reason `spine` documents.
+            var rest = node;
+            while (rest.node_type == .concat) {
+                const step = ast.spine(rest);
+                if (!canMatchEmpty(step.side)) return false;
+                rest = step.next;
+            }
+            return canMatchEmpty(rest);
+        },
+        .alternation => {
+            var rest = node;
+            while (rest.node_type == .alternation) {
+                const step = ast.spine(rest);
+                if (canMatchEmpty(step.side)) return true;
+                rest = step.next;
+            }
+            return canMatchEmpty(rest);
+        },
+    }
 }
 
 fn firstByteSet(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
@@ -2955,28 +2989,46 @@ fn firstByteSet(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
         .plus => firstByteSet(node.data.plus.child, flags),
         .optional => firstByteSet(node.data.optional.child, flags),
         .repeat => if (node.data.repeat.bounds.max == 0) null else firstByteSet(node.data.repeat.child, flags),
-        .concat => blk: {
-            const left = firstByteSet(node.data.concat.left, flags);
-            if (!canMatchEmpty(node.data.concat.left)) break :blk left;
-            const right = firstByteSet(node.data.concat.right, flags);
-            if (left) |l| {
-                if (right) |r| break :blk unionByteSet(l, r);
-                break :blk l;
+        // The bytes of each element up to the first that cannot match empty,
+        // or of every branch, walked along the spine (see `spine`).
+        .concat, .alternation => blk: {
+            var set: ?ByteSet = null;
+            var rest = node;
+            while (rest.node_type == node.node_type) {
+                const step = ast.spine(rest);
+                set = unionOptional(set, firstByteSet(step.side, flags));
+                if (node.node_type == .concat and !canMatchEmpty(step.side)) break :blk set;
+                rest = step.next;
             }
-            break :blk right;
-        },
-        .alternation => blk: {
-            const left = firstByteSet(node.data.alternation.left, flags);
-            const right = firstByteSet(node.data.alternation.right, flags);
-            if (left) |l| {
-                if (right) |r| break :blk unionByteSet(l, r);
-                break :blk l;
-            }
-            break :blk right;
+            break :blk unionOptional(set, firstByteSet(rest, flags));
         },
         .empty, .anchor, .lookahead, .lookbehind => null,
         .backref, .unicode_property, .class_set => null,
     };
+}
+
+/// `tailOf` for a sequence: the tail of its last element that cannot match
+/// empty, or of an element after it, the last that has one (the right-nested
+/// rule `tail(R) orelse if R can match empty then tail(L)`, unrolled). Walked
+/// forwards along the spine (see `spine`), keeping the latest candidate.
+fn sequenceTail(node: *ast.Node, flags: common.CompileFlags, comptime tailOf: fn (*ast.Node, common.CompileFlags) ?ByteSet) ?ByteSet {
+    var tail: ?ByteSet = null;
+    var rest = node;
+    while (true) {
+        const element, const next = if (rest.node_type == .concat) blk: {
+            const step = ast.spine(rest);
+            break :blk .{ step.side, @as(?*ast.Node, step.next) };
+        } else .{ rest, @as(?*ast.Node, null) };
+        const element_tail = tailOf(element, flags);
+        if (element_tail != null or !canMatchEmpty(element)) tail = element_tail;
+        rest = next orelse return tail;
+    }
+}
+
+fn unionOptional(a: ?ByteSet, b: ?ByteSet) ?ByteSet {
+    const l = a orelse return b;
+    const r = b orelse return l;
+    return unionByteSet(l, r);
 }
 
 fn variableQuantifierTailBytes(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
@@ -2990,12 +3042,7 @@ fn variableQuantifierTailBytes(node: *ast.Node, flags: common.CompileFlags) ?Byt
             return if (variable) firstByteSet(r.child, flags) else null;
         },
         .group => return variableQuantifierTailBytes(node.data.group.child, flags),
-        .concat => {
-            if (variableQuantifierTailBytes(node.data.concat.right, flags)) |set| return set;
-            if (canMatchEmpty(node.data.concat.right))
-                return variableQuantifierTailBytes(node.data.concat.left, flags);
-            return null;
-        },
+        .concat => return sequenceTail(node, flags, variableQuantifierTailBytes),
         else => return null,
     }
 }
@@ -3034,19 +3081,22 @@ fn dropCaptures(allocator: std.mem.Allocator, root: *ast.Node) !bool {
     return true;
 }
 
-fn containsCapture(node: *ast.Node) bool {
-    return switch (node.node_type) {
-        .group => node.data.group.capture_index != null or containsCapture(node.data.group.child),
-        .concat => containsCapture(node.data.concat.left) or containsCapture(node.data.concat.right),
-        .alternation => containsCapture(node.data.alternation.left) or containsCapture(node.data.alternation.right),
-        .star => containsCapture(node.data.star.child),
-        .plus => containsCapture(node.data.plus.child),
-        .optional => containsCapture(node.data.optional.child),
-        .repeat => containsCapture(node.data.repeat.child),
-        .lookahead => containsCapture(node.data.lookahead.child),
-        .lookbehind => containsCapture(node.data.lookbehind.child),
-        else => false,
-    };
+fn containsCapture(root: *ast.Node) bool {
+    var node = root;
+    while (true) {
+        switch (node.node_type) {
+            .group => {
+                if (node.data.group.capture_index != null) return true;
+                node = node.data.group.child;
+            },
+            .concat, .alternation => {
+                const step = ast.spine(node);
+                if (containsCapture(step.side)) return true;
+                node = step.next;
+            },
+            else => node = ast.onlyChild(node) orelse return false,
+        }
+    }
 }
 
 fn capturedVariableTailBytes(node: *ast.Node, flags: common.CompileFlags) ?ByteSet {
@@ -3071,40 +3121,35 @@ fn capturedVariableTailBytes(node: *ast.Node, flags: common.CompileFlags) ?ByteS
             if (variable and optional_like and containsCapture(child)) return variableQuantifierTailBytes(node, flags);
             return capturedVariableTailBytes(child, flags);
         },
-        .concat => {
-            if (capturedVariableTailBytes(node.data.concat.right, flags)) |set| return set;
-            if (canMatchEmpty(node.data.concat.right))
-                return capturedVariableTailBytes(node.data.concat.left, flags);
-            return null;
-        },
+        .concat => return sequenceTail(node, flags, capturedVariableTailBytes),
         else => return null,
     }
 }
 
-fn hasAmbiguousCaptureBoundary(node: *ast.Node, flags: common.CompileFlags) bool {
-    switch (node.node_type) {
-        .concat => {
-            const c = node.data.concat;
-            if (capturedVariableTailBytes(c.left, flags)) |tail| {
-                if (firstByteSet(c.right, flags)) |first| {
-                    if (byteSetsOverlap(tail, first)) return true;
-                } else if (!canMatchEmpty(c.right)) {
-                    return true;
+fn hasAmbiguousCaptureBoundary(root: *ast.Node, flags: common.CompileFlags) bool {
+    var node = root;
+    while (true) {
+        switch (node.node_type) {
+            .concat => {
+                const c = node.data.concat;
+                if (capturedVariableTailBytes(c.left, flags)) |tail| {
+                    if (firstByteSet(c.right, flags)) |first| {
+                        if (byteSetsOverlap(tail, first)) return true;
+                    } else if (!canMatchEmpty(c.right)) {
+                        return true;
+                    }
                 }
-            }
-            return hasAmbiguousCaptureBoundary(c.left, flags) or
-                hasAmbiguousCaptureBoundary(c.right, flags);
-        },
-        .group => return hasAmbiguousCaptureBoundary(node.data.group.child, flags),
-        .alternation => return hasAmbiguousCaptureBoundary(node.data.alternation.left, flags) or
-            hasAmbiguousCaptureBoundary(node.data.alternation.right, flags),
-        .star => return hasAmbiguousCaptureBoundary(node.data.star.child, flags),
-        .plus => return hasAmbiguousCaptureBoundary(node.data.plus.child, flags),
-        .optional => return hasAmbiguousCaptureBoundary(node.data.optional.child, flags),
-        .repeat => return hasAmbiguousCaptureBoundary(node.data.repeat.child, flags),
-        .lookahead => return hasAmbiguousCaptureBoundary(node.data.lookahead.child, flags),
-        .lookbehind => return hasAmbiguousCaptureBoundary(node.data.lookbehind.child, flags),
-        else => return false,
+                const step = ast.spine(node);
+                if (hasAmbiguousCaptureBoundary(step.side, flags)) return true;
+                node = step.next;
+            },
+            .alternation => {
+                const step = ast.spine(node);
+                if (hasAmbiguousCaptureBoundary(step.side, flags)) return true;
+                node = step.next;
+            },
+            else => node = ast.onlyChild(node) orelse return false,
+        }
     }
 }
 
@@ -3124,48 +3169,40 @@ fn deinitNamedCaptureList(allocator: std.mem.Allocator, list: *std.ArrayList(Nam
 /// occurrence in source order for ECMAScript duplicate-name alternatives.
 fn collectNamedCaptures(
     allocator: std.mem.Allocator,
-    node: *ast.Node,
+    root: *ast.Node,
     map: *std.StringHashMap(usize),
     list: *std.ArrayList(NamedCapture),
 ) !void {
-    switch (node.node_type) {
-        .group => {
-            const group = node.data.group;
-            if (group.name) |name| {
-                if (group.capture_index) |index| {
-                    if (!map.contains(name)) {
-                        const key = try allocator.dupe(u8, name);
-                        errdefer allocator.free(key);
-                        try map.put(key, index);
+    // Source order matters (the list is ordered and the first of a duplicated
+    // name wins in the map), so this walks with an explicit stack rather than
+    // along a spine; recursion overflowed on long flat patterns (#48).
+    var pending: std.ArrayList(*ast.Node) = .empty;
+    defer pending.deinit(allocator);
+    try pending.append(allocator, root);
+    while (pending.pop()) |node| {
+        switch (node.node_type) {
+            .group => {
+                const group = node.data.group;
+                if (group.name) |name| {
+                    if (group.capture_index) |index| {
+                        if (!map.contains(name)) {
+                            const key = try allocator.dupe(u8, name);
+                            errdefer allocator.free(key);
+                            try map.put(key, index);
+                        }
+                        const entry_name = try allocator.dupe(u8, name);
+                        errdefer allocator.free(entry_name);
+                        try list.append(allocator, .{ .name = entry_name, .index = index });
                     }
-                    const entry_name = try allocator.dupe(u8, name);
-                    errdefer allocator.free(entry_name);
-                    try list.append(allocator, .{ .name = entry_name, .index = index });
                 }
-            }
-            try collectNamedCaptures(allocator, group.child, map, list);
-        },
-        .concat => {
-            try collectNamedCaptures(allocator, node.data.concat.left, map, list);
-            try collectNamedCaptures(allocator, node.data.concat.right, map, list);
-        },
-        .alternation => {
-            try collectNamedCaptures(allocator, node.data.alternation.left, map, list);
-            try collectNamedCaptures(allocator, node.data.alternation.right, map, list);
-        },
-        .star => try collectNamedCaptures(allocator, node.data.star.child, map, list),
-        .plus => try collectNamedCaptures(allocator, node.data.plus.child, map, list),
-        .optional => try collectNamedCaptures(allocator, node.data.optional.child, map, list),
-        .repeat => try collectNamedCaptures(allocator, node.data.repeat.child, map, list),
-        .lookahead, .lookbehind => {
-            const child = switch (node.node_type) {
-                .lookahead => node.data.lookahead.child,
-                .lookbehind => node.data.lookbehind.child,
-                else => unreachable,
-            };
-            try collectNamedCaptures(allocator, child, map, list);
-        },
-        else => {}, // Literals, character classes, anchors, backreferences don't contain groups
+                try pending.append(allocator, group.child);
+            },
+            // Right first, so the left child pops first.
+            .concat => try pending.appendSlice(allocator, &.{ node.data.concat.right, node.data.concat.left }),
+            .alternation => try pending.appendSlice(allocator, &.{ node.data.alternation.right, node.data.alternation.left }),
+            // Literals, character classes, anchors and backreferences hold no groups.
+            else => if (ast.onlyChild(node)) |child| try pending.append(allocator, child),
+        }
     }
 }
 

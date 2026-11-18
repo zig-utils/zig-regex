@@ -1069,3 +1069,47 @@ test "backtrack: lazy captures try the continuation before enumerating the tail"
     try std.testing.expectEqualStrings("==yes==", found.slice);
     try std.testing.expectEqualStrings("yes", found.captures[0]);
 }
+
+// A literal written out longhand is a sequence one node deep per byte. The
+// post-parse validators and the compile-time analyses walk it along its spine;
+// they used to recurse into both children of every node and overflowed the
+// stack at about 20,000 bytes (#48).
+test "parser: long flat patterns compile on every path" {
+    const allocator = std.testing.allocator;
+    const regex = @import("regex");
+    const n = 60_000;
+    const text = try allocator.alloc(u8, n);
+    defer allocator.free(text);
+    for (text, 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
+    const Shape = struct { prefix: []const u8, suffix: []const u8 };
+    const shapes = [_]Shape{
+        .{ .prefix = "", .suffix = "" },
+        .{ .prefix = "(", .suffix = ")" },
+        .{ .prefix = "(?<long>", .suffix = ")" },
+        .{ .prefix = "(?:", .suffix = ")+" },
+        .{ .prefix = "\\b", .suffix = "z*\\b" },
+    };
+    for (shapes) |shape| {
+        const p = try std.mem.concat(allocator, u8, &.{ shape.prefix, text, shape.suffix });
+        defer allocator.free(p);
+        var re = try Regex.compile(allocator, p);
+        defer re.deinit();
+        try std.testing.expect(try re.isMatch(text));
+        try std.testing.expect(!try re.isMatch(text[1..]));
+
+        var bytes = try Regex.compileWithFlags(allocator, p, .{ .bytes = true, .case_insensitive = true });
+        defer bytes.deinit();
+        try std.testing.expect(try bytes.isMatch(text));
+
+        var program = try regex.Program.compile(allocator, p, .{ .bytes = true });
+        defer program.deinit(allocator);
+        var scratch = try regex.Scratch.init(allocator, &program);
+        defer scratch.deinit(allocator);
+        const span = (try program.find(&scratch, text)).?;
+        try std.testing.expectEqual(@as(usize, 0), span.start);
+        try std.testing.expectEqual(@as(usize, n), span.end);
+
+        var factors = (try regex.requiredFactors(allocator, p, .{}, .{})).?;
+        factors.deinit(allocator);
+    }
+}
