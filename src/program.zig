@@ -46,6 +46,9 @@ pub const BuildError = error{
 pub const MatchError = error{
     /// The scratch was sized for smaller programs than this one.
     ScratchTooSmall,
+    /// The search used up `Scratch.step_budget` before it could decide. This
+    /// is never a "no match": the input was not fully examined.
+    BudgetExceeded,
 };
 
 /// The magic bytes every program blob starts with.
@@ -224,11 +227,13 @@ pub const Program = struct {
     /// Whether `pattern` matches anywhere in `input`.
     pub fn isMatch(self: *const Program, scratch: *Scratch, input: []const u8) MatchError!bool {
         try scratch.bind(self);
+        scratch.steps = 0;
         const found = scratch.dfaEarliestEnd(self, input, 0) catch |err| switch (err) {
             error.DfaFull => {
                 scratch.resetDfa();
-                return scratch.nfaFind(self, input, 0, true) != null;
+                return (try scratch.nfaFind(self, input, 0, true)) != null;
             },
+            error.BudgetExceeded => return error.BudgetExceeded,
         };
         return found != null;
     }
@@ -242,12 +247,14 @@ pub const Program = struct {
     /// the whole input, so `^` and `\b` at `start` look at `input[start - 1]`.
     pub fn findFrom(self: *const Program, scratch: *Scratch, input: []const u8, start: usize) MatchError!?Span {
         try scratch.bind(self);
+        scratch.steps = 0;
         if (start > input.len) return null;
         return scratch.dfaFind(self, input, start) catch |err| switch (err) {
             error.DfaFull => {
                 scratch.resetDfa();
                 return scratch.nfaFind(self, input, start, false);
             },
+            error.BudgetExceeded => return error.BudgetExceeded,
         };
     }
 
@@ -708,15 +715,24 @@ fn firstBytes(allocator: std.mem.Allocator, start: u32, sets: []const ByteSet, e
 pub const Capacity = struct {
     states: u32,
     classes: u32,
+    /// The most lazy-DFA states the scratch caches. A search that needs more
+    /// resets the cache and finishes on the NFA simulation, so a small cap
+    /// bounds memory without failing any match. Zero disables the DFA.
+    dfa_states: u32 = default_dfa_states,
 
     pub fn max(a: Capacity, b: Capacity) Capacity {
-        return .{ .states = @max(a.states, b.states), .classes = @max(a.classes, b.classes) };
+        return .{
+            .states = @max(a.states, b.states),
+            .classes = @max(a.classes, b.classes),
+            .dfa_states = @max(a.dfa_states, b.dfa_states),
+        };
     }
 };
 
-/// The most lazy-DFA states a scratch caches before it resets and the call
-/// finishes on the NFA simulation.
+/// The DFA state cap a `Capacity` gets unless it names one.
 pub const default_dfa_states: u32 = 1024;
+/// The largest DFA state cap: transition entries keep state ids in 30 bits.
+pub const max_dfa_states: u32 = (1 << 30) - 1;
 
 const trans_uncomputed: u32 = 0xFFFF_FFFF;
 const trans_dead: u32 = 1 << 31;
@@ -747,9 +763,28 @@ const ThreadList = struct {
 
 /// Mutable matching state for one thread. Create it once, reuse it for every
 /// match: matching never allocates.
+///
+/// Memory: `bytesNeeded` is exact. For a capacity of N states, C byte
+/// classes and a DFA cap of D states it is at most
+///
+///     36 N + 4 D (C + 1) + 4 D (W + 1) + 4 H + 12 W + 8 bytes,
+///
+/// where W = ceil(N / 32) and H, the DFA hash table, is the smallest power of
+/// two that is at least 16 and at least 2 D. With D = 256 that is at most
+/// `36 N + 1024 (C + W + 2) + 12 W + 2056` bytes; see `boundFor`.
 pub const Scratch = struct {
     capacity: Capacity,
     dfa_cap: u32,
+    /// The most steps one search may take, or null for no limit. A step is
+    /// one byte the DFA reads (or skips while looking for a match start), or
+    /// one unit of NFA work: a thread visited by a closure or advanced over a
+    /// byte, including the closures that build a DFA state. The budget
+    /// applies to each `isMatch`, `find` and `findFrom` call, and to each
+    /// match an iterator, `findAll` or `count` looks for. A search that would
+    /// exceed it fails with `error.BudgetExceeded`, never with "no match".
+    step_budget: ?u64 = null,
+    /// The steps the last search took (at most `step_budget`).
+    steps: u64 = 0,
     /// Row stride of the transition table: the largest class count plus the
     /// end-of-input column.
     stride: u32,
@@ -780,7 +815,18 @@ pub const Scratch = struct {
 
     /// The bytes `initBuffer` needs for `capacity`.
     pub fn bytesNeeded(capacity: Capacity) usize {
-        return layout(capacity, default_dfa_states).total;
+        return layout(capacity).total;
+    }
+
+    /// The documented upper bound on `bytesNeeded` (see the type's docs).
+    pub fn boundFor(capacity: Capacity) usize {
+        const n: usize = @max(capacity.states, 1);
+        const c: usize = @max(capacity.classes, 1);
+        const d: usize = capacity.dfa_states;
+        const w = (n + 31) / 32;
+        var h: usize = 16;
+        while (h < 2 * d) h *= 2;
+        return 36 * n + 4 * d * (c + 1) + 4 * d * (w + 1) + 4 * h + 12 * w + 8;
     }
 
     /// A scratch for `program` (and any program whose capacity fits).
@@ -791,7 +837,7 @@ pub const Scratch = struct {
     /// A scratch for every program whose capacity fits within `capacity`.
     pub fn initCapacity(allocator: std.mem.Allocator, capacity: Capacity) !Scratch {
         const memory = try allocator.alignedAlloc(u8, .@"8", bytesNeeded(capacity));
-        var scratch = carve(memory, capacity, default_dfa_states);
+        var scratch = carve(memory, capacity);
         scratch.owns_memory = true;
         return scratch;
     }
@@ -800,7 +846,7 @@ pub const Scratch = struct {
     /// `deinit` is not needed and must not be called.
     pub fn initBuffer(buffer: []align(8) u8, capacity: Capacity) error{BufferTooSmall}!Scratch {
         if (buffer.len < bytesNeeded(capacity)) return error.BufferTooSmall;
-        return carve(buffer, capacity, default_dfa_states);
+        return carve(buffer, capacity);
     }
 
     /// Free a scratch made by `init` or `initCapacity`.
@@ -834,7 +880,8 @@ pub const Scratch = struct {
         hash_len: u32,
     };
 
-    fn layout(capacity: Capacity, dfa_cap: u32) Layout {
+    fn layout(capacity: Capacity) Layout {
+        const dfa_cap: u32 = @min(capacity.dfa_states, max_dfa_states);
         const states: usize = @max(capacity.states, 1);
         const stride: u32 = @max(capacity.classes, 1) + 1;
         const words: u32 = @intCast((states + 31) / 32);
@@ -868,8 +915,9 @@ pub const Scratch = struct {
         return l;
     }
 
-    fn carve(memory: []align(8) u8, capacity: Capacity, dfa_cap: u32) Scratch {
-        const l = layout(capacity, dfa_cap);
+    fn carve(memory: []align(8) u8, capacity: Capacity) Scratch {
+        const l = layout(capacity);
+        const dfa_cap: u32 = @min(capacity.dfa_states, max_dfa_states);
         const states: usize = @max(capacity.states, 1);
         const u32s = struct {
             fn at(mem: []align(8) u8, off: usize, len: usize) []u32 {
@@ -929,7 +977,7 @@ pub const Scratch = struct {
         const closure = self.start_closure[0..self.bound_words];
         @memset(closure, 0);
         bitSet(closure, program.start);
-        self.closeOver(program, closure, 0);
+        _ = self.closeOver(program, closure, 0);
     }
 
     // -- bitsets --------------------------------------------------------------
@@ -943,8 +991,10 @@ pub const Scratch = struct {
     }
 
     /// Add to `set` every state reachable from its members through epsilon
-    /// edges and through assertions in the `held` mask.
-    fn closeOver(self: *Scratch, program: *const Program, set: []u32, held: u8) void {
+    /// edges and through assertions in the `held` mask. Returns the states
+    /// visited, the work done.
+    fn closeOver(self: *Scratch, program: *const Program, set: []u32, held: u8) u64 {
+        var visited: u64 = 0;
         var top: usize = 0;
         for (set, 0..) |word, wi| {
             var w = word;
@@ -955,6 +1005,7 @@ pub const Scratch = struct {
         }
         while (top > 0) {
             top -= 1;
+            visited += 1;
             const state = self.stack[top];
             const range = program.edgeRange(state);
             var e = range.first;
@@ -974,11 +1025,24 @@ pub const Scratch = struct {
                 top += 1;
             }
         }
+        return visited;
     }
 
     // -- lazy DFA ---------------------------------------------------------------
 
-    const DfaError = error{DfaFull};
+    const DfaError = error{ DfaFull, BudgetExceeded };
+
+    /// Steps left in this search's budget.
+    inline fn allowance(self: *const Scratch) u64 {
+        const budget = self.step_budget orelse return std.math.maxInt(u64);
+        return budget - self.steps;
+    }
+
+    /// Spend `n` steps, or fail without spending them when the budget is short.
+    inline fn charge(self: *Scratch, n: u64) error{BudgetExceeded}!void {
+        if (n > self.allowance()) return error.BudgetExceeded;
+        self.steps += n;
+    }
 
     fn keyOf(self: *const Scratch, index: u32) []u32 {
         const base = @as(usize, index) * self.key_words;
@@ -1029,7 +1093,7 @@ pub const Scratch = struct {
         const mode = tag >> 8;
         const current = self.set_a[0..words];
         @memcpy(current, key[0..words]);
-        self.closeOver(program, current, program.assertionsHolding(ctx, sym));
+        var work = self.closeOver(program, current, program.assertionsHolding(ctx, sym));
 
         var accept = false;
         for (current, 0..) |word, wi| {
@@ -1043,7 +1107,10 @@ pub const Scratch = struct {
             if (accept) break;
         }
         const accept_bit: u32 = if (accept) trans_accept else 0;
-        if (sym == program.class_count) return trans_dead | accept_bit;
+        if (sym == program.class_count) {
+            try self.charge(work);
+            return trans_dead | accept_bit;
+        }
 
         const b = program.class_rep[sym];
         const next = self.set_b[0..words];
@@ -1053,6 +1120,7 @@ pub const Scratch = struct {
             var w = word;
             while (w != 0) : (w &= w - 1) {
                 const state: u32 = @intCast(wi * 32 + @ctz(w));
+                work += 1;
                 const range = program.edgeRange(state);
                 var e = range.first;
                 while (e < range.first + range.count) : (e += 1) {
@@ -1064,7 +1132,8 @@ pub const Scratch = struct {
                 }
             }
         }
-        if (any) self.closeOver(program, next, 0);
+        if (any) work += self.closeOver(program, next, 0);
+        try self.charge(work);
         if (mode == mode_unanchored) {
             for (next, self.start_closure[0..words]) |*w, s| w.* |= s;
             any = true;
@@ -1092,25 +1161,40 @@ pub const Scratch = struct {
         // every byte that cannot start a match, so a run of such bytes is
         // skipped with a byte search instead of one transition per byte.
         const skip_state: u32 = if (program.first_bytes != null and program.ctx_mask == 0) state else trans_uncomputed;
+        // The budget caps how far this scan may read, so the loop itself pays
+        // nothing for it. Bytes before `counted` are already in `steps`.
+        var limit = from + @min(input.len - from, self.allowance());
+        var counted = from;
         var i = from;
-        while (i < input.len) : (i += 1) {
+        while (i < limit) : (i += 1) {
             if (state == skip_state) {
-                i = program.nextCandidate(input, i);
-                if (i == input.len) break;
+                i = program.nextCandidate(input[0..limit], i);
+                if (i == limit) break;
             }
             var t = self.trans[@as(usize, state) * stride + classes[input[i]]];
             if (t >= trans_accept) {
                 if (t == trans_uncomputed) {
+                    self.steps += i - counted;
+                    counted = i;
                     t = try self.computeTransition(program, state, classes[input[i]]);
                     self.trans[@as(usize, state) * stride + classes[input[i]]] = t;
+                    limit = i + @min(input.len - i, self.allowance());
                 }
-                if (t & trans_accept != 0) return i;
-                if (t & trans_dead != 0) return null;
+                if (t & trans_accept != 0) return self.scanned(i - counted, i);
+                if (t & trans_dead != 0) return self.scanned(i + 1 - counted, null);
             }
             state = t;
         }
+        self.steps += limit - counted;
+        if (limit < input.len) return error.BudgetExceeded;
         const t = try self.transition(program, state, program.class_count);
         return if (t & trans_accept != 0) input.len else null;
+    }
+
+    /// Account for `n` bytes a DFA scan read (already within its allowance).
+    inline fn scanned(self: *Scratch, n: usize, result: ?usize) ?usize {
+        self.steps += n;
+        return result;
     }
 
     /// The end of the longest match starting exactly at `start`, or null.
@@ -1118,20 +1202,27 @@ pub const Scratch = struct {
         var state = try self.startState(mode_anchored, program.contextAt(input, start));
         const classes = program.classes;
         const stride = self.stride;
+        var limit = start + @min(input.len - start, self.allowance());
+        var counted = start;
         var last: ?usize = null;
         var i = start;
-        while (i < input.len) : (i += 1) {
+        while (i < limit) : (i += 1) {
             var t = self.trans[@as(usize, state) * stride + classes[input[i]]];
             if (t >= trans_accept) {
                 if (t == trans_uncomputed) {
+                    self.steps += i - counted;
+                    counted = i;
                     t = try self.computeTransition(program, state, classes[input[i]]);
                     self.trans[@as(usize, state) * stride + classes[input[i]]] = t;
+                    limit = i + @min(input.len - i, self.allowance());
                 }
                 if (t & trans_accept != 0) last = i;
-                if (t & trans_dead != 0) return last;
+                if (t & trans_dead != 0) return self.scanned(i + 1 - counted, last);
             }
             state = t & trans_index;
         }
+        self.steps += limit - counted;
+        if (limit < input.len) return error.BudgetExceeded;
         const t = try self.transition(program, state, program.class_count);
         if (t & trans_accept != 0) last = input.len;
         return last;
@@ -1151,7 +1242,9 @@ pub const Scratch = struct {
         }
         while (start <= input.len) : (start += 1) {
             if (program.first_bytes != null) {
-                start = program.nextCandidate(input, start);
+                const candidate = program.nextCandidate(input, start);
+                try self.charge(candidate - start);
+                start = candidate;
                 if (start == input.len) return null;
             }
             if (try self.dfaLongest(program, input, start)) |end| return .{ .start = start, .end = end };
@@ -1164,13 +1257,14 @@ pub const Scratch = struct {
     /// Add `state` and its closure at `pos` to `list`, all with `start`. A
     /// state already present keeps the earlier thread: lists are ordered by
     /// start, so the first arrival has the smaller start.
-    fn addThread(self: *Scratch, program: *const Program, list: *ThreadList, state: u32, start: u64, input: []const u8, pos: usize) void {
+    fn addThread(self: *Scratch, program: *const Program, list: *ThreadList, state: u32, start: u64, input: []const u8, pos: usize) error{BudgetExceeded}!void {
         if (list.contains(state)) return;
         list.add(state, start);
         var top: usize = 1;
         self.stack[0] = state;
         while (top > 0) {
             top -= 1;
+            try self.charge(1);
             const s = self.stack[top];
             const range = program.edgeRange(s);
             var e = range.first;
@@ -1194,14 +1288,14 @@ pub const Scratch = struct {
     /// Leftmost-longest search by NFA simulation in one pass: each thread
     /// remembers where its match started, and once a match is known no later
     /// start is seeded. With `first_only`, any match ends the search.
-    fn nfaFind(self: *Scratch, program: *const Program, input: []const u8, from: usize, first_only: bool) ?Span {
+    fn nfaFind(self: *Scratch, program: *const Program, input: []const u8, from: usize, first_only: bool) error{BudgetExceeded}!?Span {
         var current = &self.lists[0];
         var next = &self.lists[1];
         current.len = 0;
         var best: ?Span = null;
         var pos = from;
         while (true) {
-            if (best == null) self.addThread(program, current, program.start, pos, input, pos);
+            if (best == null) try self.addThread(program, current, program.start, pos, input, pos);
             // The first accepting thread has the smallest start among them.
             var k: u32 = 0;
             while (k < current.len) : (k += 1) {
@@ -1220,6 +1314,7 @@ pub const Scratch = struct {
             const b = input[pos];
             next.len = 0;
             k = 0;
+            try self.charge(current.len);
             while (k < current.len) : (k += 1) {
                 const state = current.ids[k];
                 const range = program.edgeRange(state);
@@ -1228,7 +1323,7 @@ pub const Scratch = struct {
                     const op = program.edgeOp(e);
                     if (@as(u8, @truncate(op)) != edge_bytes) continue;
                     if (!program.setHas(op >> 8, b)) continue;
-                    self.addThread(program, next, program.edgeTarget(e), current.starts[k], input, pos + 1);
+                    try self.addThread(program, next, program.edgeTarget(e), current.starts[k], input, pos + 1);
                 }
             }
             std.mem.swap(*ThreadList, &current, &next);

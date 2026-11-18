@@ -296,6 +296,22 @@ pub const Regex = struct {
         return null;
     }
 
+    /// Cap the work one search may do on the backtracking engine: the steps
+    /// it explores, 10,000,000 by default. A search that runs out fails with
+    /// `error.Timeout`, never with "no match". Patterns on the Thompson
+    /// engines run in time linear in the input and have no step budget here;
+    /// for a hard bound on those, match through a `Program` and set
+    /// `Scratch.step_budget`.
+    pub fn setStepBudget(self: *Regex, steps: usize) void {
+        if (self.backtrack_engine) |*engine| engine.max_steps = steps;
+    }
+
+    /// The backtracking engine's step budget, or null for a pattern that runs
+    /// on the Thompson engines.
+    pub fn stepBudget(self: *const Regex) ?usize {
+        return if (self.backtrack_engine) |engine| engine.max_steps else null;
+    }
+
     const memmem_width = 16;
     const sample_budget = 16 * 1024; // small: keeps the one-time cost ~1% even on small inputs
     const sample_windows = 4;

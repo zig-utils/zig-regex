@@ -292,11 +292,12 @@ test "program: the NFA fallback agrees with the DFA" {
             defer program.deinit(testing.allocator);
             var dfa_scratch = try Scratch.init(testing.allocator, &program);
             defer dfa_scratch.deinit(testing.allocator);
-            var nfa_scratch = try Scratch.init(testing.allocator, &program);
-            defer nfa_scratch.deinit(testing.allocator);
             // A two-state DFA cache overflows at once, so every call falls
             // back to the NFA simulation.
-            nfa_scratch.dfa_cap = 2;
+            var tiny = program.capacity();
+            tiny.dfa_states = 2;
+            var nfa_scratch = try Scratch.initCapacity(testing.allocator, tiny);
+            defer nfa_scratch.deinit(testing.allocator);
             for (inputs) |input| {
                 try testing.expectEqual(try program.isMatch(&dfa_scratch, input), try program.isMatch(&nfa_scratch, input));
                 var from: usize = 0;
@@ -395,4 +396,137 @@ test "program: one program shared read-only across threads" {
     }
     for (threads) |thread| thread.join();
     for (contexts) |ctx| try testing.expect(ctx.ok);
+}
+
+// ---------------------------------------------------------------------------
+// Limits: the DFA state cap and the step budget.
+
+fn withDfaStates(program: *const Program, states: u32) regex.program.Capacity {
+    var capacity = program.capacity();
+    capacity.dfa_states = states;
+    return capacity;
+}
+
+test "limits: a 256-state cap keeps scratch memory under the documented bound" {
+    const patterns = [_][]const u8{
+        "abc",
+        "[ab]*a[ab]{12}",
+        "\\b[a-z]{1,40}@[a-z]{1,40}\\.(?:com|org|net)\\b",
+        "(?:GET|POST|PUT|DELETE) /[a-zA-Z0-9/_.-]{1,200} HTTP/1\\.[01]",
+        "MZ.{58}PE\\x00\\x00[\\x4c\\x64]\\x01",
+    };
+    for (patterns, 0..) |pattern, i| {
+        var program = try Program.compile(testing.allocator, pattern, .{ .bytes = i == 4 });
+        defer program.deinit(testing.allocator);
+        const capacity = withDfaStates(&program, 256);
+        const need = Scratch.bytesNeeded(capacity);
+        try testing.expect(need <= Scratch.boundFor(capacity));
+        // The bound written out for D = 256 in the Scratch docs.
+        const n: usize = program.state_count;
+        const c: usize = program.class_count;
+        const w = (n + 31) / 32;
+        try testing.expect(need <= 36 * n + 1024 * (c + w + 2) + 12 * w + 2056);
+    }
+}
+
+test "limits: a DFA that outgrows its cap falls back to the NFA without failing" {
+    // Recognising "an a twelve bytes from the end" takes 2^13 DFA states.
+    var program = try Program.compile(testing.allocator, "[ab]*a[ab]{12}c", .{});
+    defer program.deinit(testing.allocator);
+    var capped = try Scratch.initCapacity(testing.allocator, withDfaStates(&program, 256));
+    defer capped.deinit(testing.allocator);
+    var nfa_only = try Scratch.initCapacity(testing.allocator, withDfaStates(&program, 0));
+    defer nfa_only.deinit(testing.allocator);
+    var roomy = try Scratch.initCapacity(testing.allocator, withDfaStates(&program, 1 << 15));
+    defer roomy.deinit(testing.allocator);
+
+    var prng = std.Random.DefaultPrng.init(0xCA9);
+    const random = prng.random();
+    var input: [4096]u8 = undefined;
+    var round: usize = 0;
+    while (round < 8) : (round += 1) {
+        for (&input) |*c| c.* = if (random.boolean()) 'a' else 'b';
+        // Plant a match in some rounds.
+        if (round % 2 == 0) {
+            const at = random.uintLessThan(usize, input.len - 14);
+            input[at] = 'a';
+            input[at + 13] = 'c';
+        }
+        const want = try program.find(&roomy, &input);
+        try testing.expectEqual(want, try program.find(&capped, &input));
+        try testing.expectEqual(want, try program.find(&nfa_only, &input));
+        try testing.expectEqual(want != null, try program.isMatch(&capped, &input));
+        try testing.expect(capped.dfa_len <= 256);
+    }
+}
+
+test "limits: a catastrophic search returns BudgetExceeded within the budget" {
+    // On the NFA (DFA disabled) every byte advances about 14 threads.
+    var program = try Program.compile(testing.allocator, "[ab]*a[ab]{12}c", .{});
+    defer program.deinit(testing.allocator);
+    const input = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(input);
+    // Random a/b text drives the DFA through thousands of states, so the
+    // 256-state cap overflows and the search runs on the NFA as well.
+    var prng = std.Random.DefaultPrng.init(0xBAD);
+    for (input) |*c| c.* = if (prng.random().boolean()) 'a' else 'b';
+
+    for ([_]u32{ 0, 256 }) |dfa_states| {
+        var scratch = try Scratch.initCapacity(testing.allocator, withDfaStates(&program, dfa_states));
+        defer scratch.deinit(testing.allocator);
+        for ([_]u64{ 1, 100, 10_000, 250_000 }) |budget| {
+            scratch.step_budget = budget;
+            try testing.expectError(error.BudgetExceeded, program.isMatch(&scratch, input));
+            try testing.expect(scratch.steps <= budget);
+            try testing.expectError(error.BudgetExceeded, program.find(&scratch, input));
+            try testing.expect(scratch.steps <= budget);
+            var it = program.iterator(&scratch, input);
+            try testing.expectError(error.BudgetExceeded, it.next());
+            try testing.expect(scratch.steps <= budget);
+        }
+        // With room to finish, the same search reports a genuine "no match",
+        // and from the same cold cache a budget of exactly the steps it took
+        // is enough.
+        scratch.step_budget = null;
+        scratch.reset();
+        try testing.expect(!try program.isMatch(&scratch, input));
+        const needed = scratch.steps;
+        scratch.reset();
+        scratch.step_budget = needed;
+        try testing.expect(!try program.isMatch(&scratch, input));
+        try testing.expectEqual(needed, scratch.steps);
+    }
+}
+
+test "limits: the DFA budget counts input bytes" {
+    var program = try Program.compile(testing.allocator, "needle", .{});
+    defer program.deinit(testing.allocator);
+    var scratch = try Scratch.init(testing.allocator, &program);
+    defer scratch.deinit(testing.allocator);
+    var input: [10_000]u8 = @splat('x');
+    @memcpy(input[9_000..][0..6], "needle");
+    scratch.step_budget = 5_000;
+    try testing.expectError(error.BudgetExceeded, program.find(&scratch, &input));
+    try testing.expect(scratch.steps <= 5_000);
+    scratch.step_budget = 20_000;
+    const m = (try program.find(&scratch, &input)).?;
+    try testing.expectEqual(@as(usize, 9_000), m.start);
+    try testing.expect(scratch.steps <= 20_000);
+}
+
+test "limits: the backtracker's step budget is configurable" {
+    const input = "zaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX";
+    var re = try Regex.compileWithFlags(testing.allocator, "(?=a+X)", .{ .ecmascript = true });
+    defer re.deinit();
+    try testing.expectEqual(@as(?usize, 10_000_000), re.stepBudget());
+    re.setStepBudget(25);
+    try testing.expectEqual(@as(?usize, 25), re.stepBudget());
+    try testing.expectError(error.Timeout, re.isMatch(input));
+    try testing.expectError(error.Timeout, re.find(input));
+    re.setStepBudget(10_000);
+    try testing.expect(try re.isMatch(input));
+
+    var linear = try Regex.compile(testing.allocator, "a+X");
+    defer linear.deinit();
+    try testing.expectEqual(@as(?usize, null), linear.stepBudget());
 }

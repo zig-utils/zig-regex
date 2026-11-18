@@ -283,6 +283,36 @@ _ = n;
   and that call finishes on an NFA simulation of the same program, still in
   time linear in the input.
 
+#### Bounding memory and time
+
+Hostile input cannot make a scratch grow or a search run unbounded:
+
+```zig
+var capacity = program.capacity();
+capacity.dfa_states = 256;                  // DFA state cap (default 1024, 0 = NFA only)
+var scratch = try regex.Scratch.initCapacity(allocator, capacity);
+scratch.step_budget = 1_000_000;            // per search; null = unlimited
+
+const hit = program.isMatch(&scratch, data) catch |err| switch (err) {
+    error.BudgetExceeded => return .limit_event, // never reported as "no match"
+    else => return err,
+};
+```
+
+- `Scratch.bytesNeeded(capacity)` is the exact size and is fixed when the
+  scratch is made. For N program states, C byte classes and a cap of D DFA
+  states it is at most `36N + 4D(C+1) + 4D(W+1) + 4H + 12W + 8` bytes, with
+  `W = ceil(N/32)` and `H` the smallest power of two that is at least 16 and
+  at least `2D` (`Scratch.boundFor`). With `D = 256` that is at most
+  `36N + 1024(C + W + 2) + 12W + 2056` bytes.
+- A step is one input byte the DFA reads or skips, or one unit of NFA work.
+  The budget applies to each `isMatch`, `find` and `findFrom`, and to each
+  match an iterator, `findAll` or `count` looks for. `scratch.steps` reports
+  what the last search used, never more than the budget.
+- The backtracking engine behind `Regex` has its own budget,
+  `re.setStepBudget(n)` (default 10,000,000 steps); running out fails with
+  `error.Timeout`.
+
 ## CLI
 
 zig-regex includes a command-line tool:
