@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.5.0 - 2026-11-18
+
+- docs(bench): measure regex.bt programs against PCRE2 (ad5a5c4)
+- feat(bt): add serialisable bounded-backtracking programs (fed0c83)
+- feat(regex): support atomic groups (?>...) (71ccdcd)
+
+### Highlights (v0.5.0)
+
+The constructs a linear `Program` cannot run now have a home that keeps its
+guarantees: `regex.bt`, a bounded-backtracking program that is serialisable,
+loads in place without allocating, matches with a fixed-size scratch and no
+recursion, and stops at a per-search step budget. Atomic groups parse and
+run everywhere. Numbers and the PCRE2 differential are in
+docs/BENCHMARKS.md.
+
+### New APIs
+
+- `regex.bt`: `bt.Program` (`compile`, `bytes`, `load`, `dupe`,
+  `capacity`, `isMatch`, `find`, `findFrom`, `iterator`, `findAll`, `count`),
+  `bt.Scratch` (`init`, `initCapacity`, `initBuffer`, `bytesNeeded`,
+  `step_budget`, `steps`), `bt.Capacity` (`slots`, `counters`, `frames`),
+  `bt.MatchError` (`ScratchTooSmall`, `BudgetExceeded`, `StackExhausted`),
+  `bt.magic` and `bt.format_version`. Byte mode: backreferences (numbered,
+  `\k<name>`, `(?P=name)`), lookahead, bounded lookbehind, atomic groups,
+  counted repeats with a counter instead of copies (`x{50000,}` is a few
+  instructions) and inline modifiers, with PCRE's leftmost-first matching
+  and its empty-iteration rule.
+- Atomic groups `(?>...)` parse (they were a syntax error). `Regex` runs them
+  on its backtracker; `Regex` and `Program` run one whose body always matches
+  a single length as a plain group.
+- `MODE=bt benchmarks/pcre2/diff.sh` and `zig build test-bt`.
+
 ## v0.4.1 - 2026-11-18
 
 - feat(program): compile inline modifiers into byte-mode programs (4065d58)
