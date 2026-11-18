@@ -2,8 +2,12 @@ const std = @import("std");
 
 // Timer was removed in zig 0.17-dev; stub for compile-only.
 const Timer = struct {
-    pub fn start() !@This() { return .{}; }
-    pub fn read(_: @This()) u64 { return 0; }
+    pub fn start() !@This() {
+        return .{};
+    }
+    pub fn read(_: @This()) u64 {
+        return 0;
+    }
 };
 const Regex = @import("regex").Regex;
 
@@ -169,7 +173,7 @@ pub fn main() !void {
         defer regex.deinit();
 
         if (regex.opt_info.literal_prefix) |prefix| {
-            std.debug.print("  ✓ Using literal prefix: \"{s}\" (min_len={d})\n", .{prefix, regex.opt_info.min_length});
+            std.debug.print("  ✓ Using literal prefix: \"{s}\" (min_len={d})\n", .{ prefix, regex.opt_info.min_length });
         }
 
         var timer = try Timer.start();

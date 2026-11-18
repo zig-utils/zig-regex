@@ -79,9 +79,9 @@ pub fn main() !void {
         std.debug.print("───────────────────────────────────────────────\n", .{});
 
         const patterns = [_][]const u8{
-            "hello",           // Literal - should have prefix optimization
-            ".*hello",         // No prefix - slower
-            "hello.*world",    // Prefix optimization
+            "hello", // Literal - should have prefix optimization
+            ".*hello", // No prefix - slower
+            "hello.*world", // Prefix optimization
         };
 
         const test_text = comptime repeatStr("some random text ", 10) ++ "hello world";

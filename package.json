@@ -7,6 +7,6 @@
     "release:major": "pantry release major --yes"
   },
   "dependencies": {
-    "ziglang.org": "^0.16.0"
+    "ziglang.org": "0.17.0-dev.1857+3c46da14d"
   }
 }

@@ -1,4 +1,4 @@
 dependencies:
   bun.sh: ^1.3.14
-  zig: 0.17.0-dev
+  zig: 0.17.0-dev.1857+3c46da14d
   pcre.org/v2: ^10.47

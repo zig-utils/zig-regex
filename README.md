@@ -4,7 +4,7 @@
 
 **A modern, high-performance regular expression library for Zig**
 
-[![Zig](https://img.shields.io/badge/Zig-0.16+-orange.svg)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/Zig-0.17.0--dev.1857+-orange.svg)](https://ziglang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [Features](#features) - [Installation](#installation) - [Quick Start](#quick-start) - [CLI](#cli) - [Documentation](#documentation)
@@ -410,7 +410,7 @@ zig build bench     # Run benchmarks
 
 ## Requirements
 
-- Zig 0.16 or later
+- Zig 0.17.0-dev.1857 or later
 - No external dependencies
 
 ## Contributing

@@ -13,11 +13,11 @@ pub fn main() !void {
 
     // Example 1: Invalid patterns with helpful error messages
     const invalid_patterns = [_][]const u8{
-        "abc(def",      // Unmatched parenthesis
-        "abc[def",      // Unmatched bracket
-        "abc+(",        // Invalid quantifier usage
-        "abc\\q",       // Invalid escape sequence
-        "[z-a]",        // Invalid character range
+        "abc(def", // Unmatched parenthesis
+        "abc[def", // Unmatched bracket
+        "abc+(", // Invalid quantifier usage
+        "abc\\q", // Invalid escape sequence
+        "[z-a]", // Invalid character range
         "(a(b(c(d(e(f(g(h(i(j(k(l(m(n(o(p(q", // Too many nested groups
     };
 

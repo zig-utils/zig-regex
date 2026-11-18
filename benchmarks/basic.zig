@@ -2,8 +2,12 @@ const std = @import("std");
 
 // Timer was removed in zig 0.17-dev; stub for compile-only.
 const Timer = struct {
-    pub fn start() !@This() { return .{}; }
-    pub fn read(_: @This()) u64 { return 0; }
+    pub fn start() !@This() {
+        return .{};
+    }
+    pub fn read(_: @This()) u64 {
+        return 0;
+    }
 };
 const Regex = @import("regex").Regex;
 

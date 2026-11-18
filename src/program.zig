@@ -94,7 +94,7 @@ pub const Assertion = enum(u8) {
     }
 
     fn bit(self: Assertion) u8 {
-        return @as(u8, 1) << @intCast(@intFromEnum(self));
+        return @as(u8, 1) << @intCast(@backingInt(self));
     }
 };
 
@@ -562,8 +562,8 @@ fn validate(input: []const u8) LoadError![]const u8 {
             edge_epsilon => if (arg != 0) return error.InvalidProgram,
             edge_bytes => if (arg >= set_count) return error.InvalidProgram,
             edge_assert => {
-                if (arg > @intFromEnum(Assertion.non_word_boundary)) return error.InvalidProgram;
-                switch (@as(Assertion, @enumFromInt(arg))) {
+                if (arg > @backingInt(Assertion.non_word_boundary)) return error.InvalidProgram;
+                switch (@as(Assertion, @fromBackingInt(@intCast(arg)))) {
                     .start_text => implied |= pf_assert_start,
                     .start_line => {
                         implied |= pf_assert_start;
@@ -678,7 +678,7 @@ fn build(allocator: std.mem.Allocator, re: *const Regex) BuildError![]u8 {
                         .word_boundary, .non_word_boundary => flags |= pf_assert_word,
                         .end_line, .end_text => {},
                     }
-                    try edges.append(allocator, .{ to, edge_assert | (@as(u32, @intFromEnum(assertion)) << 8) });
+                    try edges.append(allocator, .{ to, edge_assert | (@as(u32, @backingInt(assertion)) << 8) });
                 },
                 .char, .char_class, .any => {
                     const set = transitionBytes(t, re.flags);
@@ -1426,7 +1426,7 @@ pub const Scratch = struct {
                 const op = program.edgeOp(e);
                 const follow = switch (@as(u8, @truncate(op))) {
                     edge_epsilon => true,
-                    edge_assert => program.assertionAt(@enumFromInt(op >> 8), input, pos),
+                    edge_assert => program.assertionAt(@fromBackingInt(@intCast(op >> 8)), input, pos),
                     else => false,
                 };
                 if (!follow) continue;
