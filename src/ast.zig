@@ -82,6 +82,25 @@ pub const Node = struct {
     node_type: NodeType,
     data: NodeData,
     span: common.Span,
+    /// Structural facts about this node's subtree, filled in once by
+    /// `BacktrackEngine.init` so the backtracker reads them instead of walking
+    /// the subtree again at every match step (#53). A tree no engine has
+    /// analyzed has `known` false, and the checks walk it as before.
+    facts: Facts = .{},
+
+    pub const Facts = packed struct(u16) {
+        known: bool = false,
+        quantifiers: bool = false,
+        alternation: bool = false,
+        backreference: bool = false,
+        atomic_group: bool = false,
+        lazy_quantifier: bool = false,
+        repeated_alternation: bool = false,
+        capturing_group: bool = false,
+        groups: bool = false,
+        codepoint_atom: bool = false,
+        _padding: u6 = 0,
+    };
 
     pub const NodeData = union(NodeType) {
         literal: u8,
