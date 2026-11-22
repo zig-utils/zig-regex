@@ -626,11 +626,11 @@ test "backtrack: exact budget succeeds and iterator initializes its own input" {
     var re = try Regex.compileWithFlags(allocator, "(?!a|c)", .{ .ecmascript = true });
     defer re.deinit();
     try std.testing.expect(try re.isMatch("b"));
-    const needed = re.backtrack_engine.?.step_count;
+    const needed = (try re.searchSteps("b")).?;
     try std.testing.expect(needed > 0);
     re.backtrack_engine.?.max_steps = needed;
     try std.testing.expect(try re.isMatch("b"));
-    try std.testing.expectEqual(needed, re.backtrack_engine.?.step_count);
+    try std.testing.expectEqual(needed, (try re.searchSteps("b")).?);
     re.backtrack_engine.?.max_steps = needed - 1;
     try std.testing.expectError(error.Timeout, re.isMatch("b"));
 

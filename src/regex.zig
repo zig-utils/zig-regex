@@ -1344,10 +1344,9 @@ pub const Regex = struct {
                 return try virtual_machine.isMatch(input);
             },
             .backtracking => {
-                const engine_mut = @constCast(&self.backtrack_engine.?);
                 if (try self.findBacktracking(input, 0)) |result| {
                     var hit = result;
-                    hit.deinit(engine_mut.allocator);
+                    hit.deinit(self.backtrack_engine.?.allocator);
                     return true;
                 }
                 return false;
@@ -1357,8 +1356,18 @@ pub const Regex = struct {
 
     // Keep the existing search-wide budget, but distinguish exhausted work
     // from a genuine non-match at every public search/transform entry point.
+    //
+    // The search runs on a copy of the stored engine. The engine holds the
+    // search's input, captures and step count, so searching with the stored one
+    // made a shared `Regex` unsafe: two threads searching at once overwrote each
+    // other's state and could report a wrong result.
     fn findBacktracking(self: *const Regex, input: []const u8, start: usize) !?backtrack.BacktrackMatch {
-        const engine = @constCast(&self.backtrack_engine.?);
+        var engine = try self.backtrack_engine.?.forSearch();
+        defer engine.deinit();
+        return self.searchWith(&engine, input, start);
+    }
+
+    fn searchWith(self: *const Regex, engine: *backtrack.BacktrackEngine, input: []const u8, start: usize) !?backtrack.BacktrackMatch {
         const prefix: ?[]const u8 = blk: {
             const literal = self.opt_info.literal_prefix orelse break :blk null;
             for (literal) |byte| if (!std.ascii.isAscii(byte)) break :blk null;
@@ -1368,6 +1377,24 @@ pub const Regex = struct {
         if (engine.match_error) |err| return err;
         if (engine.step_count > engine.max_steps) return error.Timeout;
         return result;
+    }
+
+    /// The steps one backtracking search of `input` takes, for choosing a step
+    /// budget (`setStepBudget`). Null for a pattern on the Thompson engines, which
+    /// have no step budget. Runs the search on a private copy, like every other
+    /// search, so it reports and changes nothing shared.
+    pub fn searchSteps(self: *const Regex, input: []const u8) !?usize {
+        const stored = if (self.backtrack_engine) |*engine| engine else return null;
+        var engine = try stored.forSearch();
+        defer engine.deinit();
+        if (self.searchWith(&engine, input, 0) catch |err| switch (err) {
+            error.Timeout => null,
+            else => return err,
+        }) |found| {
+            var discarded = found;
+            discarded.deinit(engine.allocator);
+        }
+        return engine.step_count;
     }
 
     /// Helper to build a Match from a VM MatchResult
@@ -4543,7 +4570,60 @@ test "atomic assertion tail execution retains the native search step limit" {
     var input: [512]u8 = undefined;
     @memset(&input, ' ');
     try std.testing.expectError(error.Timeout, re.findFrom(&input, 0));
-    try std.testing.expect(re.backtrack_engine.?.step_count > 64);
+    // The search ran on a copy: the compiled regex carries no search state.
+    try std.testing.expectEqual(@as(usize, 0), re.backtrack_engine.?.step_count);
+    try std.testing.expect((try re.searchSteps(&input)).? > 64);
+}
+
+test "concurrent searches of one backtracking regex do not share state" {
+    // A backtracking search used to run on the engine stored in the `Regex`, so
+    // two threads searching the same compiled pattern overwrote each other's
+    // input, captures and step count and could miss a match. Every search now
+    // runs on its own copy.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?=[a-z/]*union)[a-z/]+select");
+    defer re.deinit();
+    try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
+
+    const Search = struct {
+        regex: *const Regex,
+        input: []const u8,
+        expect: bool,
+        wrong: usize = 0,
+        failed: bool = false,
+
+        fn run(self: *@This()) void {
+            for (0..2_000) |_| {
+                const found = self.regex.isMatch(self.input) catch {
+                    self.failed = true;
+                    return;
+                };
+                if (found != self.expect) self.wrong += 1;
+            }
+        }
+    };
+    // The clean input holds both words the pattern needs, and fails only at the
+    // lookahead (`-` is outside `[a-z/]`). One without them is rejected by the
+    // required-literal prefilter before the engine runs, so it would never
+    // share the engine with the other threads, and the test would prove
+    // nothing. Without per-search state this test hangs or fails.
+    const hit = "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/union/select";
+    const miss = "/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/select-union";
+    var searches = [_]Search{
+        .{ .regex = &re, .input = hit, .expect = true },
+        .{ .regex = &re, .input = miss, .expect = false },
+        .{ .regex = &re, .input = hit, .expect = true },
+        .{ .regex = &re, .input = miss, .expect = false },
+    };
+    var threads: [searches.len]std.Thread = undefined;
+    for (&searches, &threads) |*search, *thread| thread.* = try std.Thread.spawn(.{}, Search.run, .{search});
+    for (threads) |thread| thread.join();
+    for (searches) |search| {
+        try std.testing.expect(!search.failed);
+        try std.testing.expectEqual(@as(usize, 0), search.wrong);
+    }
+    // And nothing was written to the compiled pattern.
+    try std.testing.expectEqual(@as(usize, 0), re.backtrack_engine.?.step_count);
 }
 
 test "case invariant class sets preserve Node matches and capture boundaries" {
