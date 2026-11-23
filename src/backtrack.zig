@@ -71,6 +71,20 @@ pub const BacktrackEngine = struct {
         self.allocator.free(self.captures);
     }
 
+    /// A copy of this engine for one search, with its own captures, input, step
+    /// count and error. A compiled `Regex` keeps one engine for its pattern,
+    /// flags and step budget and searches only with copies, so concurrent
+    /// searches of one `Regex` never share match state. Release with `deinit`.
+    pub fn forSearch(self: *const BacktrackEngine) std.mem.Allocator.Error!BacktrackEngine {
+        var copy = self.*;
+        copy.captures = try self.allocator.alloc(CaptureGroup, self.captures.len);
+        for (copy.captures) |*cap| cap.* = .{ .start = 0, .end = 0, .matched = false };
+        copy.input = &[_]u8{};
+        copy.step_count = 0;
+        copy.match_error = null;
+        return copy;
+    }
+
     /// Test if pattern matches entire input
     pub fn isMatch(self: *BacktrackEngine, input: []const u8) bool {
         if (self.find(input)) |match| {
