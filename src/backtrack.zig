@@ -50,6 +50,7 @@ pub const BacktrackEngine = struct {
     pub const DEFAULT_MAX_STEPS: usize = 10_000_000;
 
     pub fn init(allocator: std.mem.Allocator, root: *ast.Node, capture_count: usize, flags: common.CompileFlags) !BacktrackEngine {
+        try analyze(allocator, root);
         const captures = try allocator.alloc(CaptureGroup, capture_count);
         for (captures) |*cap| {
             cap.* = .{ .start = 0, .end = 0, .matched = false };
@@ -400,6 +401,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn containsCodepointAtom(node: *ast.Node) bool {
+        if (node.facts.known) return node.facts.codepoint_atom;
         return switch (node.node_type) {
             .unicode_property, .class_set => true,
             .concat => containsCodepointAtom(node.data.concat.left) or containsCodepointAtom(node.data.concat.right),
@@ -852,6 +854,100 @@ pub const BacktrackEngine = struct {
     /// What a structural check decides about one node.
     const NodeVerdict = enum { matched, descend, skip };
 
+    /// Store every structural fact the matcher asks about on each node of the
+    /// tree, children before parents, so a search reads a node's facts instead
+    /// of walking its subtree at every step. Those walks made matching cost the
+    /// pattern size times the input length again for every node visited, which
+    /// dominated long inputs (#53).
+    ///
+    /// It runs while the engine is built, before the tree can be shared, and a
+    /// search only reads the facts, so concurrent searches stay safe. It uses an
+    /// explicit stack for the reason `anyNodeMatches` documents (#23).
+    pub fn analyze(allocator: std.mem.Allocator, root: *ast.Node) std.mem.Allocator.Error!void {
+        const Visit = struct { node: *ast.Node, children_done: bool };
+        var pending: std.ArrayList(Visit) = .empty;
+        defer pending.deinit(allocator);
+        try pending.append(allocator, .{ .node = root, .children_done = false });
+        while (pending.pop()) |visit| {
+            const node = visit.node;
+            if (node.facts.known) continue;
+            if (!visit.children_done) {
+                try pending.append(allocator, .{ .node = node, .children_done = true });
+                var buffer: [2]*ast.Node = undefined;
+                for (children(node, &buffer)) |child| {
+                    if (!child.facts.known) try pending.append(allocator, .{ .node = child, .children_done = false });
+                }
+                continue;
+            }
+            node.facts = factsOf(node);
+        }
+    }
+
+    /// A node's direct children, in the order `pushNodeChildren` visits them.
+    fn children(node: *ast.Node, buffer: *[2]*ast.Node) []*ast.Node {
+        switch (node.node_type) {
+            .concat => {
+                buffer.* = .{ node.data.concat.left, node.data.concat.right };
+                return buffer[0..2];
+            },
+            .alternation => {
+                buffer.* = .{ node.data.alternation.left, node.data.alternation.right };
+                return buffer[0..2];
+            },
+            .group => buffer[0] = node.data.group.child,
+            .star => buffer[0] = node.data.star.child,
+            .plus => buffer[0] = node.data.plus.child,
+            .optional => buffer[0] = node.data.optional.child,
+            .repeat => buffer[0] = node.data.repeat.child,
+            .lookahead => buffer[0] = node.data.lookahead.child,
+            .lookbehind => buffer[0] = node.data.lookbehind.child,
+            else => return buffer[0..0],
+        }
+        return buffer[0..1];
+    }
+
+    /// One node's facts from its own type and its children's facts, which
+    /// `analyze` has already stored. Each fact follows the verdict its walking
+    /// form uses: a node that matches answers true, one that is skipped answers
+    /// false, and one that descends answers whether any child does.
+    fn factsOf(node: *ast.Node) ast.Node.Facts {
+        var buffer: [2]*ast.Node = undefined;
+        const kids = children(node, &buffer);
+        var facts: ast.Node.Facts = .{ .known = true };
+        facts.quantifiers = fromVerdict(quantifierVerdict(node), kids, "quantifiers");
+        facts.alternation = fromVerdict(alternationVerdict(node), kids, "alternation");
+        facts.backreference = fromVerdict(backreferenceVerdict(node), kids, "backreference");
+        facts.atomic_group = fromVerdict(atomicGroupVerdict(node), kids, "atomic_group");
+        facts.lazy_quantifier = fromVerdict(lazyQuantifierVerdict(node), kids, "lazy_quantifier");
+        facts.capturing_group = fromVerdict(capturingGroupVerdict(node), kids, "capturing_group");
+        facts.groups = fromVerdict(groupVerdict(node), kids, "groups");
+        facts.repeated_alternation = if (repeatedChild(node)) |child|
+            child.facts.alternation or child.facts.repeated_alternation
+        else switch (node.node_type) {
+            .optional, .concat, .alternation, .group, .lookahead, .lookbehind => anyChild(kids, "repeated_alternation"),
+            else => false,
+        };
+        facts.codepoint_atom = switch (node.node_type) {
+            .unicode_property, .class_set => true,
+            .concat, .alternation, .star, .plus, .optional, .repeat, .group, .lookahead, .lookbehind => anyChild(kids, "codepoint_atom"),
+            else => false,
+        };
+        return facts;
+    }
+
+    fn fromVerdict(verdict: NodeVerdict, kids: []*ast.Node, comptime fact: []const u8) bool {
+        return switch (verdict) {
+            .matched => true,
+            .skip => false,
+            .descend => anyChild(kids, fact),
+        };
+    }
+
+    fn anyChild(kids: []*ast.Node, comptime fact: []const u8) bool {
+        for (kids) |kid| if (@field(kid.facts, fact)) return true;
+        return false;
+    }
+
     /// Visit `root` and its children with an explicit stack, answering true at
     /// the first node `decide` accepts.
     ///
@@ -899,91 +995,130 @@ pub const BacktrackEngine = struct {
         }
     }
 
-    fn hasQuantifiers(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
+    // Each structural check below has two forms. On an analyzed tree (every
+    // tree a `Regex` compiles) it reads the fact `analyze` stored on the node;
+    // on any other tree it walks the subtree as before. Both use the same
+    // per-node verdict, so they cannot disagree (#53).
+
+    fn quantifierVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            // Any quantifier needs backtracking support
+            .star, .plus, .optional, .repeat => .matched,
+            .concat, .alternation, .group => .descend,
+            else => .skip,
+        };
+    }
+
+    fn alternationVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .alternation => .matched,
+            .concat, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    fn backreferenceVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .backref => .matched,
+            .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    fn atomicGroupVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .group => if (n.data.group.atomic) .matched else .descend,
+            .concat, .alternation, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    fn lazyQuantifierVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .star => if (!n.data.star.greedy) .matched else .descend,
+            .plus => if (!n.data.plus.greedy) .matched else .descend,
+            .optional => if (!n.data.optional.greedy) .matched else .descend,
+            .repeat => if (!n.data.repeat.greedy) .matched else .descend,
+            .concat, .alternation, .group, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    fn capturingGroupVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .group => if (n.data.group.capture_index != null) .matched else .descend,
+            .concat, .alternation, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    fn groupVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .group, .lookahead, .lookbehind => .matched,
+            .concat, .alternation, .star, .plus, .optional, .repeat => .descend,
+            else => .skip,
+        };
+    }
+
+    /// The child a repetition repeats, for the repeated-alternation check.
+    fn repeatedChild(n: *ast.Node) ?*ast.Node {
+        return switch (n.node_type) {
+            .star => n.data.star.child,
+            .plus => n.data.plus.child,
+            .repeat => n.data.repeat.child,
+            else => null,
+        };
+    }
+
+    fn repeatedAlternationVerdict(engine: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+        // A repetition *of* an alternation is the shape that matters;
+        // anything else only passes the question to its children.
+        if (repeatedChild(n)) |child| return if (engine.hasAlternation(child)) .matched else .descend;
+        return switch (n.node_type) {
+            .optional, .concat, .alternation, .group, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    fn walkWith(comptime verdict: fn (*ast.Node) NodeVerdict) fn (*BacktrackEngine, *ast.Node) NodeVerdict {
+        return struct {
             fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    // Any quantifier needs backtracking support
-                    .star, .plus, .optional, .repeat => .matched,
-                    .concat, .alternation, .group => .descend,
-                    else => .skip,
-                };
+                return verdict(n);
             }
-        }.decide);
+        }.decide;
+    }
+
+    fn hasQuantifiers(self: *BacktrackEngine, node: *ast.Node) bool {
+        if (node.facts.known) return node.facts.quantifiers;
+        return self.anyNodeMatches(node, walkWith(quantifierVerdict));
     }
 
     fn hasAlternation(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
-            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    .alternation => .matched,
-                    .concat, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.alternation;
+        return self.anyNodeMatches(node, walkWith(alternationVerdict));
     }
 
     fn hasBackreference(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
-            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    .backref => .matched,
-                    .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.backreference;
+        return self.anyNodeMatches(node, walkWith(backreferenceVerdict));
     }
 
     fn hasAtomicGroup(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
-            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    .group => if (n.data.group.atomic) .matched else .descend,
-                    .concat, .alternation, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.atomic_group;
+        return self.anyNodeMatches(node, walkWith(atomicGroupVerdict));
     }
 
     fn hasLazyQuantifier(self: *BacktrackEngine, node: *ast.Node) bool {
         // ECMA-262 RepeatMatcher tries the continuation before extending a
         // non-greedy match. Eagerly enumerating all endings can exhaust the
         // budget on a long tail even when a short match already succeeds.
-        return self.anyNodeMatches(node, struct {
-            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    .star => if (!n.data.star.greedy) .matched else .descend,
-                    .plus => if (!n.data.plus.greedy) .matched else .descend,
-                    .optional => if (!n.data.optional.greedy) .matched else .descend,
-                    .repeat => if (!n.data.repeat.greedy) .matched else .descend,
-                    .concat, .alternation, .group, .lookahead, .lookbehind => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.lazy_quantifier;
+        return self.anyNodeMatches(node, walkWith(lazyQuantifierVerdict));
     }
 
     fn hasRepeatedAlternation(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
-            fn decide(engine: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                // A repetition *of* an alternation is the shape that matters;
-                // anything else only passes the question to its children.
-                const repeated: ?*ast.Node = switch (n.node_type) {
-                    .star => n.data.star.child,
-                    .plus => n.data.plus.child,
-                    .repeat => n.data.repeat.child,
-                    else => null,
-                };
-                if (repeated) |child| return if (engine.hasAlternation(child)) .matched else .descend;
-                return switch (n.node_type) {
-                    .optional, .concat, .alternation, .group, .lookahead, .lookbehind => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.repeated_alternation;
+        return self.anyNodeMatches(node, repeatedAlternationVerdict);
     }
 
     fn needsAnchoredRepeatedAlternationRecovery(self: *BacktrackEngine, left: *ast.Node, right: *ast.Node) bool {
@@ -991,15 +1126,8 @@ pub const BacktrackEngine = struct {
     }
 
     fn hasCapturingGroup(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
-            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    .group => if (n.data.group.capture_index != null) .matched else .descend,
-                    .concat, .alternation, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.capturing_group;
+        return self.anyNodeMatches(node, walkWith(capturingGroupVerdict));
     }
 
     fn isEndAnchorOnly(self: *BacktrackEngine, node: *ast.Node) bool {
@@ -1021,15 +1149,8 @@ pub const BacktrackEngine = struct {
     /// capture-fixup re-match in matchConcat/collectAllMatches is pure waste and
     /// can be skipped — turning `\p{…}+`-style scans from O(n²) into O(n).
     fn hasGroups(self: *BacktrackEngine, node: *ast.Node) bool {
-        return self.anyNodeMatches(node, struct {
-            fn decide(_: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-                return switch (n.node_type) {
-                    .group, .lookahead, .lookbehind => .matched,
-                    .concat, .alternation, .star, .plus, .optional, .repeat => .descend,
-                    else => .skip,
-                };
-            }
-        }.decide);
+        if (node.facts.known) return node.facts.groups;
+        return self.anyNodeMatches(node, walkWith(groupVerdict));
     }
 
     /// Reset every capture declared inside `node`. Walked with an explicit
