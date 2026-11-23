@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.1 - 2026-11-23
+
+- fix(backtrack): search on a per-call copy of the engine (#54) (a97e44a)
+- perf(backtrack): store subtree facts on each node instead of re-walking (#55) (b5df4c1)
+
+### Changes (v0.5.1)
+
+- A `Regex` on the backtracking engine is safe to search from several threads
+  at once. Each search runs on its own copy of the engine's match state
+  instead of writing into the shared `Regex`; before, concurrent searches
+  raced and returned wrong matches (#54). `(?i)`, lazy quantifiers, repeated
+  groups and lookarounds all select this engine.
+- The stored engine's `step_count` no longer changes when you search. Read a
+  search's step count with the new `Regex.searchSteps(input)`.
+- The backtracker computes what each subtree contains once, at compile time,
+  instead of walking the subtree every time it asks while matching (#53). The
+  full OWASP CRS rule set through zig-waf: a 1 KB form POST went from 85.6 ms
+  to 11.9 ms.
+
 ## v0.5.0 - 2026-11-18
 
 - docs(bench): measure regex.bt programs against PCRE2 (ad5a5c4)
