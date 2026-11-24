@@ -855,6 +855,24 @@ fn addBenchSuite(
     });
     test_step.dependOn(&b.addRunArtifact(gen_tests).step);
 
+    // The CRS benchmark behind benchmarks/crs/compare.sh. It needs a CRS
+    // checkout at run time, so it is installed, not run, by the build.
+    const crs_bench = b.addExecutable(.{
+        .name = "bench_crs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/crs/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "regex", .module = mod }},
+        }),
+    });
+    if (install_benchmarks) b.installArtifact(crs_bench);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/crs/main.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "regex", .module = mod }},
+    }) })).step);
+
     const bench_step = b.step("bench", "Run the benchmark suite behind docs/BENCHMARKS.md");
     if (!b.isRoot()) return;
     const bench_dep = b.lazyDependency("bench", .{ .target = target, .optimize = .ReleaseFast }) orelse return;

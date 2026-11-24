@@ -1,0 +1,32 @@
+# Request values the CRS benchmark matches every pattern against: what a
+# WAF hands @rx after collecting ARGS, headers and cookies. Written for this
+# benchmark. One input per line; \xHH, \t, \r, \n and \\ are escapes.
+#
+# Query and path values
+2
+price_asc
+red running shoes
+/products
+/products?page=2&sort=price_asc
+# Request headers and cookies
+shop.example
+Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15
+text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+en-US,en;q=0.9
+gzip, deflate, br
+keep-alive
+7f3c9a1e2b4d6f80
+dark
+application/x-www-form-urlencoded
+# Form fields and bodies
+Ada Lovelace
+ada@example.com
+Order question
+Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order Hello there, I have a question about my recent order
+{"order":{"id":1042,"customer":{"name":"Ada Lovelace","email":"ada@example.com"},"items":[{"sku":"SHOE-RED-42","qty":1,"price":89.5},{"sku":"SOCK-BLK-M","qty":3,"price":6.0}],"shipping":{"method":"standard","address":"12 Analytical Row, London"},"note":"Please leave the parcel at the door"}}
+# One attack per family
+1' UNION ALL SELECT username, password FROM users--
+<script>alert(document.cookie)</script>
+../../../../etc/passwd
+x && uname -a
+php://filter/convert.base64-encode/resource=index.php
