@@ -15,6 +15,7 @@ prints Markdown tables. Memory is sampled from outside with
 zig build bench                 # everything
 zig build bench -- literals     # one section: literals or regex
 benchmarks/pcre2/compare.sh     # the same regex patterns and corpora through PCRE2
+benchmarks/crs/compare.sh <crs> # every @rx of an OWASP CRS checkout, isMatch against PCRE2
 ```
 
 `compare.sh` needs a C compiler and PCRE2 (`PCRE2_PREFIX`, pkg-config's

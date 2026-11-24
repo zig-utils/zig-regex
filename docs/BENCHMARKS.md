@@ -9,6 +9,7 @@ from one command:
 zig build bench                 # multi-literal matchers and byte-mode regex programs
 benchmarks/pcre2/compare.sh     # the same regex patterns and corpora through PCRE2
 benchmarks/pcre2/diff.sh        # leftmost-first agreement with PCRE2
+benchmarks/crs/compare.sh <crs> # every @rx of an OWASP CRS checkout through isMatch and PCRE2
 ```
 
 Inputs are generated from fixed seeds, so the same command produces the same
@@ -298,6 +299,76 @@ kinds apart).
 Matching all 12 ClamAV-style patterns one after another runs at 1.13 times
 the JIT and 7.8 times the interpreter; the 13 CRS-style patterns at 0.78 and
 8.7 times. In 0.3.1 the same sequences ran at 0.34 and 0.19 times the JIT.
+
+## OWASP CRS `@rx` patterns against PCRE2
+
+```sh
+benchmarks/crs/compare.sh <path to a coreruleset checkout>
+```
+
+Every `@rx` operator in the checkout's `rules/*.conf` (318 in CRS 4.28.0,
+chained rules included) is compiled the way ModSecurity and zig-waf compile
+it, in byte mode with `dot_all` and `multiline`, and asked `isMatch` once for
+each of the 24 request values in `benchmarks/crs/inputs.txt` (1,814 bytes:
+query values, browser headers, a cookie, form fields with a 953-byte message,
+a JSON body and five attacks). The patterns are read from the checkout at run
+time, so none are vendored here. PCRE2 compiles the same patterns with
+`PCRE2_DOTALL | PCRE2_MULTILINE` and no UTF and runs `pcre2_match` once per
+value. A pass matches every value 16 times and is reported per repetition.
+**Best pass** sums each pattern's best of at least five passes and 10 ms;
+**first pass** sums each pattern's very first repetition, which for zig-regex
+is where its lazy DFAs are built. The script fails if any engine disagrees
+with the PCRE2 interpreter on any value for a pattern both compile, or if a
+match call fails.
+
+The best pass replays the same 24 values, so zig-regex's DFAs are warm for
+exactly those bytes; traffic with bytes the DFAs have not seen builds new
+states, at up to the first-pass cost for those states. PCRE2 has no such
+data-dependent state.
+
+Measured 2026-11-24 on an Apple M2 Pro (16 GiB, macOS 26.7.3) under load
+(one-minute load average 18 to 19), Zig 0.17.0-dev.1857+3c46da14d, PCRE2 10.47
+from Homebrew, `cc -O2`, CRS 4.28.0 (55b09f5). Before is zig-regex 0.5.1
+(aafe00f) in the same session:
+
+| | Compiled | Best pass | First pass |
+| --- | ---: | ---: | ---: |
+| zig-regex span-only `isMatch`, before | 318 of 318 | 362.7 ms | 493.7 ms |
+| zig-regex span-only `isMatch` | 318 of 318 | 0.99 ms | 260.3 ms |
+| zig-regex `isMatch` with captures | 305 of 318 | 39.2 ms | 56.4 ms |
+| PCRE2 interpreter | 318 of 318 | 8.59 ms | 11.4 ms |
+| PCRE2 JIT (as ModSecurity runs it) | 318 of 318 | 0.56 ms | 1.13 ms |
+
+Match results were identical to PCRE2 on every pattern and value. Under this
+load the first pass varies from run to run: another run gave 162 ms.
+
+- **Building the lazy DFA was the cost, not searching.** The shared
+  `isMatch` built its search DFA from scratch on every call, so CRS's
+  generated keyword lists (7 to 12 KB alternations such as 933120 and
+  932220) paid milliseconds per call to determinise and microseconds to
+  search. `isMatch` now keeps a few DFAs per regex in a `SearchDfaPool`,
+  claimed and returned with atomic swaps, so a shared `Regex` stays safe to
+  use from several threads, and a `Regex` value can still be moved. A DFA
+  larger than `retain_states` (256 states) after a call is freed rather than
+  kept, so input cannot make a compiled pattern hold its DFA's worst case
+  (16k states, about 1.3 KiB each).
+- **Lazy quantifiers no longer leave `isMatch` on the NFA.** Laziness orders a
+  split, which decides which match is reported but never whether one exists,
+  so the search DFA now answers `isMatch` for lazy patterns too (CRS's SQL
+  injection rules, 942xxx).
+- **Patterns now take 3.1 microseconds on average over all 24 values, 6.7 at
+  most**, close to the DFA's step for every pattern. PCRE2's JIT is faster on
+  256 of the 318, mostly where a pattern's first bytes are rare enough to
+  skip the input. On the large shell-command alternations (932230, 932235,
+  932250, 932260, 932340) zig-regex is 1.5 to 2.6 times faster than the JIT
+  and 33 to 58 times faster than the interpreter. Over all patterns it is
+  1.7 times the JIT's time and 8.7 times faster than the interpreter.
+- **The first call is still expensive**: 160 to 260 ms over all 318 patterns
+  before their DFAs are warm, against 11 ms for the interpreter. A WAF pays it
+  on its first requests after a start or a rule reload.
+- **With captures, 13 of CRS's large alternations do not compile**
+  (`PatternTooComplex`), and the rest run on slower engines. A WAF should test
+  with a span-only compile and capture only when a rule matches.
 
 ## Leftmost-first agreement with PCRE2
 
