@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.5.2 - 2026-11-24
+
+- perf(regex): keep isMatch's search DFA warm between calls (0d4b9b5)
+- feat(bench): benchmark every CRS @rx pattern against PCRE2 (aa6543d)
+- docs(bench): record the CRS results (523c2c6)
+
+### Changes (v0.5.2)
+
+- `Regex.isMatch` keeps its lazy search DFA between calls instead of building
+  it from scratch every time (#56). Each `Regex` holds up to four warm DFAs,
+  claimed and returned atomically, so a shared `Regex` is still safe to use
+  from several threads, and a moved `Regex` keeps working. A DFA larger than
+  256 states after a call is freed rather than kept. On OWASP CRS 4.28.0's 318
+  `@rx` patterns, span-only `isMatch` over 24 request values went from 362.7 ms
+  to 0.99 ms, against 8.59 ms for the PCRE2 interpreter and 0.56 ms with JIT,
+  with identical results. The first calls, while DFAs are built, still cost
+  160 to 260 ms over all patterns.
+- `isMatch` on a pattern with lazy quantifiers now uses the search DFA: laziness
+  changes which match is reported, never whether one exists. `find` is
+  unchanged.
+- Adding a lazy DFA state is all or nothing when memory runs out. Before, a
+  failed allocation could free a state's key twice or leave the tables out of
+  step, and a failed DFA construction leaked its buffers.
+- `benchmarks/crs/compare.sh <crs-checkout>` measures every `@rx` pattern of a
+  CRS checkout against PCRE2 and fails on any disagreement
+  (docs/BENCHMARKS.md).
+
 ## v0.5.1 - 2026-11-23
 
 - fix(backtrack): search on a per-call copy of the engine (#54) (a97e44a)
