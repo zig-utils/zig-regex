@@ -158,6 +158,12 @@ pub const LazyDfa = struct {
                 }
             }
         }
+        // Each buffer is freed if a later one cannot be allocated.
+        const start_closure = try allocator.alloc(u8, word_count);
+        errdefer allocator.free(start_closure);
+        const move_buf = try allocator.alloc(u8, word_count);
+        errdefer allocator.free(move_buf);
+        const closure_buf = try allocator.alloc(u8, word_count);
         var self: LazyDfa = .{
             .allocator = allocator,
             .nfa = nfa,
@@ -169,7 +175,7 @@ pub const LazyDfa = struct {
             .ordered = flags.ecmascript and !unanchored,
             .ecma_lines = flags.ecmascript and flags.multiline and line_anchor,
             .unanchored = unanchored,
-            .start_closure = try allocator.alloc(u8, word_count),
+            .start_closure = start_closure,
             .trans = .empty,
             .acc = .empty,
             .acc_state = .empty,
@@ -179,8 +185,8 @@ pub const LazyDfa = struct {
             .map = .{},
             .start_cache = @splat(UNCOMPUTED),
             .overflow = false,
-            .move_buf = try allocator.alloc(u8, word_count),
-            .closure_buf = try allocator.alloc(u8, word_count),
+            .move_buf = move_buf,
+            .closure_buf = closure_buf,
             .stack = .empty,
             .ostack = .empty,
             .ochain = .empty,
@@ -200,6 +206,11 @@ pub const LazyDfa = struct {
         };
         @memset(self.move_buf, 0);
         return self;
+    }
+
+    /// DFA states built so far.
+    pub fn stateCount(self: *const LazyDfa) usize {
+        return self.keys.items.len;
     }
 
     pub fn deinit(self: *LazyDfa) void {
@@ -339,17 +350,29 @@ pub const LazyDfa = struct {
             self.overflow = true;
             return Error.DfaOverflow;
         }
+        // Reserve everything first, so a failed allocation leaves no partly
+        // added state behind: the tables stay one row per key, and `owned` is
+        // freed only while nothing else refers to it. (Appending one table at a
+        // time used to leave `trans` and `acc` a row ahead of `keys`, and a
+        // failed `map.put` freed a key `keys` still held, which `deinit` then
+        // freed again.)
+        try self.trans.ensureUnusedCapacity(self.allocator, ALPHA);
+        try self.acc.ensureUnusedCapacity(self.allocator, ALPHA);
+        try self.acc_state.ensureUnusedCapacity(self.allocator, 1);
+        try self.accel_kind.ensureUnusedCapacity(self.allocator, 1);
+        try self.accel_set.ensureUnusedCapacity(self.allocator, 1);
+        try self.keys.ensureUnusedCapacity(self.allocator, 1);
+        try self.map.ensureUnusedCapacity(self.allocator, 1);
         const owned = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(owned);
 
         const idx: i32 = @intCast(self.keys.items.len);
-        try self.trans.appendNTimes(self.allocator, UNCOMPUTED, ALPHA);
-        try self.acc.appendNTimes(self.allocator, false, ALPHA);
-        try self.acc_state.append(self.allocator, self.hasAccepting(set));
-        try self.accel_kind.append(self.allocator, 0);
-        try self.accel_set.append(self.allocator, undefined);
-        try self.keys.append(self.allocator, owned);
-        try self.map.put(self.allocator, owned, idx);
+        self.trans.appendNTimesAssumeCapacity(UNCOMPUTED, ALPHA);
+        self.acc.appendNTimesAssumeCapacity(false, ALPHA);
+        self.acc_state.appendAssumeCapacity(self.hasAccepting(set));
+        self.accel_kind.appendAssumeCapacity(0);
+        self.accel_set.appendAssumeCapacity(undefined);
+        self.keys.appendAssumeCapacity(owned);
+        self.map.putAssumeCapacity(owned, idx);
         return idx;
     }
 
@@ -455,20 +478,28 @@ pub const LazyDfa = struct {
             self.overflow = true;
             return Error.DfaOverflow;
         }
-        const owned = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(owned);
         // Whether arriving here is a match, for the anchor-free hot loop (whose
         // closure does not depend on the next symbol).
         const accepts = try self.closureOrdered(ids, 0, null);
+        // Reserve everything before adding, as `intern` does, so a failed
+        // allocation leaves no partly added state and no key freed twice.
+        try self.trans.ensureUnusedCapacity(self.allocator, ALPHA);
+        try self.acc.ensureUnusedCapacity(self.allocator, ALPHA);
+        try self.acc_state.ensureUnusedCapacity(self.allocator, 1);
+        try self.accel_kind.ensureUnusedCapacity(self.allocator, 1);
+        try self.accel_set.ensureUnusedCapacity(self.allocator, 1);
+        try self.keys.ensureUnusedCapacity(self.allocator, 1);
+        try self.map.ensureUnusedCapacity(self.allocator, 1);
+        const owned = try self.allocator.dupe(u8, key);
 
         const idx: i32 = @intCast(self.keys.items.len);
-        try self.trans.appendNTimes(self.allocator, UNCOMPUTED, ALPHA);
-        try self.acc.appendNTimes(self.allocator, false, ALPHA);
-        try self.acc_state.append(self.allocator, accepts);
-        try self.accel_kind.append(self.allocator, 0);
-        try self.accel_set.append(self.allocator, undefined);
-        try self.keys.append(self.allocator, owned);
-        try self.map.put(self.allocator, owned, idx);
+        self.trans.appendNTimesAssumeCapacity(UNCOMPUTED, ALPHA);
+        self.acc.appendNTimesAssumeCapacity(false, ALPHA);
+        self.acc_state.appendAssumeCapacity(accepts);
+        self.accel_kind.appendAssumeCapacity(0);
+        self.accel_set.appendAssumeCapacity(undefined);
+        self.keys.appendAssumeCapacity(owned);
+        self.map.putAssumeCapacity(owned, idx);
         return idx;
     }
 

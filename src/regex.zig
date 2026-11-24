@@ -108,6 +108,50 @@ pub const Regex = struct {
     /// Null when the pattern isn't that shape.
     bounded_literal: ?BoundedLiteral = null,
 
+    /// Search DFAs `isMatch` keeps warm between calls (see `SearchDfaPool`).
+    /// Null for a pattern `isMatch` never runs on the lazy DFA.
+    search_dfa_pool: ?*SearchDfaPool = null,
+
+    /// A few unanchored search DFAs that `isMatch` returns after a call and
+    /// takes again on the next, so the states it built stay built. Without it
+    /// every call determinises from scratch, which on a large alternation costs
+    /// far more than the search (CRS's keyword lists: milliseconds a call,
+    /// against microseconds with the states kept).
+    ///
+    /// Each slot holds one DFA or nothing and is claimed with an atomic swap,
+    /// so a shared `Regex` stays safe: a thread that finds every slot empty
+    /// builds its own DFA, as before, and a returned DFA that finds every slot
+    /// full is freed. A DFA is only kept while it is small (`retain_states`),
+    /// so input that drives a pattern towards the DFA's state cap cannot leave
+    /// that memory held after the call.
+    pub const SearchDfaPool = struct {
+        slots: [slot_count]std.atomic.Value(?*dfa.LazyDfa) = @splat(.init(null)),
+
+        pub const slot_count = 4;
+        /// About 1.3 KiB of transition table per state.
+        pub const retain_states = 256;
+
+        fn take(pool: *SearchDfaPool) ?*dfa.LazyDfa {
+            for (&pool.slots) |*slot| if (slot.swap(null, .acquire)) |d| return d;
+            return null;
+        }
+
+        /// Keep `d` for the next call, or report that it was not kept.
+        fn give(pool: *SearchDfaPool, d: *dfa.LazyDfa) bool {
+            if (d.overflow or d.stateCount() > retain_states) return false;
+            for (&pool.slots) |*slot| if (slot.cmpxchgStrong(null, d, .release, .monotonic) == null) return true;
+            return false;
+        }
+
+        fn destroy(pool: *SearchDfaPool, allocator: std.mem.Allocator) void {
+            for (&pool.slots) |*slot| if (slot.swap(null, .acquire)) |d| {
+                d.deinit();
+                allocator.destroy(d);
+            };
+            allocator.destroy(pool);
+        }
+    };
+
     /// `\bfn\b`-style descriptor: a fixed `literal` that must be preceded by all
     /// `pre` assertions (checked at the literal's start) and followed by all
     /// `post` assertions (checked at its end). `literal` is owned by the regex.
@@ -274,6 +318,14 @@ pub const Regex = struct {
             errdefer comp.deinit();
             _ = try comp.compile(&tree);
 
+            // Only a pattern isMatch runs on the lazy DFA needs the pool.
+            const search_dfa_pool: ?*SearchDfaPool = if (comp.nfa.has_literal_assertions) null else blk: {
+                const pool = try allocator.create(SearchDfaPool);
+                pool.* = .{};
+                break :blk pool;
+            };
+            errdefer if (search_dfa_pool) |pool| allocator.destroy(pool);
+
             const capture_count = tree.capture_count;
             const owned_named_capture_list = try named_capture_list.toOwnedSlice(allocator);
             tree.deinit();
@@ -292,6 +344,7 @@ pub const Regex = struct {
                 .named_capture_list = owned_named_capture_list,
                 .onepass = onepass_plan,
                 .bounded_literal = bounded_literal,
+                .search_dfa_pool = search_dfa_pool,
             };
         }
     }
@@ -314,6 +367,7 @@ pub const Regex = struct {
         self.opt_info.deinit(self.allocator);
         if (self.onepass) |p| p.deinit();
         if (self.bounded_literal) |bl| self.allocator.free(bl.literal);
+        if (self.search_dfa_pool) |pool| pool.destroy(self.allocator);
 
         deinitNamedCaptureMap(self.allocator, &self.named_captures);
         for (self.named_capture_list) |entry| self.allocator.free(entry.name);
@@ -673,6 +727,14 @@ pub const Regex = struct {
             !self.nfa.has_literal_assertions and !self.opt_info.has_lazy;
     }
 
+    /// Whether `isMatch` can answer with the unanchored search DFA. Wider than
+    /// `dfaEligible`: a lazy quantifier only orders an NFA split, which changes
+    /// which match is reported but never whether one exists, and existence is
+    /// all the search DFA answers.
+    fn searchDfaEligible(self: *const Regex) bool {
+        return self.engine_type == .thompson_nfa and !self.nfa.has_literal_assertions;
+    }
+
     /// Whether the DFA loops have any candidate prefilter to apply. Under `i`,
     /// `compile` already folded `first_bytes` and cleared the case-sensitive
     /// `literal_prefix`/`first_byte_single`, so this stays correct for `i` too.
@@ -764,6 +826,38 @@ pub const Regex = struct {
     /// The unanchored search DFA for isMatch: the reused one (from a `Matcher`) or
     /// a fresh temporary written into `tmp` (the caller deinits `tmp`). Returns
     /// null on OOM so the caller falls back to the NFA.
+    /// A search DFA for one `isMatch` call: a warm one from the pool, else a
+    /// new one. Null when none can be built (the call then takes the NFA).
+    /// Every non-null result goes back through `returnSearchDfa`.
+    fn takeSearchDfa(self: *const Regex) ?*dfa.LazyDfa {
+        if (self.search_dfa_pool) |pool| if (pool.take()) |d| {
+            // A DFA reads the NFA through a pointer to `Regex.nfa`, which is
+            // inline: if this `Regex` was moved since the DFA was built (an
+            // ArrayList that grew, a map that rehashed, a return by value),
+            // the stored address is stale. Every copy shares the NFA's heap
+            // contents, so pointing it at this copy is always right. The DFA
+            // is this call's alone until it is returned.
+            d.nfa = @constCast(&self.nfa);
+            return d;
+        };
+        const d = self.allocator.create(dfa.LazyDfa) catch return null;
+        d.* = dfa.LazyDfa.initSearch(self.allocator, @constCast(&self.nfa), self.flags) catch {
+            self.allocator.destroy(d);
+            return null;
+        };
+        return d;
+    }
+
+    fn returnSearchDfa(self: *const Regex, d: *dfa.LazyDfa) void {
+        if (self.search_dfa_pool) |pool| if (pool.give(d)) return;
+        self.freeSearchDfa(d);
+    }
+
+    fn freeSearchDfa(self: *const Regex, d: *dfa.LazyDfa) void {
+        d.deinit();
+        self.allocator.destroy(d);
+    }
+
     fn obtainSearchDfa(self: *const Regex, reuse: ?*dfa.LazyDfa, tmp: *?dfa.LazyDfa) ?*dfa.LazyDfa {
         if (reuse) |d| return d;
         tmp.* = dfa.LazyDfa.initSearch(self.allocator, @constCast(&self.nfa), self.flags) catch return null;
@@ -1144,7 +1238,7 @@ pub const Regex = struct {
         /// The cached unanchored search DFA for isMatch, built on first use.
         fn searchDfaPtr(self: *Matcher) ?*dfa.LazyDfa {
             if (self.search_dfa_cell) |*d| return d;
-            if (self.search_dfa_failed or !self.re.dfaEligible()) return null;
+            if (self.search_dfa_failed or !self.re.searchDfaEligible()) return null;
             self.search_dfa_cell = dfa.LazyDfa.initSearch(self.scratch_allocator, @constCast(&self.re.nfa), self.re.flags) catch {
                 self.search_dfa_failed = true;
                 return null;
@@ -1228,9 +1322,10 @@ pub const Regex = struct {
         return self.isMatchInner(input, null, null);
     }
 
-    /// `reuse_dfa`/`reuse_search_dfa` let a `Matcher` pass cached lazy DFAs so
-    /// per-call construction is amortized across calls (the grep hot path); null
-    /// builds a fresh DFA per call (the thread-safe public path).
+    /// `reuse_vm`/`reuse_search_dfa` let a `Matcher` pass its own cached VM and
+    /// lazy DFA (the grep hot path). With null, the search DFA comes from the
+    /// regex's `SearchDfaPool`, which keeps it warm across calls and threads
+    /// (the shared public path); the VM is still built per call.
     fn isMatchInner(self: *const Regex, input: []const u8, reuse_vm: ?*vm.VM, reuse_search_dfa: ?*dfa.LazyDfa) !bool {
         // Required-literal fast-fail: a mandatory substring that's absent means
         // there can be no match (works for every engine).
@@ -1306,16 +1401,23 @@ pub const Regex = struct {
         // Existence has no leftmost/longest subtlety, so the unanchored search
         // DFA settles it in one left-to-right pass (the re-seeded start makes every
         // position a candidate) — no per-position restart. O(n) even for sparse
-        // matches like `fn\s+\w+|\w+\s+fn`.
-        if (self.dfaEligible()) {
-            var tmp: ?dfa.LazyDfa = null;
-            defer if (tmp) |*t| t.deinit();
-            if (self.obtainSearchDfa(reuse_search_dfa, &tmp)) |d| {
+        // matches like `fn\s+\w+|\w+\s+fn`. A `Matcher` passes its own DFA;
+        // otherwise one comes from the pool (or is built) and goes back to it.
+        if (self.searchDfaEligible()) {
+            const pooled = if (reuse_search_dfa == null) self.takeSearchDfa() else null;
+            // A DFA whose search failed part-way (out of memory while adding a
+            // state) is freed, never returned for another call to use.
+            var reusable = true;
+            defer if (pooled) |d| if (reusable) self.returnSearchDfa(d) else self.freeSearchDfa(d);
+            if (reuse_search_dfa orelse pooled) |d| {
                 if (d.anyMatch(input)) |b| {
                     return b;
                 } else |err| switch (err) {
                     error.DfaOverflow => {}, // fall back to NFA
-                    else => |e| return e,
+                    else => |e| {
+                        reusable = false;
+                        return e;
+                    },
                 }
             }
         }
@@ -2163,7 +2265,7 @@ pub const Regex = struct {
                     // or a single throwaway built here — never one per candidate.
                     var tmp_dfa: ?dfa.LazyDfa = null;
                     defer if (tmp_dfa) |*t| t.deinit();
-                    const sdfa = reuse_search_dfa orelse (if (self.dfaEligible()) self.obtainSearchDfa(null, &tmp_dfa) else null);
+                    const sdfa = reuse_search_dfa orelse (if (self.searchDfaEligible()) self.obtainSearchDfa(null, &tmp_dfa) else null);
                     // If the bare literal is itself a complete match — no anchors
                     // or zero-width assertions constrain where it may sit — then
                     // every line containing it matches, so the per-candidate
@@ -2193,7 +2295,7 @@ pub const Regex = struct {
         // `resume_from` lets a rare mid-scan DFA overflow hand off to the general
         // matcher *from the unfinished line* — lines already emitted aren't redone.
         var resume_from: usize = 0;
-        if (self.dfaEligible()) {
+        if (self.searchDfaEligible()) {
             var tmp: ?dfa.LazyDfa = null;
             defer if (tmp) |*t| t.deinit();
             if (self.obtainSearchDfa(reuse_search_dfa, &tmp)) |d| {
@@ -4624,6 +4726,169 @@ test "concurrent searches of one backtracking regex do not share state" {
     }
     // And nothing was written to the compiled pattern.
     try std.testing.expectEqual(@as(usize, 0), re.backtrack_engine.?.step_count);
+}
+
+/// The search DFA `isMatch` left in the pool, if any (test helper).
+fn pooledSearchDfa(re: *const Regex) ?*dfa.LazyDfa {
+    const pool = re.search_dfa_pool orelse return null;
+    for (&pool.slots) |*slot| if (slot.load(.acquire)) |d| return d;
+    return null;
+}
+
+test "isMatch keeps its search DFA warm between calls" {
+    // isMatch used to build its lazy DFA from scratch on every call, which on a
+    // large alternation cost milliseconds against microseconds for the search.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithoutCaptures(allocator, "(?i)[a-z]+\\s+(?:select|insert|update|delete)\\s+[0-9]+", .{ .bytes = true });
+    defer re.deinit();
+    try std.testing.expect(try re.isMatch("please update 42 rows"));
+    const warm = pooledSearchDfa(&re) orelse return error.TestExpectedPooledDfa;
+    const states = warm.stateCount();
+    try std.testing.expect(states > 0);
+    // The same input again walks only states the first call built.
+    try std.testing.expect(try re.isMatch("please update 42 rows"));
+    try std.testing.expectEqual(warm, pooledSearchDfa(&re).?);
+    try std.testing.expectEqual(states, warm.stateCount());
+    try std.testing.expect(!try re.isMatch("please update the rows"));
+}
+
+test "a regex moved after isMatch keeps matching with its pooled DFA" {
+    // A pooled DFA reads the NFA through a pointer to the inline `Regex.nfa`
+    // of the copy that built it. Moving the value (an ArrayList that grows, a
+    // map that rehashes) left that pointer at freed memory for the next call.
+    const allocator = std.testing.allocator;
+    const old = try allocator.create(Regex);
+    old.* = try Regex.compileWithoutCaptures(allocator, "(?i)(?:select|union|insert)\\s+[a-z]+\\s+from", .{ .bytes = true });
+    try std.testing.expect(try old.isMatch("1 union all from t"));
+    try std.testing.expect(pooledSearchDfa(old) != null);
+
+    const moved = try allocator.create(Regex);
+    defer allocator.destroy(moved);
+    moved.* = old.*;
+    // Free the first copy's memory, so a stale pointer reads freed bytes.
+    allocator.destroy(old);
+    defer moved.deinit();
+    // New bytes need new DFA states, which reads the NFA.
+    try std.testing.expect(!try moved.isMatch("x INSERT 42 from y"));
+    try std.testing.expect(try moved.isMatch("x insert rows from y"));
+    try std.testing.expect(try moved.isMatch("SELECT name FROM users"));
+}
+
+test "isMatch frees a search DFA that grew past what the pool keeps" {
+    // `a[ab]{9}c` needs a DFA state for every arrangement of the last ten
+    // bytes, so a long a/b input that never reaches a `c` after them builds far
+    // more than `retain_states`. Keeping that would let input decide how much
+    // memory a compiled pattern holds. The leading `c` keeps the required
+    // literal present, so the search reaches the DFA at all.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithoutCaptures(allocator, "a[ab]{9}c", .{ .bytes = true });
+    defer re.deinit();
+    var input: [4096]u8 = undefined;
+    var x: u32 = 0x9e3779b9;
+    for (&input) |*c| {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        c.* = if (x & 1 == 0) 'a' else 'b';
+    }
+    input[0] = 'c';
+    try std.testing.expect(!try re.isMatch(&input));
+    try std.testing.expect(pooledSearchDfa(&re) == null);
+    // A short input builds few states, and that DFA is kept.
+    try std.testing.expect(try re.isMatch("aaaaaaaaaac"));
+    const kept = pooledSearchDfa(&re) orelse return error.TestExpectedPooledDfa;
+    try std.testing.expect(kept.stateCount() <= Regex.SearchDfaPool.retain_states);
+}
+
+test "a lazy quantifier answers isMatch through the search DFA, unchanged" {
+    // Laziness only orders an NFA split: it changes which match is reported,
+    // never whether one exists, so isMatch may use the search DFA for it.
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { pattern: []const u8, input: []const u8 }{
+        .{ .pattern = "a.*?b", .input = "xxaxxxbxx" },
+        .{ .pattern = "a.*?b", .input = "xxaxxx" },
+        .{ .pattern = "^x+?$", .input = "xxxx" },
+        .{ .pattern = "^x+?$", .input = "xxyx" },
+        .{ .pattern = "(?:ab)+?c", .input = "zzababc" },
+        .{ .pattern = "(?:ab)+?c", .input = "zzababd" },
+        .{ .pattern = "\\bsel.*?ect\\b", .input = "a select b" },
+        .{ .pattern = "\\bsel.*?ect\\b", .input = "a selectx b" },
+        .{ .pattern = "(?i)union.{0,20}?select", .input = "1 UNION all SELECT 2" },
+        .{ .pattern = "(?i)union.{0,20}?select", .input = "1 union with far too many bytes before select" },
+    };
+    for (cases) |c| {
+        var spans = try Regex.compileWithoutCaptures(allocator, c.pattern, .{ .bytes = true, .dot_all = true });
+        defer spans.deinit();
+        try std.testing.expect(spans.opt_info.has_lazy);
+        // The backtracker, which follows lazy semantics step by step.
+        var reference = try Regex.compileWithFlags(allocator, c.pattern, .{ .bytes = true, .dot_all = true });
+        defer reference.deinit();
+        const expected = try reference.isMatch(c.input);
+        try std.testing.expectEqual(expected, try spans.isMatch(c.input));
+        // A miss can be settled before any engine runs (a required literal is
+        // absent); a match is found by the search DFA.
+        if (expected) try std.testing.expect(pooledSearchDfa(&spans) != null);
+    }
+}
+
+test "concurrent isMatch calls on one regex share the DFA pool safely" {
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithoutCaptures(allocator, "(?i)(?:passthru|shell_exec|proc_open|popen|system)\\s*\\(", .{ .bytes = true });
+    defer re.deinit();
+    const Search = struct {
+        regex: *const Regex,
+        input: []const u8,
+        expect: bool,
+        wrong: usize = 0,
+        failed: bool = false,
+
+        fn run(self: *@This()) void {
+            for (0..2_000) |_| {
+                const found = self.regex.isMatch(self.input) catch {
+                    self.failed = true;
+                    return;
+                };
+                if (found != self.expect) self.wrong += 1;
+            }
+        }
+    };
+    const hit = "name=x&cmd=SHELL_EXEC ('id')";
+    const miss = "name=x&cmd=shell exec of nothing";
+    var searches: [8]Search = undefined;
+    for (&searches, 0..) |*s, i| s.* = .{ .regex = &re, .input = if (i % 2 == 0) hit else miss, .expect = i % 2 == 0 };
+    var threads: [searches.len]std.Thread = undefined;
+    for (&searches, &threads) |*search, *thread| thread.* = try std.Thread.spawn(.{}, Search.run, .{search});
+    for (threads) |thread| thread.join();
+    for (searches) |search| {
+        try std.testing.expect(!search.failed);
+        try std.testing.expectEqual(@as(usize, 0), search.wrong);
+    }
+}
+
+test "isMatch is correct or reports OutOfMemory at every allocation failure" {
+    // The pool is a cache: when its DFA cannot be built, isMatch takes the NFA,
+    // and a DFA whose search failed part-way is never handed to another call.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        var re = Regex.compileWithoutCaptures(allocator, "(?i)(?:select|union)\\s+[a-z]+.*?from", .{ .bytes = true }) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer re.deinit();
+        const inputs = [_]struct { []const u8, bool }{
+            .{ "1 UNION ALL SELECT name FROM users", true },
+            .{ "select nothing here", false },
+            .{ "1 UNION ALL SELECT name FROM users", true },
+        };
+        for (inputs) |in| {
+            if (re.isMatch(in[0])) |found| {
+                try std.testing.expectEqual(in[1], found);
+            } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+        if (!failing.has_induced_failure) break;
+    }
 }
 
 test "case invariant class sets preserve Node matches and capture boundaries" {
