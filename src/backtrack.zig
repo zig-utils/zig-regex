@@ -39,6 +39,23 @@ pub const BacktrackEngine = struct {
     /// captures and step_count. Reset at findFrom entry; no process-global state.
     /// Choice traversal must not turn allocation failures into ordinary misses.
     match_error: ?anyerror = null,
+    /// The current search's memo of failed continuation states, owned by
+    /// `findFromWithPrefix` while it runs (see `SearchMemo`). Null outside a
+    /// search and for patterns the memo would be wrong for.
+    memo: ?*SearchMemo = null,
+    /// Set for a search whose loops over a body with choices go to the
+    /// continuation matcher piece by piece (see `continuationFirst`): the
+    /// pattern has such a loop and no backreference or atomic group, so the
+    /// memo can keep those pieces from going exponential. Their loops follow
+    /// the pattern's own dialect (`pcreLoops`); a pattern the continuation
+    /// matcher runs whole keeps its rules as they were.
+    hybrid: bool = false,
+    /// Whether the last search was answered by the attempt with the loop
+    /// memo, which ran on half the step budget (see `findFromWithPrefix`).
+    answered_with_memo: bool = false,
+    /// Every step the last search took, over both its attempts when it ran
+    /// two (`step_count` holds only the last attempt's).
+    steps_taken: usize = 0,
 
     pub const CaptureGroup = struct {
         start: usize,
@@ -110,6 +127,47 @@ pub const BacktrackEngine = struct {
     /// start of every match. It borrows the caller's immutable analysis. ASCII
     /// candidate positions also preserve Unicode code-point search boundaries.
     pub fn findFromWithPrefix(self: *BacktrackEngine, input: []const u8, start: usize, prefix: ?[]const u8) ?BacktrackMatch {
+        // A search with the loop memo gets half the step budget. If it outgrows
+        // the memo's tables or that half (a long input over a loop with an
+        // ambiguous body, or a loop over a large alternation, where each state
+        // costs many steps), it runs again without the memo, as the engine did
+        // before the memo, with the whole budget: its cost stays within 0.5.2's
+        // plus half a budget, at 0.5.2's accuracy. `Regex.searchSteps` reports
+        // the attempt that answered.
+        self.answered_with_memo = false;
+        if (!self.memoApplies()) {
+            const found = self.findOnce(input, start, prefix, false);
+            self.steps_taken = self.step_count;
+            return found;
+        }
+        const budget = self.max_steps;
+        self.max_steps = budget / 2;
+        const found = self.findOnce(input, start, prefix, true);
+        self.max_steps = budget;
+        const first_attempt = self.step_count;
+        const outgrown = found == null and (self.step_count > budget / 2 or
+            (if (self.match_error) |err| err == error.MemoExhausted or err == error.Timeout else false));
+        if (outgrown) {
+            const rerun = self.findOnce(input, start, prefix, false);
+            self.steps_taken = first_attempt + self.step_count;
+            return rerun;
+        }
+        self.steps_taken = first_attempt;
+        self.answered_with_memo = true;
+        return found;
+    }
+
+    /// Whether a search of this pattern uses the loop memo: it has a loop
+    /// over a body with choices, and no backreference or atomic group, which
+    /// the memo would be wrong for.
+    fn memoApplies(self: *BacktrackEngine) bool {
+        return self.ast_root.facts.choice_loop and
+            !self.hasBackreference(self.ast_root) and !self.hasAtomicGroup(self.ast_root);
+    }
+
+    /// One search; `allow_memo` false runs it without the loop memo and the
+    /// pieces that need it (see `SearchMemo`), as 0.5.2 did.
+    fn findOnce(self: *BacktrackEngine, input: []const u8, start: usize, prefix: ?[]const u8, allow_memo: bool) ?BacktrackMatch {
         self.input = input;
 
         const codepoint_search = self.flags.unicode or containsCodepointAtom(self.ast_root);
@@ -125,9 +183,29 @@ pub const BacktrackEngine = struct {
         self.match_error = null;
         // Atomic groups need the continuation matcher, whose choice stack an
         // atomic group can cut.
+        // Loops over a body with choices are not a reason to take the whole
+        // pattern there: the matchNode engine hands just the parts that need
+        // it to the continuation matcher (see `continuationFirst`).
         const capture_continuations = (self.flags.ecmascript and
             (self.hasBackreference(self.ast_root) or self.hasLazyQuantifier(self.ast_root))) or
             self.hasAtomicGroup(self.ast_root);
+        // The memo keeps those loops from re-exploring failed states, which
+        // plain backtracking does exponentially often (see `SearchMemo`).
+        var memo: SearchMemo = .{};
+        defer memo.deinit(self.allocator);
+        // Only a loop over a body with choices can re-explore states; other
+        // continuation patterns (a lazy scan) keep the matcher's own memory.
+        const use_memo = self.memoApplies();
+        // A backreference keeps the memo off, and without it the continuation
+        // matcher is exponential where this engine is not, so such a pattern
+        // keeps 0.5.2's matching here, its loops included. So does a search the
+        // memo has outgrown (`findFromWithPrefix`).
+        self.memo = if (use_memo and allow_memo) &memo else null;
+        self.hybrid = use_memo and allow_memo and !capture_continuations;
+        defer {
+            self.memo = null;
+            self.hybrid = false;
+        }
         while (pos <= input.len) {
             if (prefix) |literal| {
                 // ECMA-262 RegExpBuiltinExec searches starts in order. A
@@ -138,7 +216,7 @@ pub const BacktrackEngine = struct {
             }
             self.resetCaptures();
             const end = if (capture_continuations)
-                self.matchWithContinuations(self.ast_root, pos, false) catch |err| {
+                self.matchWithContinuations(self.ast_root, pos, false, .first) catch |err| {
                     self.match_error = err;
                     return null;
                 }
@@ -178,6 +256,235 @@ pub const BacktrackEngine = struct {
         return null;
     }
 
+    const FlagsInt = @typeInfo(common.CompileFlags).@"struct".backing_integer.?;
+
+    /// One continuation task, as the memo identifies it.
+    const ChainKey = struct { tag: u8, a: usize = 0, b: usize = 0, c: usize = 0, d: usize = 0, e: usize = 0, next: u32 };
+
+    /// A loop about to run one more iteration, with everything its outcome
+    /// depends on when no backreference reads a capture: the loop, the rest of
+    /// the match after it, the position, the scoped flags and the direction.
+    ///
+    /// `pending` stands in for the start positions of the iterations still
+    /// open in the rest (their `advance` tasks), which `chain_ids` leaves out.
+    /// Along one path the position only moves one way, so an open iteration
+    /// that started anywhere but here can no longer end empty, and how far
+    /// back it started cannot matter; bit i is set when the i-th open
+    /// iteration started exactly here, the one case where it can.
+    const StateKey = struct { child: usize, min: usize, max: usize, greedy: bool, rest: u32, pending: u64, position: usize, flags: FlagsInt, reverse: bool };
+
+    /// The memo's budget: the most loop states, chain ids, or choices one
+    /// continuation invocation may hold, each. A loop over an ambiguous body
+    /// keeps a few to a dozen states per input byte, so a long enough input
+    /// outgrows it; the search then stops with `error.MemoExhausted` and runs
+    /// again without the memo (`findFromWithPrefix`), rather than going on
+    /// unmemoized, which can be exponential. This caps what the memo can make
+    /// one search allocate at a few tens of megabytes.
+    const memo_state_floor = 1 << 16;
+
+    const MemoVerdict = enum { explore, fail, succeed };
+
+    /// What the memo says about one loop step (see `SearchMemo`), recording the
+    /// state as it goes. An error means the memo could not allocate; the
+    /// caller turns it off and explores normally.
+    fn memoStep(
+        self: *BacktrackEngine,
+        memo: *SearchMemo,
+        repeat: ContinuationRepeat,
+        head: ?*ContinuationLink,
+        position: usize,
+        comptime reverse: bool,
+        generation: u32,
+        path: *std.ArrayList(StateKey),
+        record_successes: bool,
+        arena: std.mem.Allocator,
+    ) !MemoVerdict {
+        // Iterations still required that cannot fit in the input left fail
+        // now: below min the count is part of the state, and a large min
+        // would otherwise try count x position states before giving up.
+        if (repeat.min > 0) {
+            const width = try memo.minWidth(self.allocator, repeat.child);
+            const remaining = if (reverse) position else self.input.len - position;
+            if (width > 0 and repeat.min > remaining / width) return .fail;
+        }
+        const pending = pendingIterations(head, position) orelse return .explore;
+        const key = StateKey{
+            .child = @intFromPtr(repeat.child),
+            .min = repeat.min,
+            .max = if (repeat.max) |m| m + 1 else 0,
+            .greedy = repeat.greedy,
+            .rest = try memo.chainIdOf(self.allocator, head),
+            .pending = pending,
+            .position = position,
+            .flags = @bitCast(self.flags),
+            .reverse = reverse,
+        };
+        if (record_successes and memo.succeeded.contains(key)) {
+            for (path.items) |earlier| if (memo.succeeded.count() < memo.cap) try memo.succeeded.put(self.allocator, earlier, {});
+            return .succeed;
+        }
+        if (memo.states.getPtr(key)) |seen| {
+            if (seen.* == generation or memo.isFailed(seen.*)) return .fail;
+            // Reached before by an invocation that did not fail (a lookaround
+            // that succeeded, or one collecting ends): no verdict to reuse.
+            seen.* = generation;
+        } else {
+            if (memo.states.count() >= memo.cap) return error.MemoExhausted;
+            try memo.states.put(self.allocator, key, generation);
+        }
+        if (record_successes and memo.succeeded.count() < memo.cap) try path.append(arena, key);
+        return .explore;
+    }
+
+    /// The `pending` bits of a state at `position` with rest `head` (see
+    /// `StateKey`), or null when the rest holds more open iterations than
+    /// the bits can tell apart, and the state is not memoized.
+    fn pendingIterations(head: ?*ContinuationLink, position: usize) ?u64 {
+        var bits: u64 = 0;
+        var index: u7 = 0;
+        var link = head;
+        while (link) |current| : (link = current.next) {
+            if (current.task != .advance) continue;
+            if (index == 64) return null;
+            if (current.task.advance.start == position) bits |= @as(u64, 1) << @intCast(index);
+            index += 1;
+        }
+        return bits;
+    }
+
+    /// What one search has learned about its continuation states.
+    ///
+    /// The continuation matcher explores choices in priority order and returns
+    /// as soon as a path reaches the end of the match, so a state it reaches a
+    /// second time can only have failed the first time: had it succeeded, the
+    /// search would already be over. A loop state is therefore explored once
+    /// per invocation, which keeps a loop over a body with choices from trying
+    /// the same decompositions exponentially often (RE2's bit-state
+    /// backtracker uses the same rule). States from an invocation that failed
+    /// outright stay failed for the rest of the search, so a later start
+    /// position, or the same lookaround at another position, reuses them; an
+    /// invocation that succeeded leaves nothing behind.
+    ///
+    /// States are compared by structure, not by link address: `chain_ids`
+    /// gives equal ids to continuations with equal tasks and equal rests, so
+    /// the same loop at the same position with the same remainder is the same
+    /// state wherever it is reached. Only valid when no backreference reads a
+    /// capture and no atomic group cuts choices; `findFromWithPrefix` leaves
+    /// the memo off otherwise.
+    pub const SearchMemo = struct {
+        chain_ids: std.AutoHashMapUnmanaged(ChainKey, u32) = .empty,
+        /// Each loop state reached, with the generation (one per matcher
+        /// invocation) that last reached it. A state whose generation is the
+        /// current invocation's, or one that failed outright, fails.
+        states: std.AutoHashMapUnmanaged(StateKey, u32) = .empty,
+        /// Generations whose invocation failed: marking one bit replaces
+        /// copying every state it reached.
+        failed_generations: std.DynamicBitSetUnmanaged = .{},
+        next_generation: u32 = 0,
+        /// The most entries each table holds (`memo_state_floor`).
+        cap: usize = memo_state_floor,
+        /// States on a path that completed a lookaround body with no
+        /// capturing group. A lookaround's result depends only on where it
+        /// is tried, so reaching one of these again in such a body is a
+        /// success; with no capture to set, nothing is lost by stopping. This
+        /// keeps a lookbehind over a loop, tried at every start, from
+        /// rescanning everything before it each time.
+        succeeded: std.AutoHashMapUnmanaged(StateKey, void) = .empty,
+        /// Each loop body's fewest bytes, computed on first use.
+        min_widths: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+
+        fn deinit(memo: *SearchMemo, allocator: std.mem.Allocator) void {
+            memo.chain_ids.deinit(allocator);
+            memo.states.deinit(allocator);
+            memo.failed_generations.deinit(allocator);
+            memo.succeeded.deinit(allocator);
+            memo.min_widths.deinit(allocator);
+        }
+
+        fn newGeneration(memo: *SearchMemo) u32 {
+            const generation = memo.next_generation;
+            memo.next_generation += 1;
+            return generation;
+        }
+
+        fn markFailed(memo: *SearchMemo, allocator: std.mem.Allocator, generation: u32) !void {
+            if (generation >= memo.failed_generations.bit_length)
+                try memo.failed_generations.resize(allocator, @max(64, 2 * (@as(usize, generation) + 1)), false);
+            memo.failed_generations.set(generation);
+        }
+
+        fn isFailed(memo: *const SearchMemo, generation: u32) bool {
+            return generation < memo.failed_generations.bit_length and memo.failed_generations.isSet(generation);
+        }
+
+        /// The fewest bytes one iteration of `child` consumes; 0 when that is
+        /// not known, as for a Unicode set, which may match the empty string.
+        fn minWidth(memo: *SearchMemo, allocator: std.mem.Allocator, child: *ast.Node) !usize {
+            if (child.facts.codepoint_atom) return 0;
+            const entry = try memo.min_widths.getOrPut(allocator, @intFromPtr(child));
+            if (!entry.found_existing) {
+                var opt = @import("optimizer.zig").Optimizer.init(allocator);
+                entry.value_ptr.* = opt.minLength(child) catch |err| {
+                    _ = memo.min_widths.remove(@intFromPtr(child));
+                    return err;
+                };
+            }
+            return entry.value_ptr.*;
+        }
+
+        /// The id of the chain `task` followed by the chain `next` (0 for
+        /// the empty chain).
+        fn chainId(memo: *SearchMemo, allocator: std.mem.Allocator, task: ContinuationTask, next: u32) !u32 {
+            const key: ChainKey = switch (task) {
+                .node => |node| .{ .tag = 0, .a = @intFromPtr(node), .next = next },
+                // A capture's start never changes whether the rest matches
+                // (no backreference reads it), so it is not part of the state.
+                .finish_group => |group| .{ .tag = 1, .a = if (group.index) |i| i + 1 else 0, .c = @as(FlagsInt, @bitCast(group.flags)), .next = next },
+                .repeat => |repeat| .{ .tag = 2, .a = @intFromPtr(repeat.child), .b = repeat.min, .c = if (repeat.max) |m| m + 1 else 0, .d = @intFromBool(repeat.greedy), .next = next },
+                // The iteration's start is left out here and carried by
+                // `StateKey.pending` instead.
+                .advance => |advance| .{
+                    .tag = 3,
+                    .a = @intFromPtr(advance.next.child),
+                    .b = advance.next.min,
+                    .c = if (advance.next.max) |m| m + 1 else 0,
+                    .e = @as(usize, @intFromBool(advance.next.greedy)) | @as(usize, @intFromBool(advance.required)) << 1,
+                    .next = next,
+                },
+                .clear => |node| .{ .tag = 4, .a = @intFromPtr(node), .next = next },
+                .commit => |depth| .{ .tag = 5, .a = depth, .next = next },
+            };
+            if (memo.chain_ids.count() >= memo.cap and !memo.chain_ids.contains(key)) return error.MemoExhausted;
+            const entry = try memo.chain_ids.getOrPut(allocator, key);
+            // 0 is "not computed" and 1 the empty chain.
+            if (!entry.found_existing) entry.value_ptr.* = @intCast(memo.chain_ids.count() + 1);
+            return entry.value_ptr.*;
+        }
+
+        /// The structural id of the chain starting at `head`, computed for
+        /// every link on it that does not have one yet. Only loop steps need
+        /// ids, so most links never get one.
+        fn chainIdOf(memo: *SearchMemo, allocator: std.mem.Allocator, head: ?*ContinuationLink) !u32 {
+            var unknown: std.ArrayList(*ContinuationLink) = .empty;
+            defer unknown.deinit(allocator);
+            var link = head;
+            var id: u32 = 1;
+            while (link) |current| {
+                if (current.id != 0) {
+                    id = current.id;
+                    break;
+                }
+                try unknown.append(allocator, current);
+                link = current.next;
+            }
+            while (unknown.pop()) |current| {
+                id = try memo.chainId(allocator, current.task, id);
+                current.id = id;
+            }
+            return id;
+        }
+    };
+
     const ContinuationRepeat = struct {
         child: *ast.Node,
         min: usize,
@@ -200,6 +507,9 @@ pub const BacktrackEngine = struct {
         task: ContinuationTask,
         next: ?*ContinuationLink,
         references: usize,
+        /// This chain's structural id, computed on first use by `chainIdOf`
+        /// (0 until then).
+        id: u32 = 0,
     };
 
     // Choice heads share immutable tails. Recycle a link only when neither the
@@ -245,7 +555,22 @@ pub const BacktrackEngine = struct {
         }
     };
 
-    fn matchWithContinuations(self: *BacktrackEngine, root: *ast.Node, start: usize, comptime reverse: bool) anyerror!?usize {
+    /// What one continuation-matcher invocation is asked for.
+    const ContinuationMode = union(enum) {
+        /// The first end, in priority order.
+        first,
+        /// Whether a lookaround body matches; true when the body has no
+        /// capturing group, so the memo may record successes
+        /// (`SearchMemo.succeeded`).
+        assertion: bool,
+        /// Every end, in priority order and each once, appended here. The
+        /// invocation then reports no match and restores the captures.
+        collect: *std.ArrayList(usize),
+        /// A match ending exactly here, with its captures.
+        target: usize,
+    };
+
+    fn matchWithContinuations(self: *BacktrackEngine, root: *ast.Node, start: usize, comptime reverse: bool, mode: ContinuationMode) anyerror!?usize {
         // ECMA-262 CompileSubpattern passes a continuation through every choice.
         // An ending position alone cannot represent paths whose captures differ:
         // a later backreference must be able to reject one and accept another.
@@ -254,6 +579,8 @@ pub const BacktrackEngine = struct {
             position: usize,
             flags: common.CompileFlags,
             captures: []CaptureGroup,
+            /// The length of `path` when this choice was saved.
+            path_len: usize,
         };
         const initial = try self.allocator.dupe(CaptureGroup, self.captures);
         defer self.allocator.free(initial);
@@ -267,6 +594,26 @@ pub const BacktrackEngine = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
         var pool = ContinuationPool{ .allocator = allocator };
+        // This invocation's generation in the memo (see `SearchMemo`), and the
+        // loop states on the path being tried, which all succeed if it does.
+        const generation: u32 = if (self.memo) |memo| memo.newGeneration() else 0;
+        var path: std.ArrayList(StateKey) = .empty;
+        const record_successes = self.memo != null and switch (mode) {
+            .assertion => |capture_free| capture_free,
+            else => false,
+        };
+        // Reaching the end decides an invocation only in these modes; one that
+        // collects ends or wants a given end keeps going, so its states never
+        // count as failed.
+        const decides = mode == .first or mode == .assertion;
+        // Ends this invocation reached, when it collects them: one that
+        // reached none failed outright, like a deciding one. `listed` holds
+        // the ends already in the caller's list (it may collect into one list
+        // more than once), so each is added once in constant time.
+        var collected: usize = 0;
+        var listed: std.AutoHashMapUnmanaged(usize, void) = .empty;
+        defer listed.deinit(self.allocator);
+        if (mode == .collect) for (mode.collect.items) |end| try listed.put(self.allocator, end, {});
         var retired_captures: std.ArrayList([]CaptureGroup) = .empty;
         var choices: std.ArrayList(Choice) = .empty;
         defer choices.deinit(self.allocator);
@@ -275,118 +622,192 @@ pub const BacktrackEngine = struct {
         while (true) {
             if (self.match_error) |err| return err;
             if (self.step_count > self.max_steps) return error.Timeout;
-            const task = pool.pop(&head) orelse {
-                completed = true;
-                return position;
-            };
-            self.step_count += 1;
-            if (self.step_count > self.max_steps) return error.Timeout;
             var failed = false;
-            switch (task) {
-                .node => |node| switch (node.node_type) {
-                    .concat => {
-                        const pair = node.data.concat;
-                        head = try pool.push(head, .{ .node = if (reverse) pair.left else pair.right });
-                        head = try pool.push(head, .{ .node = if (reverse) pair.right else pair.left });
-                    },
-                    .alternation => {
-                        const alt = node.data.alternation;
-                        try choices.append(self.allocator, .{
-                            .head = try pool.push(ContinuationPool.share(head), .{ .node = alt.right }),
-                            .position = position,
-                            .flags = self.flags,
-                            .captures = try snapshotCaptures(allocator, &retired_captures, self.captures),
-                        });
-                        head = try pool.push(head, .{ .node = alt.left });
-                    },
-                    .group => {
-                        const group = node.data.group;
-                        const flags = self.enterGroupFlags(group);
-                        head = try pool.push(head, .{ .finish_group = .{ .index = group.capture_index, .start = position, .flags = flags } });
-                        if (group.atomic) head = try pool.push(head, .{ .commit = choices.items.len });
-                        head = try pool.push(head, .{ .node = group.child });
-                    },
-                    .star, .plus, .optional, .repeat => {
-                        const repeat: ContinuationRepeat = switch (node.node_type) {
-                            .star => .{ .child = node.data.star.child, .min = 0, .max = null, .greedy = node.data.star.greedy },
-                            .plus => .{ .child = node.data.plus.child, .min = 1, .max = null, .greedy = node.data.plus.greedy },
-                            .optional => .{ .child = node.data.optional.child, .min = 0, .max = 1, .greedy = node.data.optional.greedy },
-                            .repeat => .{ .child = node.data.repeat.child, .min = node.data.repeat.bounds.min, .max = node.data.repeat.bounds.max, .greedy = node.data.repeat.greedy },
-                            else => unreachable,
+            const next_task = pool.pop(&head);
+            if (next_task == null) {
+                switch (mode) {
+                    .first, .assertion => {
+                        if (record_successes) if (self.memo) |memo| for (path.items) |key| {
+                            if (memo.succeeded.count() >= memo.cap) break;
+                            memo.succeeded.put(self.allocator, key, {}) catch {
+                                self.memo = null;
+                                break;
+                            };
                         };
-                        head = try pool.push(head, .{ .repeat = repeat });
+                        completed = true;
+                        return position;
                     },
-                    .lookahead, .lookbehind => {
-                        const assertion = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
-                        const saved = if (!assertion.positive) try allocator.dupe(CaptureGroup, self.captures) else null;
-                        // Assertions are atomic: later failure cannot resume an
-                        // alternative inside an already successful assertion.
-                        const matched = if (node.node_type == .lookbehind)
-                            (try self.matchWithContinuations(assertion.child, position, true)) != null
-                        else
-                            (try self.matchWithContinuations(assertion.child, position, false)) != null;
-                        if (saved) |caps| @memcpy(self.captures, caps);
-                        failed = matched != assertion.positive;
+                    .target => |end| if (position == end) {
+                        completed = true;
+                        return position;
                     },
-                    else => {
-                        const end = if (reverse) self.matchReverseNode(node, position) else self.matchNode(node, position);
-                        if (end) |next| position = next else failed = true;
+                    .collect => |ends| {
+                        // Counted even when the list already holds it (the
+                        // caller may collect into one list more than once):
+                        // an end was reached, so this invocation did not fail.
+                        collected += 1;
+                        if (!(try listed.getOrPut(self.allocator, position)).found_existing)
+                            try ends.append(self.allocator, position);
                     },
-                },
-                .finish_group => |group| {
-                    if (group.index) |index| {
-                        if (index > 0 and index <= self.captures.len) self.captures[index - 1] = .{
-                            .start = if (reverse) position else group.start,
-                            .end = if (reverse) group.start else position,
-                            .matched = true,
-                        };
-                    }
-                    self.flags = group.flags;
-                },
-                .repeat => |repeat| {
-                    if (repeat.max == null or repeat.max.? != 0) {
-                        const next = ContinuationRepeat{ .child = repeat.child, .min = repeat.min -| 1, .max = if (repeat.max) |max| max - 1 else null, .greedy = repeat.greedy };
-                        var child = try pool.push(ContinuationPool.share(head), .{ .advance = .{ .next = next, .start = position, .required = repeat.min != 0 } });
-                        child = try pool.push(child, .{ .node = repeat.child });
-                        child = try pool.push(child, .{ .clear = repeat.child });
-                        if (repeat.min == 0) {
+                }
+                // Not the end wanted, or every end wanted: try the next path.
+                failed = true;
+            }
+            if (next_task) |task| {
+                self.step_count += 1;
+                if (self.step_count > self.max_steps) return error.Timeout;
+                switch (task) {
+                    .node => |node| switch (node.node_type) {
+                        .concat => {
+                            const pair = node.data.concat;
+                            head = try pool.push(head, .{ .node = if (reverse) pair.left else pair.right });
+                            head = try pool.push(head, .{ .node = if (reverse) pair.right else pair.left });
+                        },
+                        .alternation => {
+                            const alt = node.data.alternation;
+                            if (self.memo != null and choices.items.len >= self.choiceBudget()) return error.MemoExhausted;
                             try choices.append(self.allocator, .{
-                                .head = if (repeat.greedy) head else child,
+                                .head = try pool.push(ContinuationPool.share(head), .{ .node = alt.right }),
                                 .position = position,
                                 .flags = self.flags,
                                 .captures = try snapshotCaptures(allocator, &retired_captures, self.captures),
+                                .path_len = path.items.len,
                             });
-                            if (repeat.greedy) head = child;
-                        } else {
-                            pool.release(head);
-                            head = child;
+                            head = try pool.push(head, .{ .node = alt.left });
+                        },
+                        .group => {
+                            const group = node.data.group;
+                            const flags = self.enterGroupFlags(group);
+                            head = try pool.push(head, .{ .finish_group = .{ .index = group.capture_index, .start = position, .flags = flags } });
+                            if (group.atomic) head = try pool.push(head, .{ .commit = choices.items.len });
+                            head = try pool.push(head, .{ .node = group.child });
+                        },
+                        .star, .plus, .optional, .repeat => {
+                            const repeat: ContinuationRepeat = switch (node.node_type) {
+                                .star => .{ .child = node.data.star.child, .min = 0, .max = null, .greedy = node.data.star.greedy },
+                                .plus => .{ .child = node.data.plus.child, .min = 1, .max = null, .greedy = node.data.plus.greedy },
+                                .optional => .{ .child = node.data.optional.child, .min = 0, .max = 1, .greedy = node.data.optional.greedy },
+                                .repeat => .{ .child = node.data.repeat.child, .min = node.data.repeat.bounds.min, .max = node.data.repeat.bounds.max, .greedy = node.data.repeat.greedy },
+                                else => unreachable,
+                            };
+                            head = try pool.push(head, .{ .repeat = repeat });
+                        },
+                        .lookahead, .lookbehind => {
+                            const assertion = if (node.node_type == .lookahead) node.data.lookahead else node.data.lookbehind;
+                            const saved = if (!assertion.positive) try allocator.dupe(CaptureGroup, self.captures) else null;
+                            // Assertions are atomic: later failure cannot resume an
+                            // alternative inside an already successful assertion.
+                            const matched = if (node.node_type == .lookbehind)
+                                (try self.matchWithContinuations(assertion.child, position, true, .{ .assertion = !assertion.child.facts.capturing_group })) != null
+                            else
+                                (try self.matchWithContinuations(assertion.child, position, false, .{ .assertion = !assertion.child.facts.capturing_group })) != null;
+                            if (saved) |caps| @memcpy(self.captures, caps);
+                            failed = matched != assertion.positive;
+                        },
+                        else => {
+                            const end = if (reverse) self.matchReverseNode(node, position) else self.matchNode(node, position);
+                            if (end) |next| position = next else failed = true;
+                        },
+                    },
+                    .finish_group => |group| {
+                        if (group.index) |index| {
+                            if (index > 0 and index <= self.captures.len) self.captures[index - 1] = .{
+                                .start = if (reverse) position else group.start,
+                                .end = if (reverse) group.start else position,
+                                .matched = true,
+                            };
                         }
-                    }
-                },
-                .advance => |advance| {
-                    // RepeatMatcher rejects zero progress only after satisfying
-                    // min. Required empty iterations still consume the budget.
-                    if (!advance.required and position == advance.start) {
-                        failed = true;
-                    } else head = try pool.push(head, .{ .repeat = advance.next });
-                },
-                .clear => |node| {
-                    self.clearCapturesIn(node);
-                    if (self.match_error) |err| return err;
-                },
-                .commit => |depth| {
-                    while (choices.items.len > depth) {
-                        const choice = choices.pop().?;
-                        pool.release(choice.head);
-                        try retired_captures.append(allocator, choice.captures);
-                    }
-                },
+                        self.flags = group.flags;
+                    },
+                    .repeat => |repeat| repeat: {
+                        if (self.memo) |memo| {
+                            const verdict = self.memoStep(memo, repeat, head, position, reverse, generation, &path, record_successes, allocator) catch |err| switch (err) {
+                                // The memo only prunes: without memory for it,
+                                // go on without it.
+                                error.OutOfMemory => blk: {
+                                    self.memo = null;
+                                    break :blk .explore;
+                                },
+                                else => |e| return e,
+                            };
+                            switch (verdict) {
+                                .explore => {},
+                                .fail => {
+                                    failed = true;
+                                    break :repeat;
+                                },
+                                .succeed => {
+                                    completed = true;
+                                    return position;
+                                },
+                            }
+                        }
+                        if (repeat.max == null or repeat.max.? != 0) {
+                            const next = ContinuationRepeat{ .child = repeat.child, .min = repeat.min -| 1, .max = if (repeat.max) |max| max - 1 else null, .greedy = repeat.greedy };
+                            var child = try pool.push(ContinuationPool.share(head), .{ .advance = .{ .next = next, .start = position, .required = repeat.min != 0 } });
+                            child = try pool.push(child, .{ .node = repeat.child });
+                            // ECMAScript resets the body's captures at each
+                            // iteration; PCRE keeps a group's value from an earlier
+                            // iteration that a later one does not set.
+                            if (!self.pcreLoops()) child = try pool.push(child, .{ .clear = repeat.child });
+                            if (repeat.min == 0) {
+                                if (self.memo != null and choices.items.len >= self.choiceBudget()) return error.MemoExhausted;
+                                try choices.append(self.allocator, .{
+                                    .head = if (repeat.greedy) head else child,
+                                    .position = position,
+                                    .flags = self.flags,
+                                    .captures = try snapshotCaptures(allocator, &retired_captures, self.captures),
+                                    .path_len = path.items.len,
+                                });
+                                if (repeat.greedy) head = child;
+                            } else {
+                                pool.release(head);
+                                head = child;
+                            }
+                        }
+                    },
+                    .advance => |advance| {
+                        // An iteration that consumed nothing. ECMAScript's
+                        // RepeatMatcher rejects it once min is met (required
+                        // empty iterations still consume the budget). PCRE ends
+                        // an unbounded loop there once no iteration is still
+                        // required, going on with the rest, and lets a bounded
+                        // one go on to its next copy.
+                        const empty = position == advance.start;
+                        if (empty and self.pcreLoops()) {
+                            if (advance.next.max != null or advance.next.min != 0)
+                                head = try pool.push(head, .{ .repeat = advance.next });
+                        } else if (empty and !advance.required) {
+                            failed = true;
+                        } else head = try pool.push(head, .{ .repeat = advance.next });
+                    },
+                    .clear => |node| {
+                        self.clearCapturesIn(node);
+                        if (self.match_error) |err| return err;
+                    },
+                    .commit => |depth| {
+                        while (choices.items.len > depth) {
+                            const choice = choices.pop().?;
+                            pool.release(choice.head);
+                            try retired_captures.append(allocator, choice.captures);
+                        }
+                    },
+                }
             }
             if (failed) {
-                const choice = choices.pop() orelse return null;
+                const choice = choices.pop() orelse {
+                    // Every path failed, so every state this invocation reached
+                    // fails wherever else it is reached in this search.
+                    const failed_outright = decides or (mode == .collect and collected == 0);
+                    if (failed_outright) if (self.memo) |memo| memo.markFailed(self.allocator, generation) catch {
+                        self.memo = null;
+                    };
+                    return null;
+                };
                 pool.release(head);
                 head = choice.head;
                 position = choice.position;
+                path.shrinkRetainingCapacity(choice.path_len);
                 self.flags = choice.flags;
                 @memcpy(self.captures, choice.captures);
                 try retired_captures.append(allocator, choice.captures);
@@ -457,12 +878,18 @@ pub const BacktrackEngine = struct {
         return switch (node.node_type) {
             .literal => self.matchLiteral(node.data.literal, pos),
             .any => self.matchAny(pos),
-            .concat => self.matchConcat(node.data.concat, pos),
+            .concat => if (self.hybrid and node.data.concat.left.facts.trailing_choice_loop)
+                self.continuationFirst(node, pos)
+            else
+                self.matchConcat(node.data.concat, pos),
             .alternation => self.matchAlternation(node.data.alternation, pos),
             .star => self.matchStar(node.data.star, pos),
             .plus => self.matchPlus(node.data.plus, pos),
             .optional => self.matchOptional(node.data.optional, pos),
-            .repeat => self.matchRepeat(node.data.repeat, pos),
+            .repeat => if (self.hybrid and requiredChoiceIterations(node))
+                self.continuationFirst(node, pos)
+            else
+                self.matchRepeat(node.data.repeat, pos),
             .char_class => self.matchCharClass(node.data.char_class, pos),
             .group => self.matchGroup(node.data.group, pos),
             .anchor => self.matchAnchor(node.data.anchor, pos),
@@ -668,6 +1095,7 @@ pub const BacktrackEngine = struct {
             },
             .concat => {
                 const c = node.data.concat;
+                if (self.hybrid and c.left.facts.trailing_choice_loop) return self.continuationTarget(node, pos, target_end);
                 if (!self.hasQuantifiers(c.left) and !self.hasAlternation(c.left)) {
                     // Left is deterministic, match it and constrain right
                     if (self.matchNode(c.left, pos)) |split| {
@@ -708,6 +1136,7 @@ pub const BacktrackEngine = struct {
                 }
             },
             .star, .plus, .optional, .repeat => {
+                if (self.hybrid and requiredChoiceIterations(node)) return self.continuationTarget(node, pos, target_end);
                 return self.matchQuantifierConstrained(node, pos, target_end);
             },
             .alternation => {
@@ -925,6 +1354,38 @@ pub const BacktrackEngine = struct {
             child.facts.alternation or child.facts.repeated_alternation
         else switch (node.node_type) {
             .optional, .concat, .alternation, .group, .lookahead, .lookbehind => anyChild(kids, "repeated_alternation"),
+            else => false,
+        };
+        facts.choice_loop = switch (node.node_type) {
+            .star, .plus => blk: {
+                const child = repeatedChild(node).?;
+                break :blk child.facts.quantifiers or child.facts.alternation or child.facts.choice_loop;
+            },
+            .repeat => if (node.data.repeat.bounds.max == null)
+                node.data.repeat.child.facts.quantifiers or node.data.repeat.child.facts.alternation or node.data.repeat.child.facts.choice_loop
+            else
+                node.data.repeat.child.facts.choice_loop,
+            else => anyChild(kids, "choice_loop"),
+        };
+        facts.nullable = switch (node.node_type) {
+            .literal, .any, .char_class, .unicode_property, .class_set => false,
+            .star, .optional, .anchor, .lookahead, .lookbehind, .backref, .empty => true,
+            .plus => node.data.plus.child.facts.nullable,
+            .repeat => node.data.repeat.bounds.min == 0 or node.data.repeat.child.facts.nullable,
+            .group => node.data.group.child.facts.nullable,
+            .concat => node.data.concat.left.facts.nullable and node.data.concat.right.facts.nullable,
+            .alternation => node.data.alternation.left.facts.nullable or node.data.alternation.right.facts.nullable,
+        };
+        facts.trailing_choice_loop = switch (node.node_type) {
+            .star, .plus => facts.choice_loop,
+            .repeat => (node.data.repeat.bounds.max == null and facts.choice_loop) or
+                node.data.repeat.child.facts.trailing_choice_loop,
+            .optional => node.data.optional.child.facts.trailing_choice_loop,
+            .group => node.data.group.child.facts.trailing_choice_loop,
+            .concat => node.data.concat.right.facts.trailing_choice_loop or
+                (node.data.concat.right.facts.nullable and node.data.concat.left.facts.trailing_choice_loop),
+            .alternation => node.data.alternation.left.facts.trailing_choice_loop or
+                node.data.alternation.right.facts.trailing_choice_loop,
             else => false,
         };
         facts.codepoint_atom = switch (node.node_type) {
@@ -1220,6 +1681,7 @@ pub const BacktrackEngine = struct {
                 }
             },
             .repeat => {
+                if (self.hybrid and requiredChoiceIterations(node)) return self.continuationEnds(node, pos, positions);
                 const repeat = node.data.repeat;
                 // ECMA-262 RepeatMatcher with min=max=1 still permits the
                 // continuation to backtrack inside its one required child.
@@ -1240,6 +1702,7 @@ pub const BacktrackEngine = struct {
             .concat => {
                 // Recursively collect all possible endings for concat nodes
                 const c = node.data.concat;
+                if (self.hybrid and c.left.facts.trailing_choice_loop) return self.continuationEnds(node, pos, positions);
                 const left_has_choices = self.hasQuantifiers(c.left) or self.hasAlternation(c.left);
                 const right_has_choices = self.hasQuantifiers(c.right) or self.hasAlternation(c.right);
 
@@ -1981,7 +2444,10 @@ pub const BacktrackEngine = struct {
 
     fn matchLookahead(self: *BacktrackEngine, assertion: ast.Node.Assertion, pos: usize) ?usize {
         // Lookahead: test if pattern matches at current position without consuming input
-        const matches = self.matchNode(assertion.child, pos) != null;
+        const matches = if (self.hybrid and assertion.child.facts.choice_loop)
+            self.continuationAssertion(assertion.child, pos, false)
+        else
+            self.matchNode(assertion.child, pos) != null;
 
         // For positive lookahead (?=...), return pos if matched
         // For negative lookahead (?!...), return pos if NOT matched
@@ -1994,16 +2460,95 @@ pub const BacktrackEngine = struct {
             // ECMAScript evaluates lookbehind patterns with direction = -1:
             // concatenations run right-to-left and captures inside repetitions end
             // up with the leftmost participating iteration.
-            return if (self.matchReverseNode(assertion.child, pos) != null) pos else null;
+            return if (self.lookbehindBody(assertion.child, pos)) pos else null;
         }
 
         const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
         defer self.allocator.free(saved);
         @memcpy(saved, self.captures);
 
-        const matches = self.matchReverseNode(assertion.child, pos) != null;
+        const matches = self.lookbehindBody(assertion.child, pos);
         @memcpy(self.captures, saved);
         return if (matches) null else pos;
+    }
+
+    fn lookbehindBody(self: *BacktrackEngine, child: *ast.Node, pos: usize) bool {
+        if (self.hybrid and child.facts.choice_loop) return self.continuationAssertion(child, pos, true);
+        return self.matchReverseNode(child, pos) != null;
+    }
+
+    // A loop whose body has choices (`(?:'b*?)*`, `(?:a|ab)*`) cannot be
+    // matched here when something follows it: this engine collects a loop's
+    // ends by repeating its body at the body's first end, so `(?:'b*?)*c`
+    // missed `'bc` and `(?:a|ab)*c` missed `abc` (zig-utils/zig-regex#57). A
+    // concatenation whose left side can end in such a loop
+    // (`trailing_choice_loop`), and a lookaround whose body holds one, go to
+    // the continuation matcher, which takes the first end, continues and comes
+    // back for the others only on failure. A loop followed by more within the
+    // left side is handed over by its own concatenation, so a large
+    // alternation with a loop inside one branch stays here. A loop with nothing
+    // after it is already right here: its first path is the one that matches.
+
+    /// The most choices one continuation invocation may hold while the memo is
+    /// on: each saves a copy of every capture, so the budget shrinks as groups
+    /// are added, keeping those copies to a few megabytes.
+    fn choiceBudget(self: *const BacktrackEngine) usize {
+        return memo_state_floor / @max(1, self.captures.len / 4);
+    }
+
+    /// Whether the continuation matcher's loops follow PCRE's rules for empty
+    /// iterations and captures: in the pieces of a PCRE-style pattern this
+    /// engine hands it (`hybrid`). A pattern it runs whole keeps ECMAScript's.
+    fn pcreLoops(self: *const BacktrackEngine) bool {
+        return self.hybrid and !self.flags.ecmascript;
+    }
+
+    /// A repeat with a min of 2 or more whose iterations can end in more than
+    /// one place this engine would not try: `{n,}` over a body with choices,
+    /// or `{n,m}` over a body holding a loop with choices. Its own later
+    /// required iterations follow the first, so it needs the continuation
+    /// matcher even with nothing after it (`(?:b*c.*c){2,}` must give back part
+    /// of the first `.*`). With a min of 0 or 1, stopping after any iteration
+    /// is allowed and the first path is the one that matches.
+    fn requiredChoiceIterations(node: *ast.Node) bool {
+        if (node.node_type != .repeat) return false;
+        const repeat = node.data.repeat;
+        if (repeat.bounds.min < 2) return false;
+        const child = repeat.child.facts;
+        // A bounded body's own choices are enumerated here; only a loop
+        // inside it repeats from its first end (`(?:x(?:a|ab)*?){2}`).
+        if (repeat.bounds.max != null) return child.choice_loop;
+        return child.quantifiers or child.alternation or child.choice_loop;
+    }
+
+    fn continuationFirst(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
+        return self.matchWithContinuations(node, pos, false, .first) catch |err| {
+            self.match_error = err;
+            return null;
+        };
+    }
+
+    fn continuationTarget(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_end: usize) bool {
+        const end = self.matchWithContinuations(node, pos, false, .{ .target = target_end }) catch |err| {
+            self.match_error = err;
+            return false;
+        };
+        return end != null;
+    }
+
+    fn continuationEnds(self: *BacktrackEngine, node: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
+        _ = self.matchWithContinuations(node, pos, false, .{ .collect = positions }) catch |err| {
+            self.match_error = err;
+            return err;
+        };
+    }
+
+    fn continuationAssertion(self: *BacktrackEngine, child: *ast.Node, pos: usize, comptime reverse: bool) bool {
+        const end = self.matchWithContinuations(child, pos, reverse, .{ .assertion = !child.facts.capturing_group }) catch |err| {
+            self.match_error = err;
+            return false;
+        };
+        return end != null;
     }
 
     fn matchReverseNode(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {

@@ -1481,10 +1481,12 @@ pub const Regex = struct {
         return result;
     }
 
-    /// The steps one backtracking search of `input` takes, for choosing a step
-    /// budget (`setStepBudget`). Null for a pattern on the Thompson engines, which
-    /// have no step budget. Runs the search on a private copy, like every other
-    /// search, so it reports and changes nothing shared.
+    /// The step budget one backtracking search of `input` needs to give the
+    /// answer it gives now, for choosing one with `setStepBudget`: its steps, or
+    /// twice them when the search was answered by its attempt with the loop
+    /// memo, which runs on half the budget. Null for a pattern on the Thompson
+    /// engines, which have no step budget. Runs the search on a private copy,
+    /// like every other search, so it reports and changes nothing shared.
     pub fn searchSteps(self: *const Regex, input: []const u8) !?usize {
         const stored = if (self.backtrack_engine) |*engine| engine else return null;
         var engine = try stored.forSearch();
@@ -1496,7 +1498,9 @@ pub const Regex = struct {
             var discarded = found;
             discarded.deinit(engine.allocator);
         }
-        return engine.step_count;
+        // An answer from the attempt with the loop memo ran on half the
+        // budget, so it needs twice its steps to come back the same.
+        return if (engine.answered_with_memo) 2 * engine.step_count else engine.step_count;
     }
 
     /// Helper to build a Match from a VM MatchResult
@@ -4949,4 +4953,371 @@ test "case invariant class sets retain nested operand and Unicode guards" {
     try std.testing.expect(!utf8_class.caseInvariant(&nested));
     for ([_][]const u8{ "(a+)+\\1", "(?=(((a+)+b)*))\\1" }) |pattern|
         try std.testing.expectError(RegexError.PatternTooComplex, Regex.compileWithFlags(std.testing.allocator, pattern, .{ .ecmascript = true, .case_insensitive = true }));
+}
+
+test "backtracker repeats try every end of a loop body with choices" {
+    // `*`, `+` and `{n,}` repeated their body at its first end only, so a body
+    // ending in a lazy quantifier never grew: `(?:'b*?)*c` missed `'bc`. The
+    // spans are PCRE2 10.47's (leftmost-first), the engine is the backtracker.
+    const allocator = std.testing.allocator;
+    const flags: common.CompileFlags = .{ .bytes = true, .dot_all = true, .multiline = true };
+    const cases = [_]struct { pattern: []const u8, input: []const u8, span: ?[2]usize }{
+        // The CRS 942xxx reduction the issue came from (zig-utils/zig-regex#57).
+        .{ .pattern = "^(?:[^']*?'[^']*?'[^']*?)*?'", .input = "a'b'c'", .span = .{ 0, 6 } },
+        .{ .pattern = "^(?:[^']*?'[^']*?'[^']*?)*?'", .input = "1' or 'a'='a", .span = .{ 0, 9 } },
+        .{ .pattern = "^(?:[^']*?'[^']*?'[^']*?)*?'", .input = "a'b'", .span = null },
+        .{ .pattern = "^(?:[^']*?'[^']*?'[^']*?)*?'", .input = "'''", .span = .{ 0, 1 } },
+        .{ .pattern = "^(?:'b*?)*?c", .input = "'bc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:'b*?)*c", .input = "'bc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:'b*?)+?c", .input = "'bc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:'b??)*?c", .input = "'bc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:'b*?){1,}?c", .input = "'bc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:a*?'b*?)*'", .input = "a'b'", .span = .{ 0, 4 } },
+        // Unanchored, the first start that matches is 0, not 2.
+        .{ .pattern = "(?:'b*?)*?c", .input = "'bc", .span = .{ 0, 3 } },
+        // The same in a lookbehind, which matches its body in reverse.
+        .{ .pattern = "(?<=^(?:b*?')*)x", .input = "b'x", .span = .{ 2, 3 } },
+        // A body whose first alternative is a prefix of a later one.
+        .{ .pattern = "^(?:a|ab)*c", .input = "abc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:x(?:ab|a))*bc$", .input = "xabc", .span = .{ 0, 4 } },
+        .{ .pattern = "^(?:[^\"]+|\"[^\"]*\")*ab$", .input = "xxab", .span = .{ 0, 4 } },
+        // A min of 2 or more: the later required iterations follow the
+        // first, even with nothing after the loop (0.5.2 found no match).
+        .{ .pattern = "(?:b{1,3}){2,}?", .input = "bbb", .span = .{ 0, 3 } },
+        .{ .pattern = "(?:x(?:a|ab)*?){2}", .input = "xabxab", .span = .{ 0, 4 } },
+        .{ .pattern = "^(?:x(?:a|ab)*){2}", .input = "xabxab", .span = .{ 0, 5 } },
+        .{ .pattern = "(?:a(?:'b*?)*){2}", .input = "a'ba'b", .span = .{ 0, 5 } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, flags);
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        if (c.span) |span| {
+            const m = found orelse {
+                std.debug.print("no match: {s} on {s}\n", .{ c.pattern, c.input });
+                return error.TestExpectedMatch;
+            };
+            try std.testing.expectEqual(span[0], m.start);
+            try std.testing.expectEqual(span[1], m.end);
+        } else try std.testing.expect(found == null);
+    }
+}
+
+/// Every step one backtracking search takes, over both attempts when the
+/// loop memo's attempt gives way to a rerun (test helper, for cost gates;
+/// `searchSteps` reports the budget a search needs instead).
+fn stepsFor(re: *const Regex, input: []const u8) !usize {
+    const stored = if (re.backtrack_engine) |*engine| engine else return error.TestExpectedBacktracker;
+    var engine = try stored.forSearch();
+    defer engine.deinit();
+    if (re.searchWith(&engine, input, 0) catch |err| switch (err) {
+        error.Timeout => null,
+        else => return err,
+    }) |found| {
+        var discarded = found;
+        discarded.deinit(engine.allocator);
+    }
+    return engine.steps_taken;
+}
+
+test "backtracker loops stay linear on long inputs" {
+    // A loop whose body has choices runs on the continuation matcher, which
+    // takes the body's first end, continues, and comes back only on failure,
+    // with failed states remembered (backtrack.SearchMemo). Trying every end
+    // up front instead made these quadratic, and plain backtracking would
+    // make the misses exponential. Steps are deterministic, so each bound is
+    // an exact gate: 40 steps a byte, where quadratic growth would need about
+    // 16 million at this size and hit the 10M-step budget.
+    const allocator = std.testing.allocator;
+    const n = 4000;
+    const a_run: [n]u8 = @splat('a');
+    const dashes: [2000]u8 = @splat('-');
+    const short: [1000]u8 = @splat('a');
+    const cases = [_]struct { pattern: []const u8, input: []const u8, span: ?[2]usize }{
+        .{ .pattern = "^(?:[^\"]+|\"[^\"]*\")*$", .input = &a_run, .span = .{ 0, n } },
+        // An unclosed quote: every decomposition fails.
+        .{ .pattern = "^(?:[^\"]+|\"[^\"]*\")*$", .input = &(a_run ++ "\"".*), .span = null },
+        .{ .pattern = "^(?:[^\\\\]+|\\\\.)*$", .input = &a_run, .span = .{ 0, n } },
+        .{ .pattern = "(?:[a-z]+|-)*$", .input = &a_run, .span = .{ 0, n } },
+        .{ .pattern = "(?:[a-z]+|-)*$", .input = &(a_run ++ "!".*), .span = .{ n + 1, n + 1 } },
+        .{ .pattern = "^(?:-.*|_)*$", .input = &dashes, .span = .{ 0, dashes.len } },
+        .{ .pattern = "(?<!x)(?:\\w+ ?)*$", .input = &(a_run ++ "!".*), .span = .{ n + 1, n + 1 } },
+        .{ .pattern = "(?<!x)^(?:\\w+ ?)*$", .input = &(a_run ++ "!".*), .span = null },
+        // A lookbehind over a loop, tried at every start position.
+        .{ .pattern = "(?<=^(?:\\w+ ?)*)x", .input = &(a_run ++ "x".*), .span = .{ n, n + 1 } },
+        // {n,} with a large min stays on the backtracker (min is past the
+        // NFA's repeat expansion); 1000 bytes cannot reach 1500 iterations.
+        .{ .pattern = "(?:a|aa){1500,}x", .input = &(a_run ++ "x".*), .span = .{ 0, n + 1 } },
+        .{ .pattern = "(?:a|aa){1500,}x", .input = &(short ++ "x".*), .span = null },
+        .{ .pattern = "^(?:[^']*?'[^']*?'[^']*?)*?'", .input = &(a_run ++ "'b''".*), .span = .{ 0, n + 4 } },
+        .{ .pattern = "^(?:a|ab)*c", .input = &(a_run ++ "b".*), .span = null },
+    };
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pattern);
+        defer re.deinit();
+        try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
+        const steps = try stepsFor(&re, c.input);
+        if (steps > 40 * c.input.len) {
+            std.debug.print("{s} on {d} bytes: {d} steps, bound {d}\n", .{ c.pattern, c.input.len, steps, 40 * c.input.len });
+            return error.TestTooManySteps;
+        }
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        if (c.span) |span| {
+            const m = found orelse {
+                std.debug.print("no match: {s} on {d} bytes\n", .{ c.pattern, c.input.len });
+                return error.TestExpectedMatch;
+            };
+            try std.testing.expectEqual(span[0], m.start);
+            try std.testing.expectEqual(span[1], m.end);
+        } else try std.testing.expect(found == null);
+    }
+}
+
+test "a backtracker loop is correct or reports OutOfMemory at every allocation failure" {
+    // The loop memo only prunes: when it cannot allocate, the search goes on
+    // without it and still gives the right answer. The loop is in a lookahead
+    // body, which runs on the continuation matcher as a whole; that matcher
+    // reports allocation failures, while several paths of the concatenation
+    // engine still turn them into misses, as in 0.5.2.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        var re = Regex.compile(allocator, "(?=(?:a|ab)*c)") catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer re.deinit();
+        const inputs = [_]struct { []const u8, ?[2]usize }{
+            .{ "ababc", .{ 0, 0 } },
+            .{ "ababb", null },
+            .{ "xabaabc", .{ 1, 1 } },
+        };
+        for (inputs) |in| {
+            if (re.find(in[0])) |found| {
+                var m = found;
+                defer if (m) |*x| x.deinit(allocator);
+                if (in[1]) |span| {
+                    const x = m orelse return error.TestExpectedMatch;
+                    try std.testing.expectEqual(span[0], x.start);
+                    try std.testing.expectEqual(span[1], x.end);
+                } else try std.testing.expect(m == null);
+            } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        }
+        if (!failing.has_induced_failure) break;
+    }
+}
+
+test "loops follow their dialect's rules for empty iterations and captures" {
+    // A loop over a body with choices runs on the continuation matcher, which
+    // must not bring ECMAScript's rules to PCRE-style patterns: PCRE accepts an
+    // optional iteration that matches empty and ends the loop, and keeps a
+    // group's value from an earlier iteration that a later one does not set.
+    // Spans and groups are PCRE2 10.47's and node 24's.
+    const allocator = std.testing.allocator;
+    const Group = ?[2]usize;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, ecmascript: bool, span: [2]usize, group1: ?Group = null }{
+        .{ .pattern = "(?:a|b)*(?:c??)?", .input = "c", .ecmascript = false, .span = .{ 0, 0 } },
+        .{ .pattern = "(?:a|b)*(c??)?", .input = "c", .ecmascript = false, .span = .{ 0, 0 }, .group1 = .{ 0, 0 } },
+        .{ .pattern = "((?:a|b)*)?", .input = "", .ecmascript = false, .span = .{ 0, 0 }, .group1 = .{ 0, 0 } },
+        .{ .pattern = "(?:(a)|c?){2,}$", .input = "a", .ecmascript = false, .span = .{ 0, 1 }, .group1 = .{ 0, 1 } },
+        .{ .pattern = "(?:b(.)+|c?){2,}$", .input = "bxy", .ecmascript = false, .span = .{ 0, 3 }, .group1 = .{ 2, 3 } },
+        .{ .pattern = "(?:a|b)*(?:c??)?", .input = "c", .ecmascript = true, .span = .{ 0, 1 } },
+        .{ .pattern = "(?:(a)|c?){2,}$", .input = "a", .ecmascript = true, .span = .{ 0, 1 }, .group1 = @as(Group, null) },
+        .{ .pattern = "(?:b(.)+|c?){2,}$", .input = "bxy", .ecmascript = true, .span = .{ 0, 3 }, .group1 = @as(Group, null) },
+        // PCRE ends an unbounded loop at an empty iteration only once no
+        // iteration is still required, and lets a bounded loop go on to its
+        // next copy, which then captures.
+        .{ .pattern = "(?:x|xy)*(a??){1,3}b", .input = "ab", .ecmascript = false, .span = .{ 0, 2 }, .group1 = .{ 0, 1 } },
+        .{ .pattern = "(?:x|xy)*(|a){0,2}b", .input = "ab", .ecmascript = false, .span = .{ 0, 2 }, .group1 = .{ 0, 1 } },
+        .{ .pattern = "(?:x|xy)*(a??)*b", .input = "ab", .ecmascript = false, .span = .{ 0, 2 }, .group1 = .{ 1, 1 } },
+        .{ .pattern = "(?:(^)|a)+b", .input = "ab", .ecmascript = false, .span = .{ 0, 2 }, .group1 = @as(Group, null) },
+        .{ .pattern = "(?:(?=(a))|a)+b", .input = "aab", .ecmascript = false, .span = .{ 0, 3 }, .group1 = @as(Group, null) },
+        // Atomic groups keep the continuation matcher's own rules.
+        .{ .pattern = "(?>z?)(a??){1,3}b", .input = "ab", .ecmascript = false, .span = .{ 0, 2 }, .group1 = .{ 0, 1 } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = c.ecmascript });
+        defer re.deinit();
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        const m = found orelse {
+            std.debug.print("no match: {s} (ecmascript={})\n", .{ c.pattern, c.ecmascript });
+            return error.TestExpectedMatch;
+        };
+        errdefer std.debug.print("{s} on \"{s}\" (ecmascript={}): [{d},{d})\n", .{ c.pattern, c.input, c.ecmascript, m.start, m.end });
+        try std.testing.expectEqual(c.span[0], m.start);
+        try std.testing.expectEqual(c.span[1], m.end);
+        if (c.group1) |want| {
+            if (want) |span| {
+                try std.testing.expect(m.captures_present[0]);
+                try std.testing.expectEqual(span[0], m.capture_spans[0][0]);
+                try std.testing.expectEqual(span[1], m.capture_spans[0][1]);
+            } else try std.testing.expect(!m.captures_present[0]);
+        }
+    }
+}
+
+test "a loop after a large alternation leaves the alternation on the fast path" {
+    // Only the part of a pattern that follows a loop over a body with choices
+    // needs the continuation matcher. Sending the whole pattern there made the
+    // leading alternation, tried at every start, about twice as costly (and
+    // OWASP CRS 934120, this shape with 150 branches, time out on 128 KB). On
+    // 64 KB of form data this takes about 27 steps a byte, as 0.5.2 did.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?i)(?:alpha|beta|gamma|delta|epsilon|zeta|theta|iota|kappa|lambda|omicron|sigma)(?:\\\\[a-z]\\.?_?)+:");
+    defer re.deinit();
+    const unit = "name=Ada+Lovelace&email=ada%40example.com&subject=order+question&";
+    const body = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(body);
+    for (body, 0..) |*b, i| b.* = unit[i % unit.len];
+    const steps = try stepsFor(&re, body);
+    if (steps > 35 * body.len) {
+        std.debug.print("{d} steps on {d} bytes\n", .{ steps, body.len });
+        return error.TestTooManySteps;
+    }
+    try std.testing.expect(try re.find(body) == null);
+}
+
+test "an end found twice does not make a loop state look failed" {
+    // The concatenation engine can collect a loop's ends into one list more
+    // than once at the same position. An invocation that reached only ends
+    // already in the list was taken for one that reached none, so its loop
+    // states were remembered as failing, and this missed the match PCRE2 finds.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compileWithFlags(allocator, "aB+?((?-i:b[^a])|c){2,}?(?i)", .{ .bytes = true, .case_insensitive = true });
+    defer re.deinit();
+    var found = try re.find("Bb1aAbcbB aBac");
+    defer if (found) |*m| m.deinit(allocator);
+    const m = found orelse return error.TestExpectedMatch;
+    try std.testing.expectEqual(@as(usize, 4), m.start);
+    try std.testing.expectEqual(@as(usize, 9), m.end);
+}
+
+test "patterns the loop memo cannot serve keep their old cost" {
+    // With a backreference the memo is off, and the continuation matcher
+    // would explore a loop over a body with choices exponentially; such a
+    // pattern keeps the concatenation engine's matching (zig-utils/zig-regex#57
+    // stays open for it). These answered in a few hundred steps before.
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, span: ?[2]usize }{
+        .{ .pattern = "([\"'])(?:\\w+\\s?)*\\1", .input = "\"documentation_identifier\"", .span = .{ 0, 26 } },
+        .{ .pattern = "(b)(?:a|aa)*\\1", .input = "baaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .span = null },
+    };
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pattern);
+        defer re.deinit();
+        const steps = try stepsFor(&re, c.input);
+        if (steps > 1000) {
+            std.debug.print("{s}: {d} steps\n", .{ c.pattern, steps });
+            return error.TestTooManySteps;
+        }
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        if (c.span) |span| {
+            const m = found orelse return error.TestExpectedMatch;
+            try std.testing.expectEqual(span[0], m.start);
+            try std.testing.expectEqual(span[1], m.end);
+        } else try std.testing.expect(found == null);
+    }
+}
+
+test "a search the loop memo outgrows answers as before instead of timing out" {
+    // A loop over an ambiguous body keeps a few to a dozen memo states per
+    // input byte. Past the memo's budget the search runs again without it, as
+    // 0.5.2 did, rather than going on unmemoized, which went exponential and
+    // timed out at 24 KB here. The budget keeps the memo to a few megabytes.
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { pattern: []const u8, head: []const u8, unit: []const u8, tail: []const u8 }{
+        .{ .pattern = "(?i)select(?:\\s*(?:\\w+\\s*)+,?)*\\s+from", .head = "select ", .unit = "abcdefgh ", .tail = "" },
+        .{ .pattern = "^(?:\\w+\\s?)*$(?<=d )", .head = "", .unit = "word ", .tail = "word" },
+    };
+    const body = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(body);
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pattern);
+        defer re.deinit();
+        @memcpy(body[0..c.head.len], c.head);
+        for (body[c.head.len..], 0..) |*b, i| b.* = c.unit[i % c.unit.len];
+        if (c.tail.len > 0) @memcpy(body[body.len - c.tail.len ..], c.tail);
+        // The steps of the search that answered (the rerun, here).
+        const steps = try stepsFor(&re, body);
+        if (steps > 20 * body.len) {
+            std.debug.print("{s}: {d} steps on {d} bytes\n", .{ c.pattern, steps, body.len });
+            return error.TestTooManySteps;
+        }
+        try std.testing.expect(!try re.isMatch(body));
+    }
+}
+
+test "a memo search that runs out of steps answers as before instead of timing out" {
+    // The memo attempt gets half the step budget. A loop over a large
+    // alternation costs many steps per memo state, so it can use that up before
+    // the memo fills; it then runs again without the memo, with the whole
+    // budget, rather than reporting a timeout the engine without the memo
+    // would not have hit. With a 1M-step budget, the memo attempt here needs
+    // 2.6M steps and the rerun 0.6M.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?i)^(?:[\\w./-]+\\s*(?:alias|apropos|apt|arch|awk|base64|bash|bzip2|cat|chmod|chown|crontab|curl|cut|dd|diff|dig|echo|env|eval|exec|find|ftp|gcc|grep|gzip|head|host|id|ifconfig|kill|less|ln|ls|make|more|mount|nc|netstat|nmap|nohup|perl|php|ping|ps|python|rm|rsync|ruby|scp|sed|sh|sleep|sort|ssh|sudo|tail|tar|tee|telnet|top|touch|uname|unzip|wget|whoami|xargs|zip|zsh)?\\s*[;|&]?)*\\$\\(");
+    defer re.deinit();
+    re.setStepBudget(1_000_000);
+    const body = try allocator.alloc(u8, 8 * 1024);
+    defer allocator.free(body);
+    for (body, 0..) |*b, i| b.* = "hello there friend "[i % 19];
+    try std.testing.expect(!try re.isMatch(body));
+}
+
+test "a loop inside one branch of an alternation leaves the alternation on the fast path" {
+    // The loop in `\\((?:\\w+,?)+\\)` is followed by `\\)` within its own branch,
+    // which hands it to the continuation matcher; the alternation around it,
+    // tried at every start, stays here. Routing the whole alternation doubled
+    // the steps (and timed out on 256 KB). On 64 KB of form data this takes
+    // about 34 steps a byte, as 0.5.2 did.
+    const allocator = std.testing.allocator;
+    var re = try Regex.compile(allocator, "(?i)(?:alter|create|delete|drop|insert|select|update|union|truncate|rename|load|exec|declare|grant|revoke|\\((?:\\w+,?)+\\))\\s*\\(");
+    defer re.deinit();
+    const unit = "name=Ada+Lovelace&email=ada%40example.com&subject=order+question&";
+    const body = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(body);
+    for (body, 0..) |*b, i| b.* = unit[i % unit.len];
+    const steps = try stepsFor(&re, body);
+    if (steps > 40 * body.len) {
+        std.debug.print("{d} steps on {d} bytes\n", .{ steps, body.len });
+        return error.TestTooManySteps;
+    }
+    try std.testing.expect(!try re.isMatch(body));
+    var found = try re.find("x (a,b) (");
+    defer if (found) |*m| m.deinit(allocator);
+    const m = found orelse return error.TestExpectedMatch;
+    try std.testing.expectEqual(@as(usize, 2), m.start);
+    try std.testing.expectEqual(@as(usize, 9), m.end);
+}
+
+test "a step budget from searchSteps gives the answer searchSteps measured" {
+    // The attempt with the loop memo runs on half the budget, so a budget of
+    // its steps alone sent the search back to the path without the memo, and
+    // `^(?:'b*?)*c` lost the match this fix finds.
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, span: [2]usize }{
+        .{ .pattern = "^(?:'b*?)*c", .input = "'bc", .span = .{ 0, 3 } },
+        .{ .pattern = "^(?:a|ab)*c", .input = "ababababababc", .span = .{ 0, 13 } },
+        .{ .pattern = "(?:a|ab)*c", .input = "xxxxxxxxxxababababc", .span = .{ 10, 19 } },
+        .{ .pattern = "^(?:[^']*?'[^']*?'[^']*?)*?'", .input = "1' or 'a'='a", .span = .{ 0, 9 } },
+    };
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pattern);
+        defer re.deinit();
+        re.setStepBudget((try re.searchSteps(c.input)).?);
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        const m = found orelse {
+            std.debug.print("no match with the measured budget: {s}\n", .{c.pattern});
+            return error.TestExpectedMatch;
+        };
+        try std.testing.expectEqual(c.span[0], m.start);
+        try std.testing.expectEqual(c.span[1], m.end);
+    }
 }

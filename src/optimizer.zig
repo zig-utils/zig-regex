@@ -815,6 +815,12 @@ pub const Optimizer = struct {
     /// is a spine as long as the pattern, and one native frame per element
     /// overflowed the stack (#23). Allocation failure propagates, as everywhere
     /// else in analysis.
+    /// The fewest bytes `node` can match (a lower bound: assertions and
+    /// backreferences count as zero).
+    pub fn minLength(self: *Optimizer, node: *ast.Node) !usize {
+        return self.calculateMinLength(node);
+    }
+
     fn calculateMinLength(self: *Optimizer, node: *ast.Node) !usize {
         var work: std.ArrayList(Step) = .empty;
         defer work.deinit(self.allocator);

@@ -99,7 +99,16 @@ pub const Node = struct {
         capturing_group: bool = false,
         groups: bool = false,
         codepoint_atom: bool = false,
-        _padding: u6 = 0,
+        /// A `*`, `+` or `{n,}` (no max) somewhere in the subtree repeats a
+        /// body with choices (a quantifier or an alternation).
+        choice_loop: bool = false,
+        /// The subtree can match the empty string.
+        nullable: bool = false,
+        /// A loop over a body with choices can end the subtree's match, with
+        /// at most parts that can match empty after it: whatever follows the
+        /// subtree follows that loop.
+        trailing_choice_loop: bool = false,
+        _padding: u3 = 0,
     };
 
     pub const NodeData = union(NodeType) {
