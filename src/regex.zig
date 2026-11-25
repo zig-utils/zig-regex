@@ -5321,3 +5321,52 @@ test "a step budget from searchSteps gives the answer searchSteps measured" {
         try std.testing.expectEqual(c.span[1], m.end);
     }
 }
+
+test "the backtracker reports OutOfMemory instead of a miss at every allocation failure" {
+    // Choice traversal used to turn a failed allocation into "no match" in
+    // many places (a missed capture snapshot, a positions list that could not
+    // grow), so a search under memory pressure answered wrongly instead of
+    // failing. Every result here must be the right match or OutOfMemory.
+    // Spans are PCRE2 10.47's; these patterns stay on the concatenation engine.
+    const Case = struct { pattern: []const u8, input: []const u8, span: [2]usize };
+    const cases = [_]Case{
+        .{ .pattern = "(a|ab)(c|bcd)(d*?)", .input = "abcd", .span = .{ 0, 4 } },
+        .{ .pattern = "(?:a|ab){2,3}c", .input = "aabc", .span = .{ 0, 4 } },
+        .{ .pattern = "(\\w+)\\s(\\w+)", .input = "hello world", .span = .{ 0, 11 } },
+        .{ .pattern = "(?<=a(b|bc))d", .input = "abcd", .span = .{ 3, 4 } },
+        .{ .pattern = "(.*-)?x", .input = "a-b-x", .span = .{ 0, 5 } },
+        .{ .pattern = "(a|ab)\\1c", .input = "ababc", .span = .{ 0, 5 } },
+        .{ .pattern = "x(?:a|b)?y(c+?)d", .input = "xaycccd", .span = .{ 0, 7 } },
+        .{ .pattern = "(?:ab|a){2,}?c", .input = "xaabc", .span = .{ 1, 5 } },
+        .{ .pattern = "(a|ab)(?:c|bcd)?(d)", .input = "abcd", .span = .{ 0, 4 } },
+        .{ .pattern = "(?:ab|a){2}(c)", .input = "aabc", .span = .{ 0, 4 } },
+        // Lookbehinds match their body in reverse (node 24 for the unbounded one).
+        .{ .pattern = "(?<=(?:a|ab){2})c", .input = "aabc", .span = .{ 3, 4 } },
+        .{ .pattern = "(?<=(b|cb)a)x", .input = "cbax", .span = .{ 3, 4 } },
+        .{ .pattern = "(?<=x(a|bc)+)d", .input = "xabcad", .span = .{ 5, 6 } },
+        .{ .pattern = "(?<=(\\w+?)\\s)y", .input = "ab y", .span = .{ 3, 4 } },
+    };
+    for (cases) |c| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+            const allocator = failing.allocator();
+            var re = Regex.compile(allocator, c.pattern) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                continue;
+            };
+            defer re.deinit();
+            try std.testing.expectEqual(EngineType.backtracking, re.engine_type);
+            if (re.find(c.input)) |found| {
+                var m = found orelse {
+                    std.debug.print("{s} on \"{s}\": no match at allocation failure {d}\n", .{ c.pattern, c.input, fail_index });
+                    return error.TestExpectedMatch;
+                };
+                defer m.deinit(allocator);
+                try std.testing.expectEqual(c.span[0], m.start);
+                try std.testing.expectEqual(c.span[1], m.end);
+            } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+            if (!failing.has_induced_failure) break;
+        }
+    }
+}

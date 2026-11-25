@@ -903,7 +903,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchNodeProgress(self: *BacktrackEngine, node: *ast.Node, pos: usize) ?usize {
-        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
         defer self.allocator.free(saved);
         @memcpy(saved, self.captures);
 
@@ -912,9 +912,9 @@ pub const BacktrackEngine = struct {
         }
 
         @memcpy(self.captures, saved);
-        var positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+        var positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, @as(?usize, null));
         defer positions.deinit(self.allocator);
-        self.collectAllMatches(node, pos, &positions) catch return null;
+        self.collectAllMatches(node, pos, &positions) catch |err| return self.failWith(err, @as(?usize, null));
         for (positions.items) |end| {
             if (end <= pos) continue;
             @memcpy(self.captures, saved);
@@ -956,19 +956,19 @@ pub const BacktrackEngine = struct {
 
         if (left_has_choices or right_has_choices) {
             // Save captures before collecting positions (collection may corrupt them)
-            const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
             defer self.allocator.free(clean_captures);
             @memcpy(clean_captures, self.captures);
 
             // Collect all possible left-side ending positions
-            var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+            var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, @as(?usize, null));
             defer left_positions.deinit(self.allocator);
 
             if (left_has_choices) {
-                self.collectAllMatches(concat.left, pos, &left_positions) catch return null;
+                self.collectAllMatches(concat.left, pos, &left_positions) catch |err| return self.failWith(err, @as(?usize, null));
             } else {
                 if (self.matchNode(concat.left, pos)) |end| {
-                    left_positions.append(self.allocator, end) catch return null;
+                    left_positions.append(self.allocator, end) catch |err| return self.failWith(err, @as(?usize, null));
                 }
             }
 
@@ -990,16 +990,16 @@ pub const BacktrackEngine = struct {
                 }
 
                 // Save captures after left match
-                const saved_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
+                const saved_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
                 defer self.allocator.free(saved_captures);
                 @memcpy(saved_captures, self.captures);
 
                 if (right_has_choices) {
                     // Right side also has choices - collect all right positions
-                    var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch continue;
+                    var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, @as(?usize, null));
                     defer right_positions.deinit(self.allocator);
 
-                    self.collectAllMatches(concat.right, left_end, &right_positions) catch continue;
+                    self.collectAllMatches(concat.right, left_end, &right_positions) catch |err| return self.failWith(err, @as(?usize, null));
 
                     for (right_positions.items) |right_end| {
                         @memcpy(self.captures, saved_captures);
@@ -1049,7 +1049,7 @@ pub const BacktrackEngine = struct {
             var tail: ?*ast.Node = concat.right;
             while (true) {
                 if (element.node_type == .concat) {
-                    pending.append(self.allocator, element.data.concat.right) catch return null;
+                    pending.append(self.allocator, element.data.concat.right) catch |err| return self.failWith(err, @as(?usize, null));
                     element = element.data.concat.left;
                     continue;
                 }
@@ -1107,13 +1107,13 @@ pub const BacktrackEngine = struct {
                     // endpoints in the subtree's own order. Raw ascending splits
                     // choose the shortest valid capture and break ECMAScript
                     // backreference and alternation backtracking semantics.
-                    const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+                    const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, false);
                     defer self.allocator.free(base_captures);
                     @memcpy(base_captures, self.captures);
 
-                    var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+                    var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, false);
                     defer splits.deinit(self.allocator);
-                    self.collectAllMatches(c.left, pos, &splits) catch return false;
+                    self.collectAllMatches(c.left, pos, &splits) catch |err| return self.failWith(err, false);
 
                     for (splits.items) |split| {
                         if (split > target_end) continue;
@@ -1207,7 +1207,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchRepeatedChildConstrainedLinear(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, min: usize, max: ?usize) bool {
-        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, false);
         defer self.allocator.free(saved);
         @memcpy(saved, self.captures);
 
@@ -1252,13 +1252,13 @@ pub const BacktrackEngine = struct {
         if (pos >= target_end) return false;
         if (max) |m| if (count >= m) return false;
 
-        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, false);
         defer self.allocator.free(saved);
         @memcpy(saved, self.captures);
 
-        var ends = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+        var ends = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, false);
         defer ends.deinit(self.allocator);
-        self.collectAllMatches(child, pos, &ends) catch return false;
+        self.collectAllMatches(child, pos, &ends) catch |err| return self.failWith(err, false);
 
         for (ends.items) |end| {
             if (end <= pos or end > target_end) continue;
@@ -1707,13 +1707,13 @@ pub const BacktrackEngine = struct {
                 const right_has_choices = self.hasQuantifiers(c.right) or self.hasAlternation(c.right);
 
                 if (left_has_choices or right_has_choices) {
-                    const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return;
+                    const clean_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWithError(err);
                     defer self.allocator.free(clean_captures);
                     @memcpy(clean_captures, self.captures);
                     const before_len = positions.items.len;
 
                     // Collect all possible left-side endings
-                    var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+                    var left_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
                     defer left_positions.deinit(self.allocator);
 
                     if (left_has_choices) {
@@ -1728,7 +1728,7 @@ pub const BacktrackEngine = struct {
                     const left_has_groups = self.hasCapturingGroup(c.left);
                     for (left_positions.items) |left_end| {
                         // Save captures, set them for this left position, try right
-                        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch continue;
+                        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWithError(err);
                         defer self.allocator.free(saved);
                         @memcpy(saved, self.captures);
 
@@ -1809,7 +1809,7 @@ pub const BacktrackEngine = struct {
 
     fn collectGreedyStarMatches(self: *BacktrackEngine, child: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) anyerror!void {
         // Collect all matches from longest to shortest.
-        var all_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+        var all_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
         defer all_positions.deinit(self.allocator);
 
         try all_positions.append(self.allocator, pos); // zero matches
@@ -2095,7 +2095,7 @@ pub const BacktrackEngine = struct {
         }
 
         // Collect all positions from min to max (or unbounded)
-        var all_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+        var all_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
         defer all_positions.deinit(self.allocator);
 
         try all_positions.append(self.allocator, current_pos);
@@ -2190,14 +2190,14 @@ pub const BacktrackEngine = struct {
     fn matchStarGreedy(self: *BacktrackEngine, child: *ast.Node, pos: usize) ?usize {
         // Try to match as many as possible, backtrack if needed
         var current_pos = pos;
-        var match_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+        var match_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, @as(?usize, null));
         defer match_positions.deinit(self.allocator);
 
-        match_positions.append(self.allocator, current_pos) catch return null;
+        match_positions.append(self.allocator, current_pos) catch |err| return self.failWith(err, @as(?usize, null));
 
         // Collect all possible match positions
         while (true) {
-            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch break;
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
@@ -2211,7 +2211,7 @@ pub const BacktrackEngine = struct {
                 break;
             }
             current_pos = next_pos;
-            match_positions.append(self.allocator, current_pos) catch break;
+            match_positions.append(self.allocator, current_pos) catch |err| return self.failWith(err, @as(?usize, null));
         }
 
         // Greedy: return the longest match
@@ -2256,7 +2256,7 @@ pub const BacktrackEngine = struct {
         if (self.boundedRepeatHasChoices(repeat)) {
             var ends: std.ArrayList(usize) = .empty;
             defer ends.deinit(self.allocator);
-            self.collectBoundedRepeatMatches(repeat, pos, &ends, false, true) catch return null;
+            self.collectBoundedRepeatMatches(repeat, pos, &ends, false, true) catch |err| return self.failWith(err, @as(?usize, null));
             if (ends.items.len == 0) return null;
             const target = ends.items[0];
             if (self.hasCapturingGroup(repeat.child) and !self.matchBoundedRepeatConstrained(repeat, pos, target, false)) return null;
@@ -2265,7 +2265,7 @@ pub const BacktrackEngine = struct {
         if (self.fixedRepeatHasChoices(repeat)) {
             var ends: std.ArrayList(usize) = .empty;
             defer ends.deinit(self.allocator);
-            self.collectFixedRepeatMatches(repeat, pos, &ends, false) catch return null;
+            self.collectFixedRepeatMatches(repeat, pos, &ends, false) catch |err| return self.failWith(err, @as(?usize, null));
             if (ends.items.len == 0) return null;
             const target = ends.items[0];
             if (self.hasCapturingGroup(repeat.child) and !self.matchFixedRepeatConstrained(repeat, pos, target, false)) return null;
@@ -2294,7 +2294,7 @@ pub const BacktrackEngine = struct {
         // Match up to max times
         const max_count = max.?;
         if (repeat.greedy and i < max_count) {
-            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
             defer self.allocator.free(saved);
             // Greedy: try to match as many as possible
             while (i < max_count) : (i += 1) {
@@ -2463,7 +2463,7 @@ pub const BacktrackEngine = struct {
             return if (self.lookbehindBody(assertion.child, pos)) pos else null;
         }
 
-        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+        const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
         defer self.allocator.free(saved);
         @memcpy(saved, self.captures);
 
@@ -2488,6 +2488,22 @@ pub const BacktrackEngine = struct {
     // left side is handed over by its own concatenation, so a large
     // alternation with a loop inside one branch stays here. A loop with nothing
     // after it is already right here: its first path is the one that matches.
+
+    /// Record that a search failed for `err` (an allocation that failed, or an
+    /// error from a step it depends on) and give up with `result`. The first
+    /// error is kept, so an earlier timeout is not replaced. Choice traversal
+    /// must report these, not turn them into a miss: `findOnce` returns no
+    /// match when `match_error` is set, and the `Regex` boundary reports it.
+    fn failWith(self: *BacktrackEngine, err: anyerror, result: anytype) @TypeOf(result) {
+        if (self.match_error == null) self.match_error = err;
+        return result;
+    }
+
+    /// `failWith` for a function that returns an error union.
+    fn failWithError(self: *BacktrackEngine, err: anyerror) anyerror {
+        if (self.match_error == null) self.match_error = err;
+        return err;
+    }
 
     /// The most choices one continuation invocation may hold while the memo is
     /// on: each saves a copy of every capture, so the budget shrinks as groups
@@ -2584,13 +2600,13 @@ pub const BacktrackEngine = struct {
             return self.matchReverseNode(concat.left, split);
         }
 
-        const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+        const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
         defer self.allocator.free(base_captures);
         @memcpy(base_captures, self.captures);
 
-        var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return null;
+        var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, @as(?usize, null));
         defer splits.deinit(self.allocator);
-        self.collectAllReverseMatches(concat.right, pos, &splits) catch return null;
+        self.collectAllReverseMatches(concat.right, pos, &splits) catch |err| return self.failWith(err, @as(?usize, null));
 
         for (splits.items) |split| {
             @memcpy(self.captures, base_captures);
@@ -2647,7 +2663,7 @@ pub const BacktrackEngine = struct {
         if (!quant.greedy) return pos;
         var current = pos;
         while (true) {
-            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
@@ -2671,7 +2687,7 @@ pub const BacktrackEngine = struct {
         if (!quant.greedy) return current;
 
         while (true) {
-            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
@@ -2698,7 +2714,7 @@ pub const BacktrackEngine = struct {
         if (self.boundedRepeatHasChoices(repeat)) {
             var starts: std.ArrayList(usize) = .empty;
             defer starts.deinit(self.allocator);
-            self.collectBoundedRepeatMatches(repeat, pos, &starts, true, true) catch return null;
+            self.collectBoundedRepeatMatches(repeat, pos, &starts, true, true) catch |err| return self.failWith(err, @as(?usize, null));
             if (starts.items.len == 0) return null;
             const target = starts.items[0];
             if (self.hasCapturingGroup(repeat.child) and !self.matchBoundedRepeatConstrained(repeat, pos, target, true)) return null;
@@ -2707,7 +2723,7 @@ pub const BacktrackEngine = struct {
         if (self.fixedRepeatHasChoices(repeat)) {
             var starts: std.ArrayList(usize) = .empty;
             defer starts.deinit(self.allocator);
-            self.collectFixedRepeatMatches(repeat, pos, &starts, true) catch return null;
+            self.collectFixedRepeatMatches(repeat, pos, &starts, true) catch |err| return self.failWith(err, @as(?usize, null));
             if (starts.items.len == 0) return null;
             const target = starts.items[0];
             if (self.hasCapturingGroup(repeat.child) and !self.matchFixedRepeatConstrained(repeat, pos, target, true)) return null;
@@ -2728,7 +2744,7 @@ pub const BacktrackEngine = struct {
         if (!repeat.greedy) return current;
 
         while (max == null or count < max.?) : (count += 1) {
-            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch return null;
+            const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, @as(?usize, null));
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
@@ -2788,11 +2804,11 @@ pub const BacktrackEngine = struct {
             },
             .concat => {
                 const c = node.data.concat;
-                var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+                var splits = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, false);
                 defer splits.deinit(self.allocator);
-                self.collectAllReverseMatches(c.right, pos, &splits) catch return false;
+                self.collectAllReverseMatches(c.right, pos, &splits) catch |err| return self.failWith(err, false);
 
-                const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return false;
+                const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWith(err, false);
                 defer self.allocator.free(base_captures);
                 @memcpy(base_captures, self.captures);
 
@@ -2806,9 +2822,9 @@ pub const BacktrackEngine = struct {
                 return false;
             },
             .star, .plus, .optional, .repeat => {
-                var starts = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return false;
+                var starts = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, false);
                 defer starts.deinit(self.allocator);
-                self.collectAllReverseMatches(node, pos, &starts) catch return false;
+                self.collectAllReverseMatches(node, pos, &starts) catch |err| return self.failWith(err, false);
                 for (starts.items) |start| {
                     if (start == target_start) return true;
                 }
@@ -2840,7 +2856,7 @@ pub const BacktrackEngine = struct {
                 const quant = node.data.star;
                 if (!quant.greedy) try positions.append(self.allocator, pos);
 
-                var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+                var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
                 defer all.deinit(self.allocator);
                 try all.append(self.allocator, pos);
 
@@ -2892,11 +2908,11 @@ pub const BacktrackEngine = struct {
             },
             .concat => {
                 const c = node.data.concat;
-                var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+                var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
                 defer right_positions.deinit(self.allocator);
                 try self.collectAllReverseMatches(c.right, pos, &right_positions);
 
-                const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch return;
+                const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWithError(err);
                 defer self.allocator.free(base_captures);
                 @memcpy(base_captures, self.captures);
 
@@ -2928,7 +2944,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn collectReverseQuantifierTail(self: *BacktrackEngine, child: *ast.Node, pos: usize, greedy: bool, positions: *std.ArrayList(usize)) !void {
-        var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+        var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
         defer all.deinit(self.allocator);
         try all.append(self.allocator, pos);
 
@@ -2962,7 +2978,7 @@ pub const BacktrackEngine = struct {
             current = next;
         }
 
-        var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return;
+        var all = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
         defer all.deinit(self.allocator);
         try all.append(self.allocator, current);
 

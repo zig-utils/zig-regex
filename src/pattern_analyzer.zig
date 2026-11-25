@@ -79,6 +79,9 @@ pub const PatternAnalyzer = struct {
         self.explosion_factor = 1.0;
         self.can_use_thompson = true;
         self.quantifier_depth = 0;
+        // The strings belong to the result once it is built; if analysis
+        // fails first (an allocation failed), nothing else will free them.
+        errdefer self.freeStrings();
 
         // Perform analysis
         try self.analyzeNode(root, false);
@@ -88,6 +91,7 @@ pub const PatternAnalyzer = struct {
 
         // Create result
         const issues = try self.allocator.dupe([]const u8, self.issues.items);
+        errdefer self.allocator.free(issues);
         const recommendations = try self.allocator.dupe([]const u8, self.recommendations.items);
 
         return AnalysisResult{
@@ -635,12 +639,22 @@ pub const PatternAnalyzer = struct {
 
     fn addIssue(self: *PatternAnalyzer, issue: []const u8) !void {
         const owned = try self.allocator.dupe(u8, issue);
+        errdefer self.allocator.free(owned);
         try self.issues.append(self.allocator, owned);
     }
 
     fn addRecommendation(self: *PatternAnalyzer, rec: []const u8) !void {
         const owned = try self.allocator.dupe(u8, rec);
+        errdefer self.allocator.free(owned);
         try self.recommendations.append(self.allocator, owned);
+    }
+
+    /// Free every issue and recommendation string collected so far.
+    fn freeStrings(self: *PatternAnalyzer) void {
+        for (self.issues.items) |issue| self.allocator.free(issue);
+        for (self.recommendations.items) |rec| self.allocator.free(rec);
+        self.issues.clearRetainingCapacity();
+        self.recommendations.clearRetainingCapacity();
     }
 };
 
