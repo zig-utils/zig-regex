@@ -6,6 +6,8 @@
 //!   with backreferences, lookaround, atomic groups and large repeats)
 //!   pcre2_diff check <cases.tsv> <spans.tsv> agreement counts and the first
 //!                                            disagreements
+//!   (check-regex compares each case's first match through `Regex`, compiled
+//!   with captures, on the cases that compile to its backtracking engine)
 //!   pcre2_diff fixture <cases.tsv> <spans.tsv> <count>
 //!                                            the first `count` cases with
 //!                                            PCRE2's spans appended, for
@@ -32,6 +34,11 @@ const max_pattern = 96;
 /// lookbehind, atomic groups and large counted repeats, and cases run as
 /// `regex.bt` backtracking programs.
 var bt_mode = false;
+
+/// `check-regex`: the cases run through `Regex.compileWithFlags`, and only
+/// the first match is compared, on the cases its backtracking engine takes
+/// (the Thompson engines there are leftmost-longest, not PCRE2's kind).
+var regex_mode = false;
 
 fn genLookbehindBody(random: std.Random, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
     // Bounded length, as PCRE2 requires of a lookbehind.
@@ -187,6 +194,20 @@ pub fn parseCase(arena: std.mem.Allocator, line: []const u8) !Case {
 /// The program's `g`-style spans as PCRE2's line prints them, or null when
 /// zig-regex does not compile the pattern as a program.
 fn programSpans(gpa: std.mem.Allocator, case: Case, out: *std.ArrayList(u8)) !?void {
+    if (regex_mode) {
+        var re = regex.Regex.compileWithFlags(gpa, case.pattern, case.flags) catch return null;
+        defer re.deinit();
+        if (re.engine_type != .backtracking) return null;
+        var found = re.find(case.subject) catch |err| switch (err) {
+            error.Timeout => return error.BudgetExceeded,
+            else => return err,
+        };
+        if (found) |*m| {
+            defer m.deinit(gpa);
+            try out.print(gpa, "{d} {d}", .{ m.start, m.end });
+        }
+        return;
+    }
     if (bt_mode) {
         var p = regex.bt.Program.compile(gpa, case.pattern, case.flags) catch return null;
         defer p.deinit(gpa);
@@ -210,6 +231,16 @@ fn programSpans(gpa: std.mem.Allocator, case: Case, out: *std.ArrayList(u8)) !?v
         try out.print(gpa, "{s}{d} {d}", .{ if (first) "" else " ", m.start, m.end });
         first = false;
     }
+}
+
+/// The first `start end` pair of a spans line ("" when it has none).
+fn firstSpan(line: []const u8) []const u8 {
+    var spaces: usize = 0;
+    for (line, 0..) |c, i| if (c == ' ') {
+        spaces += 1;
+        if (spaces == 2) return line[0..i];
+    };
+    return line;
 }
 
 fn checkMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []const u8) !void {
@@ -252,6 +283,8 @@ fn checkMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []cons
             continue;
         }
         total += 1;
+        // check-regex compares the first span only.
+        const want_cmp = if (regex_mode) firstSpan(want) else want;
         if (fixture_count) |limit| {
             if (written < limit and std.mem.eql(u8, got.items, want)) {
                 try w.print("{s}\t{s}\n", .{ line, want });
@@ -259,12 +292,12 @@ fn checkMain(gpa: std.mem.Allocator, io: Io, w: *Io.Writer, args: []const []cons
             }
             continue;
         }
-        if (std.mem.eql(u8, got.items, want)) {
+        if (std.mem.eql(u8, got.items, want_cmp)) {
             agree += 1;
         } else if (shown < 40) {
             shown += 1;
             try w.print("DIFF flags={s} pattern={f} subject={f}\n  pcre2: {s}\n  zig:   {s}\n", .{
-                case.flag_text, std.zig.fmtString(case.pattern), std.zig.fmtString(case.subject), want, got.items,
+                case.flag_text, std.zig.fmtString(case.pattern), std.zig.fmtString(case.subject), want_cmp, got.items,
             });
         }
     }
@@ -284,6 +317,8 @@ pub fn main(init: std.process.Init) !void {
     defer w.flush() catch {};
     const cmd: []const u8 = if (args.len >= 2) args[1] else "";
     bt_mode = std.mem.endsWith(u8, cmd, "-bt");
+    regex_mode = std.mem.eql(u8, cmd, "check-regex");
+    if (regex_mode) return checkMain(gpa, io, w, args[2..]);
     if (std.mem.eql(u8, cmd, "gen") or std.mem.eql(u8, cmd, "gen-bt")) return genMain(gpa, w, args[2..]);
     if (std.mem.eql(u8, cmd, "check-bt")) return checkMain(gpa, io, w, args[2..]);
     if (std.mem.eql(u8, cmd, "check")) return checkMain(gpa, io, w, args[2..]);

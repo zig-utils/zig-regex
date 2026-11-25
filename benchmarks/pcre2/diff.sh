@@ -18,8 +18,12 @@ count="${1:-20000}"
 seed="${2:-1}"
 # MODE=bt tests regex.bt backtracking programs (backreferences, lookaround,
 # atomic groups, large counted repeats) instead of Thompson programs.
+# MODE=regex compares each case's first match through Regex, compiled with
+# captures, on the cases that take its backtracking engine.
 suffix=""
-if [ "${MODE:-}" = "bt" ]; then suffix="-bt"; fi
+check="check"
+if [ "${MODE:-}" = "bt" ]; then suffix="-bt"; check="check-bt"; fi
+if [ "${MODE:-}" = "regex" ]; then check="check-regex"; fi
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 work="$root/.zig-cache/pcre2-diff"
@@ -55,4 +59,4 @@ cc -O2 -o "$work/pcre2_spans" benchmarks/pcre2/pcre2_spans.c "${cflags[@]}" "${l
 
 "$diff_tool" "gen$suffix" "$count" "$seed" >"$work/cases.tsv"
 "$work/pcre2_spans" <"$work/cases.tsv" >"$work/spans.tsv"
-"$diff_tool" "check$suffix" "$work/cases.tsv" "$work/spans.tsv"
+"$diff_tool" "$check" "$work/cases.tsv" "$work/spans.tsv"

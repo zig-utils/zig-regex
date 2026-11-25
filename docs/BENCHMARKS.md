@@ -403,6 +403,70 @@ not counted.
 `tests/testdata/pcre2_leftmost_first.tsv` keeps 1,000 agreeing cases with
 PCRE2's spans, which the test suite checks without needing PCRE2.
 
+## `Regex` backtracker against PCRE2
+
+```sh
+MODE=regex benchmarks/pcre2/diff.sh [count] [seed]
+```
+
+runs the same generated cases through `Regex.compileWithFlags` (captures on)
+and compares each case's first match with PCRE2's, on the cases that compile
+to the backtracking engine (about two thirds; the Thompson engines there are
+leftmost-longest by design, so the rest are not compared). Three seeds of
+50,000 cases, before and after zig-utils/zig-regex#57, measured 2026-11-25:
+
+| Seed | Compared | Differ, 0.5.2 | Differ, now | Fixed | New |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 33,371 | 48 | 21 | 27 | 0 |
+| 2 | 33,191 | 44 | 14 | 30 | 0 |
+| 3 | 33,131 | 36 | 17 | 19 | 0 |
+
+0.5.2 repeated the body of `*`, `+` and `{n,}` at its first end only, so a
+body ending in a lazy quantifier never grew and `^(?:'b*?)*c` missed `'bc`
+(so did `^(?:a|ab)*c` on `abc`, `(?:b{1,3}){2,}?` on `bbb` and
+`(?:x(?:a|ab)*?){2}` on `xabxab`). Where something has to match after such a
+loop (a concatenation whose left side can end in it, a lookaround whose body
+holds it, or a repeat's own later iterations when its min is 2 or more), that
+part now runs on the continuation matcher, which takes the body's
+first end, continues, and comes back for the others only on failure; the rest
+of the pattern, a loop with nothing after it included, stays on the faster
+engine. A memo of failed loop states keeps the continuation matcher from going
+exponential, and a loop that still needs more iterations than the input can
+hold fails at once. Every loop shape that had timed out or gone quadratic in
+review stays linear, the costliest at 27 steps a byte on 4,000 bytes (the
+`regex` tests "backtracker loops stay linear on long inputs" and "a loop after
+a large alternation leaves the alternation on the fast path" gate them). On the
+CRS benchmark the capturing path takes 34 to 35 ms, as 0.5.2 did, and
+on 256 KB request bodies every CRS pattern still answers within the step
+budget, with 0.5.2's step counts.
+
+The memo has a budget of 65,536 entries per table and half the search's step
+budget. A loop over an ambiguous body keeps a few to a dozen states per input
+byte, and a loop over a large alternation costs many steps per state, so on a
+long input the memo attempt can run out of either; the search then runs again
+without it, as 0.5.2 did, with the whole step budget, rather than going on
+unmemoized, which goes exponential. Such a search costs 0.5.2's steps plus the
+memo attempt's (half a budget, or a few times that where the old engine's loops
+overrun their budget, as they do in 0.5.2), gives 0.5.2's answer (the bug included), and peaks at 14
+to 40 MB at 256 KB against 1 to 6 MB for 0.5.2: on 256 KB of `word word ...`,
+`^(?:\w+\s?)*$(?<=d )` takes 36 ms against 22 ms, and the SQL-style
+`(?i)select(?:\s*(?:\w+\s*)+,?)*\s+from` 190 ms against 185 ms. Below about
+16 KB of ambiguous input the memo holds, and the answer is the corrected one.
+A loop whose body has one end at each position, such as `(?:[^"\\]|\\.)*`,
+also goes through the memo though the old engine was already right there. A
+pattern with a backreference keeps 0.5.2's matching, the bug included: without
+the memo the continuation matcher would explore such loops exponentially.
+
+Every one of the 52
+remaining differences starts where PCRE2's match starts and is longer, and all
+but one repeat a group that can match empty (`(?:.{0,2}?){1,3}`,
+`(?s:.*?){2,}`): those loops stay on the old engine, which follows ECMAScript's
+RepeatMatcher and keeps iterating where PCRE2 stops after an empty iteration.
+Node 24's `RegExp` gives zig-regex's span on 12 of the 13 it can parse; the
+other 39 use `{,n}`, `\A`, `\z` or standalone modifiers, which JavaScript does
+not have. The exception, `(?i:\ba{0,2}b{0,2}?|b)*|b{2,}?`, is also wrong in
+0.5.2.
+
 ## Backtracking programs (`regex.bt`) against PCRE2
 
 `regex.bt` runs what a `Program` cannot: backreferences, lookaround, atomic
