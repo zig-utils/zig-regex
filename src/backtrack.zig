@@ -45,11 +45,18 @@ pub const BacktrackEngine = struct {
     memo: ?*SearchMemo = null,
     /// Set for a search whose loops over a body with choices go to the
     /// continuation matcher piece by piece (see `continuationFirst`): the
-    /// pattern has such a loop and no backreference or atomic group, so the
-    /// memo can keep those pieces from going exponential. Their loops follow
+    /// pattern has such a loop and no atomic group, so the memo can keep those
+    /// pieces from going exponential. Their loops follow
     /// the pattern's own dialect (`pcreLoops`); a pattern the continuation
     /// matcher runs whole keeps its rules as they were.
     hybrid: bool = false,
+    /// Whether the pattern holds a repeat `repeatNeedsContinuations` names
+    /// for its backreference (`memoApplies`), found by `init`.
+    bounded_choice_repeat: ?bool = null,
+    /// The groups a backreference in the pattern can read (`referencedGroups`),
+    /// found by `init` and shared by the copies `forSearch` makes.
+    referenced: []usize = &.{},
+    owns_referenced: bool = false,
     /// Whether the last search was answered by the attempt with the loop
     /// memo, which ran on half the step budget (see `findFromWithPrefix`).
     answered_with_memo: bool = false,
@@ -73,7 +80,7 @@ pub const BacktrackEngine = struct {
             cap.* = .{ .start = 0, .end = 0, .matched = false };
         }
 
-        return BacktrackEngine{
+        var engine = BacktrackEngine{
             .allocator = allocator,
             .ast_root = root,
             .capture_count = capture_count,
@@ -83,10 +90,24 @@ pub const BacktrackEngine = struct {
             .step_count = 0,
             .max_steps = DEFAULT_MAX_STEPS,
         };
+        errdefer allocator.free(captures);
+        // What the loop memo needs to know about a pattern with a
+        // backreference, found once here rather than on every search.
+        if (engine.hasBackreference(root)) {
+            engine.referenced = try engine.referencedGroups();
+            engine.owns_referenced = true;
+            engine.bounded_choice_repeat = engine.anyNodeMatches(root, boundedChoiceRepeatVerdict);
+            if (engine.match_error) |err| {
+                allocator.free(engine.referenced);
+                return err;
+            }
+        } else engine.bounded_choice_repeat = false;
+        return engine;
     }
 
     pub fn deinit(self: *BacktrackEngine) void {
         self.allocator.free(self.captures);
+        if (self.owns_referenced) self.allocator.free(self.referenced);
     }
 
     /// A copy of this engine for one search, with its own captures, input, step
@@ -95,6 +116,7 @@ pub const BacktrackEngine = struct {
     /// searches of one `Regex` never share match state. Release with `deinit`.
     pub fn forSearch(self: *const BacktrackEngine) std.mem.Allocator.Error!BacktrackEngine {
         var copy = self.*;
+        copy.owns_referenced = false;
         copy.captures = try self.allocator.alloc(CaptureGroup, self.captures.len);
         for (copy.captures) |*cap| cap.* = .{ .start = 0, .end = 0, .matched = false };
         copy.input = &[_]u8{};
@@ -158,11 +180,72 @@ pub const BacktrackEngine = struct {
     }
 
     /// Whether a search of this pattern uses the loop memo: it has a loop
-    /// over a body with choices, and no backreference or atomic group, which
-    /// the memo would be wrong for.
+    /// over a body with choices, and no atomic group, which the memo would be
+    /// wrong for. A backreference is fine: the memo's states then carry the
+    /// spans of the groups it reads (`SearchMemo.referenced`).
     fn memoApplies(self: *BacktrackEngine) bool {
-        return self.ast_root.facts.choice_loop and
-            !self.hasBackreference(self.ast_root) and !self.hasAtomicGroup(self.ast_root);
+        if (self.hasAtomicGroup(self.ast_root)) return false;
+        if (self.ast_root.facts.choice_loop) return true;
+        // A bounded repeat this engine leaves to its first ends in a pattern
+        // with a backreference (`repeatNeedsContinuations`) needs the
+        // continuation matcher too, which needs the memo.
+        if (!self.hasBackreference(self.ast_root)) return false;
+        if (self.bounded_choice_repeat == null)
+            self.bounded_choice_repeat = self.anyNodeMatches(self.ast_root, boundedChoiceRepeatVerdict);
+        return self.bounded_choice_repeat.?;
+    }
+
+    fn boundedChoiceRepeatVerdict(self: *BacktrackEngine, n: *ast.Node) NodeVerdict {
+        if (n.node_type == .repeat and self.repeatNeedsContinuations(n)) return .matched;
+        return switch (n.node_type) {
+            .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
+            else => .skip,
+        };
+    }
+
+    /// The capture indices (1-based) a backreference in the pattern can read:
+    /// a numbered one's group, every group of a named one's name. Sorted, each
+    /// once, allocated with `self.allocator`.
+    fn referencedGroups(self: *BacktrackEngine) ![]usize {
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        var indices: std.ArrayList(usize) = .empty;
+        errdefer indices.deinit(self.allocator);
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        var current: ?*ast.Node = self.ast_root;
+        while (current) |n| : (current = pending.pop()) {
+            if (n.node_type == .backref) {
+                const backref = n.data.backref;
+                if (backref.name) |name| try names.append(self.allocator, name) else try indices.append(self.allocator, backref.index);
+            }
+            try self.pushNodeChildren(&pending, n);
+        }
+        if (names.items.len != 0) {
+            current = self.ast_root;
+            while (current) |n| : (current = pending.pop()) {
+                if (n.node_type == .group) {
+                    const group = n.data.group;
+                    if (group.name) |group_name| if (group.capture_index) |index| for (names.items) |name| {
+                        if (std.mem.eql(u8, name, group_name)) {
+                            try indices.append(self.allocator, index);
+                            break;
+                        }
+                    };
+                }
+                try self.pushNodeChildren(&pending, n);
+            }
+        }
+        std.mem.sort(usize, indices.items, {}, std.sort.asc(usize));
+        var kept: usize = 0;
+        for (indices.items) |index| {
+            if (index == 0 or index > self.captures.len) continue;
+            if (kept != 0 and indices.items[kept - 1] == index) continue;
+            indices.items[kept] = index;
+            kept += 1;
+        }
+        indices.shrinkRetainingCapacity(kept);
+        return indices.toOwnedSlice(self.allocator);
     }
 
     /// One search; `allow_memo` false runs it without the loop memo and the
@@ -196,10 +279,10 @@ pub const BacktrackEngine = struct {
         // Only a loop over a body with choices can re-explore states; other
         // continuation patterns (a lazy scan) keep the matcher's own memory.
         const use_memo = self.memoApplies();
-        // A backreference keeps the memo off, and without it the continuation
-        // matcher is exponential where this engine is not, so such a pattern
-        // keeps 0.5.2's matching here, its loops included. So does a search the
-        // memo has outgrown (`findFromWithPrefix`).
+        // Without the memo the continuation matcher is exponential where this
+        // engine is not, so a search the memo has outgrown keeps 0.5.2's
+        // matching here, its loops included (`findFromWithPrefix`).
+        memo.referenced = self.referenced;
         self.memo = if (use_memo and allow_memo) &memo else null;
         self.hybrid = use_memo and allow_memo and !capture_continuations;
         defer {
@@ -262,8 +345,8 @@ pub const BacktrackEngine = struct {
     const ChainKey = struct { tag: u8, a: usize = 0, b: usize = 0, c: usize = 0, d: usize = 0, e: usize = 0, next: u32 };
 
     /// A loop about to run one more iteration, with everything its outcome
-    /// depends on when no backreference reads a capture: the loop, the rest of
-    /// the match after it, the position, the scoped flags and the direction.
+    /// depends on: the loop, the rest of the match after it, the position, the
+    /// scoped flags, the direction, and the spans a backreference can read.
     ///
     /// `pending` stands in for the start positions of the iterations still
     /// open in the rest (their `advance` tasks), which `chain_ids` leaves out.
@@ -271,7 +354,12 @@ pub const BacktrackEngine = struct {
     /// that started anywhere but here can no longer end empty, and how far
     /// back it started cannot matter; bit i is set when the i-th open
     /// iteration started exactly here, the one case where it can.
-    const StateKey = struct { child: usize, min: usize, max: usize, greedy: bool, rest: u32, pending: u64, position: usize, flags: FlagsInt, reverse: bool };
+    ///
+    /// `captures` stands in for the spans of the groups a backreference reads
+    /// (`SearchMemo.captureId`), 0 when the pattern has none: the rest can
+    /// only go differently from equal states when a reference reads a
+    /// different span.
+    const StateKey = struct { child: usize, min: usize, max: usize, greedy: bool, rest: u32, pending: u64, position: usize, flags: FlagsInt, reverse: bool, captures: u32 };
 
     /// The memo's budget: the most loop states, chain ids, or choices one
     /// continuation invocation may hold, each. A loop over an ambiguous body
@@ -318,6 +406,7 @@ pub const BacktrackEngine = struct {
             .position = position,
             .flags = @bitCast(self.flags),
             .reverse = reverse,
+            .captures = try memo.captureId(self.allocator, self.captures),
         };
         if (record_successes and memo.succeeded.contains(key)) {
             for (path.items) |earlier| if (memo.succeeded.count() < memo.cap) try memo.succeeded.put(self.allocator, earlier, {});
@@ -368,9 +457,10 @@ pub const BacktrackEngine = struct {
     /// States are compared by structure, not by link address: `chain_ids`
     /// gives equal ids to continuations with equal tasks and equal rests, so
     /// the same loop at the same position with the same remainder is the same
-    /// state wherever it is reached. Only valid when no backreference reads a
-    /// capture and no atomic group cuts choices; `findFromWithPrefix` leaves
-    /// the memo off otherwise.
+    /// state wherever it is reached. A backreference makes the rest depend on
+    /// the spans it reads, so those are part of each state (`referenced`).
+    /// Only valid when no atomic group cuts choices; `findFromWithPrefix`
+    /// leaves the memo off otherwise.
     pub const SearchMemo = struct {
         chain_ids: std.AutoHashMapUnmanaged(ChainKey, u32) = .empty,
         /// Each loop state reached, with the generation (one per matcher
@@ -392,6 +482,14 @@ pub const BacktrackEngine = struct {
         succeeded: std.AutoHashMapUnmanaged(StateKey, void) = .empty,
         /// Each loop body's fewest bytes, computed on first use.
         min_widths: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+        /// The groups a backreference can read (1-based, sorted), whose spans
+        /// are part of every state; empty when the pattern has none. Borrowed
+        /// from the engine.
+        referenced: []const usize = &.{},
+        /// The ids `captureId` gives those spans, keyed by their encoding.
+        capture_ids: std.StringHashMapUnmanaged(u32) = .empty,
+        /// Scratch for encoding the spans of one state.
+        capture_scratch: std.ArrayList(u8) = .empty,
 
         fn deinit(memo: *SearchMemo, allocator: std.mem.Allocator) void {
             memo.chain_ids.deinit(allocator);
@@ -399,6 +497,37 @@ pub const BacktrackEngine = struct {
             memo.failed_generations.deinit(allocator);
             memo.succeeded.deinit(allocator);
             memo.min_widths.deinit(allocator);
+            var keys = memo.capture_ids.keyIterator();
+            while (keys.next()) |key| allocator.free(key.*);
+            memo.capture_ids.deinit(allocator);
+            memo.capture_scratch.deinit(allocator);
+        }
+
+        fn isReferenced(memo: *const SearchMemo, index: usize) bool {
+            return std.sort.binarySearch(usize, memo.referenced, index, struct {
+                fn order(wanted: usize, item: usize) std.math.Order {
+                    return std.math.order(wanted, item);
+                }
+            }.order) != null;
+        }
+
+        /// The id of the referenced groups' spans in `captures`: equal spans,
+        /// equal ids. 0 when the pattern has no backreference.
+        fn captureId(memo: *SearchMemo, allocator: std.mem.Allocator, captures: []const CaptureGroup) !u32 {
+            if (memo.referenced.len == 0) return 0;
+            memo.capture_scratch.clearRetainingCapacity();
+            for (memo.referenced) |index| {
+                const capture = captures[index - 1];
+                const span: [2]u64 = if (capture.matched) .{ capture.start, capture.end } else .{ std.math.maxInt(u64), 0 };
+                try memo.capture_scratch.appendSlice(allocator, std.mem.asBytes(&span));
+            }
+            if (memo.capture_ids.get(memo.capture_scratch.items)) |id| return id;
+            if (memo.capture_ids.count() >= memo.cap) return error.MemoExhausted;
+            const owned = try allocator.dupe(u8, memo.capture_scratch.items);
+            errdefer allocator.free(owned);
+            const id: u32 = @intCast(memo.capture_ids.count() + 1);
+            try memo.capture_ids.put(allocator, owned, id);
+            return id;
         }
 
         fn newGeneration(memo: *SearchMemo) u32 {
@@ -437,9 +566,15 @@ pub const BacktrackEngine = struct {
         fn chainId(memo: *SearchMemo, allocator: std.mem.Allocator, task: ContinuationTask, next: u32) !u32 {
             const key: ChainKey = switch (task) {
                 .node => |node| .{ .tag = 0, .a = @intFromPtr(node), .next = next },
-                // A capture's start never changes whether the rest matches
-                // (no backreference reads it), so it is not part of the state.
-                .finish_group => |group| .{ .tag = 1, .a = if (group.index) |i| i + 1 else 0, .c = @as(FlagsInt, @bitCast(group.flags)), .next = next },
+                // An open group's start matters only to a backreference that
+                // reads the group; for any other it is not part of the state.
+                .finish_group => |group| .{
+                    .tag = 1,
+                    .a = if (group.index) |i| i + 1 else 0,
+                    .b = if (group.index) |i| (if (memo.isReferenced(i)) group.start + 1 else 0) else 0,
+                    .c = @as(FlagsInt, @bitCast(group.flags)),
+                    .next = next,
+                },
                 .repeat => |repeat| .{ .tag = 2, .a = @intFromPtr(repeat.child), .b = repeat.min, .c = if (repeat.max) |m| m + 1 else 0, .d = @intFromBool(repeat.greedy), .next = next },
                 // The iteration's start is left out here and carried by
                 // `StateKey.pending` instead.
@@ -886,7 +1021,7 @@ pub const BacktrackEngine = struct {
             .star => self.matchStar(node.data.star, pos),
             .plus => self.matchPlus(node.data.plus, pos),
             .optional => self.matchOptional(node.data.optional, pos),
-            .repeat => if (self.hybrid and requiredChoiceIterations(node))
+            .repeat => if (self.hybrid and self.repeatNeedsContinuations(node))
                 self.continuationFirst(node, pos)
             else
                 self.matchRepeat(node.data.repeat, pos),
@@ -1136,7 +1271,7 @@ pub const BacktrackEngine = struct {
                 }
             },
             .star, .plus, .optional, .repeat => {
-                if (self.hybrid and requiredChoiceIterations(node)) return self.continuationTarget(node, pos, target_end);
+                if (self.hybrid and self.repeatNeedsContinuations(node)) return self.continuationTarget(node, pos, target_end);
                 return self.matchQuantifierConstrained(node, pos, target_end);
             },
             .alternation => {
@@ -1742,7 +1877,7 @@ pub const BacktrackEngine = struct {
                 }
             },
             .repeat => {
-                if (self.hybrid and requiredChoiceIterations(node)) return self.continuationEnds(node, pos, positions);
+                if (self.hybrid and self.repeatNeedsContinuations(node)) return self.continuationEnds(node, pos, positions);
                 const repeat = node.data.repeat;
                 // ECMA-262 RepeatMatcher with min=max=1 still permits the
                 // continuation to backtrack inside its one required child.
@@ -2665,6 +2800,22 @@ pub const BacktrackEngine = struct {
     /// matcher even with nothing after it (`(?:b*c.*c){2,}` must give back part
     /// of the first `.*`). With a min of 0 or 1, stopping after any iteration
     /// is allowed and the first path is the one that matches.
+    /// Whether a repeat goes to the continuation matcher in the pieces this
+    /// engine hands it (`hybrid`): one `requiredChoiceIterations` names, or a
+    /// bounded one over a body with choices and a group in a pattern with a
+    /// backreference. This engine enumerates a bounded body's choices itself,
+    /// keeping the first path to each count and position, but a backreference
+    /// can need a later path's captures there (`(?:b+|(a)|\1){2}` on `bbb`),
+    /// so it leaves such a repeat to its first ends (`boundedRepeatHasChoices`).
+    fn repeatNeedsContinuations(self: *BacktrackEngine, node: *ast.Node) bool {
+        if (requiredChoiceIterations(node)) return true;
+        if (node.node_type != .repeat) return false;
+        const repeat = node.data.repeat;
+        const child = repeat.child.facts;
+        return repeat.bounds.max != null and (child.quantifiers or child.alternation) and
+            child.capturing_group and self.hasBackreference(self.ast_root);
+    }
+
     fn requiredChoiceIterations(node: *ast.Node) bool {
         if (node.node_type != .repeat) return false;
         const repeat = node.data.repeat;

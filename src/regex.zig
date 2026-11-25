@@ -5197,11 +5197,11 @@ test "an end found twice does not make a loop state look failed" {
     try std.testing.expectEqual(@as(usize, 9), m.end);
 }
 
-test "patterns the loop memo cannot serve keep their old cost" {
-    // With a backreference the memo is off, and the continuation matcher
-    // would explore a loop over a body with choices exponentially; such a
-    // pattern keeps the concatenation engine's matching (zig-utils/zig-regex#57
-    // stays open for it). These answered in a few hundred steps before.
+test "loops in patterns with a backreference stay cheap through the memo" {
+    // The continuation matcher would explore a loop over a body with choices
+    // exponentially without the memo, which carries the spans a
+    // backreference reads in its states (zig-utils/zig-regex#59). These took a
+    // few hundred steps on the old engine and must stay there.
     const allocator = std.testing.allocator;
     const cases = [_]struct { pattern: []const u8, input: []const u8, span: ?[2]usize }{
         .{ .pattern = "([\"'])(?:\\w+\\s?)*\\1", .input = "\"documentation_identifier\"", .span = .{ 0, 26 } },
@@ -5458,6 +5458,57 @@ test "a backreference to an unset group fails in PCRE mode and matches empty in 
                 try std.testing.expectEqual(span[0], m.start);
                 try std.testing.expectEqual(span[1], m.end);
             } else try std.testing.expect(found == null);
+        }
+    }
+}
+
+test "patterns with a backreference try every end of a loop body with choices" {
+    // A backreference kept the loop memo off, so these patterns stayed on the
+    // old engine, which repeats a loop's body at its first end and keeps the
+    // first path to each count and position of a bounded repeat. Spans and
+    // groups are PCRE2 10.47's in PCRE mode and node 24's in ECMAScript mode.
+    const allocator = std.testing.allocator;
+    const Group = ?[2]usize;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, ecmascript: bool = false, span: ?[2]usize, groups: []const Group = &.{} }{
+        // The zig-utils/zig-regex#57 reductions with a backreference.
+        .{ .pattern = "(['\"])(?:a|ab)*c\\1", .input = "\"abc\"", .span = .{ 0, 5 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "((?:a|ab)+)c\\1", .input = "abcab", .span = .{ 0, 5 }, .groups = &.{.{ 0, 2 }} },
+        .{ .pattern = "(?:(a|ab)|x)+c\\1", .input = "aabcab", .span = .{ 0, 6 }, .groups = &.{.{ 1, 3 }} },
+        .{ .pattern = "^(['\"])(?:'b*?)*c\\1", .input = "\"'bc\"", .span = .{ 0, 5 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "^(x)(?:[^']*?'[^']*?'[^']*?)*?'\\1", .input = "xa'b'c'x", .span = .{ 0, 8 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "^(?:x(?:ab|a))*bc(x)\\1$", .input = "xabcxx", .span = .{ 0, 6 }, .groups = &.{.{ 4, 5 }} },
+        .{ .pattern = "(x)(?:b{1,3}){2,}?\\1", .input = "xbbbx", .span = .{ 0, 5 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "(?:x(a|ab)*?){2}\\1", .input = "xabxabab", .span = .{ 0, 6 }, .groups = &.{.{ 1, 3 }} },
+        .{ .pattern = "(?:x(a|ab)*?){2}\\1", .input = "xabxabab", .ecmascript = true, .span = .{ 0, 4 }, .groups = &.{null} },
+        // Bounded repeats over a body with choices and a group.
+        .{ .pattern = "(?:b+|(a)|\\1){2}", .input = "bbb", .span = .{ 0, 3 }, .groups = &.{null} },
+        .{ .pattern = "(?:\\w+|(a)|\\1){2}", .input = "abc", .span = .{ 0, 3 }, .groups = &.{null} },
+        .{ .pattern = "(?:b+|(a)|\\1){2,3}c", .input = "bbbc", .span = .{ 0, 4 }, .groups = &.{null} },
+        .{ .pattern = "(?:b+|(a)\\1){2}", .input = "bbb", .span = .{ 0, 3 }, .groups = &.{null} },
+        .{ .pattern = "(?:(?:.|(x)|\\1)+){2}", .input = "ab", .span = .{ 0, 2 }, .groups = &.{null} },
+        .{ .pattern = "(|\\1a){1,2}b", .input = "ab", .span = .{ 0, 2 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "(a\\1|){2,3}", .input = "a", .span = .{ 0, 1 }, .groups = &.{.{ 1, 1 }} },
+        .{ .pattern = "(b)(?:a|aa)*\\1", .input = "baaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .span = null },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = c.ecmascript });
+        defer re.deinit();
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        errdefer std.debug.print("{s} on \"{s}\" (ecmascript={})\n", .{ c.pattern, c.input, c.ecmascript });
+        const span = c.span orelse {
+            try std.testing.expect(found == null);
+            continue;
+        };
+        const m = found orelse return error.TestExpectedMatch;
+        try std.testing.expectEqual(span[0], m.start);
+        try std.testing.expectEqual(span[1], m.end);
+        for (c.groups, 0..) |want, i| {
+            if (want) |g| {
+                try std.testing.expect(m.captures_present[i]);
+                try std.testing.expectEqual(g[0], m.capture_spans[i][0]);
+                try std.testing.expectEqual(g[1], m.capture_spans[i][1]);
+            } else try std.testing.expect(!m.captures_present[i]);
         }
     }
 }

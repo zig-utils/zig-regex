@@ -454,8 +454,26 @@ to 40 MB at 256 KB against 1 to 6 MB for 0.5.2: on 256 KB of `word word ...`,
 16 KB of ambiguous input the memo holds, and the answer is the corrected one.
 A loop whose body has one end at each position, such as `(?:[^"\\]|\\.)*`,
 also goes through the memo though the old engine was already right there. A
-pattern with a backreference keeps 0.5.2's matching, the bug included: without
-the memo the continuation matcher would explore such loops exponentially.
+pattern with a backreference goes through the memo too: its states carry the
+spans of the groups a reference reads, so two paths that reach a loop with
+different captures are told apart. So does a bounded repeat over a body with
+choices and a group in such a pattern (`(?:b+|(a)|\1){2}`), which the old
+engine enumerates keeping only the first path to each count and position. The
+old engine still rebuilds the captures of the first path to each end a piece
+returns, so a reference after the piece that needs another path's captures at
+that end can still miss (`(a{0,2}){0,3}((?<!\1(?!c))((?<!aa{0,2})))+` on an
+empty input, `(a?){0,2}\1$` on `aa`). Over 157,474 random patterns with
+backreferences, 5,795 now agree with PCRE2 that did not, and 25 of this kind
+disagree that agreed before.
+
+Such a pattern now pays for the memo attempt the old engine did not make. Where
+the spans a reference reads change at every start, no state is reused: on 64 KB,
+`(b)(?:a|aa)*\1c` takes 58 ms against 18 ms and holds about 13 MB against
+2 MB, and `((a)|b)(?:\2|\1|c)*d` 67 to 102 ms against 29 to 44 ms with about
+15 MB. On a short quoted string, `(['"])(?:\w+\s?)*\1` takes about 87 us a
+search against 24 us. The memo's budget caps the memory, the cost stays
+linear in the input, and a search the memo outgrows gives the old engine's
+answer. CRS has no backreferences.
 
 Every one of the 52
 remaining differences starts where PCRE2's match starts and is longer, and all
