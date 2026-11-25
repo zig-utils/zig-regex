@@ -304,7 +304,7 @@ test "named group: named backreference" {
 
 test "named group: duplicate names in alternatives use participating capture" {
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:(?:(?<a>x)|(?<a>y))\\k<a>){2}");
+    var regex = try Regex.compileWithFlags(allocator, "(?:(?:(?<a>x)|(?<a>y))\\k<a>){2}", .{ .ecmascript = true });
     defer regex.deinit();
 
     if (try regex.find("xxyy")) |match| {

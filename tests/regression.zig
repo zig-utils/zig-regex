@@ -61,8 +61,9 @@ test "regression: case-sensitive backreference rejects case mismatch" {
 }
 
 test "regression: unmatched named backreference matches empty" {
+    // ECMAScript: each iteration resets the groups, so `c` leaves both unset.
     const allocator = std.testing.allocator;
-    var regex = try Regex.compile(allocator, "(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}");
+    var regex = try Regex.compileWithFlags(allocator, "(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}", .{ .ecmascript = true });
     defer regex.deinit();
 
     var match = (try regex.find("aac")).?;
@@ -782,7 +783,7 @@ test "regression: unicode dot captures full code points in one-pass-shaped patte
 test "regression: duplicate named captures backtrack alternatives before named backref" {
     const allocator = std.testing.allocator;
 
-    var pair = try Regex.compile(allocator, "(?:(?<x>a)|(?<x>b))\\k<x>");
+    var pair = try Regex.compileWithFlags(allocator, "(?:(?<x>a)|(?<x>b))\\k<x>", .{ .ecmascript = true });
     defer pair.deinit();
     if (try pair.find("aa")) |match| {
         var mut_match = match;
@@ -795,7 +796,7 @@ test "regression: duplicate named captures backtrack alternatives before named b
     try std.testing.expect((try pair.find("abab")) == null);
     try std.testing.expect((try pair.find("cdef")) == null);
 
-    var repeated = try Regex.compile(allocator, "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}");
+    var repeated = try Regex.compileWithFlags(allocator, "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}", .{ .ecmascript = true });
     defer repeated.deinit();
     if (try repeated.find("aabb")) |match| {
         var mut_match = match;
@@ -809,7 +810,7 @@ test "regression: duplicate named captures backtrack alternatives before named b
     }
     try std.testing.expect((try repeated.find("abab")) == null);
 
-    var trailing_empty = try Regex.compile(allocator, "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$");
+    var trailing_empty = try Regex.compileWithFlags(allocator, "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$", .{ .ecmascript = true });
     defer trailing_empty.deinit();
     if (try trailing_empty.find("xz")) |match| {
         var mut_match = match;
@@ -861,7 +862,7 @@ test "regression: lookbehind evaluates captures in reverse direction" {
 test "regression: lookbehind backreferences can bind captures to their right" {
     const allocator = std.testing.allocator;
 
-    var before_capture = try Regex.compileWithFlags(allocator, "(?<=\\1(\\w))d", .{ .case_insensitive = true });
+    var before_capture = try Regex.compileWithFlags(allocator, "(?<=\\1(\\w))d", .{ .case_insensitive = true, .ecmascript = true });
     defer before_capture.deinit();
     if (try before_capture.find("abcCd")) |match| {
         var mut_match = match;
@@ -871,7 +872,7 @@ test "regression: lookbehind backreferences can bind captures to their right" {
         try std.testing.expectEqualStrings("C", match.captures[0]);
     } else return error.TestExpectedMatch;
 
-    var mutual = try Regex.compile(allocator, "(?<=a(.\\2)b(\\1)).{4}");
+    var mutual = try Regex.compileWithFlags(allocator, "(?<=a(.\\2)b(\\1)).{4}", .{ .ecmascript = true });
     defer mutual.deinit();
     if (try mutual.find("aabcacbc")) |match| {
         var mut_match = match;
@@ -1473,9 +1474,10 @@ test "regression: repeated optional captures with trailing delimiter are not too
 }
 
 test "regression: repeated alternatives clear captures from previous iterations" {
+    // ECMAScript only; PCRE keeps `a` (see the PCRE2 table test below).
     const allocator = std.testing.allocator;
 
-    var regex = try Regex.compile(allocator, "((a)|(b))*");
+    var regex = try Regex.compileWithFlags(allocator, "((a)|(b))*", .{ .ecmascript = true });
     defer regex.deinit();
     if (try regex.find("ab")) |match| {
         var mut_match = match;
@@ -1875,5 +1877,59 @@ test "regression: literal alternations are leftmost-longest on the fast path" {
         var em = (try ecma.find(c.input)).?;
         defer em.deinit(allocator);
         try std.testing.expectEqualStrings(c.pattern[0..std.mem.indexOfScalar(u8, c.pattern, '|').?], em.slice);
+    }
+}
+
+test "regression: PCRE mode keeps loop captures and refers to the first set duplicate name" {
+    // The ECMAScript tests above in PCRE mode. A group keeps its value from an
+    // earlier iteration, so several groups sharing a name can be set at once,
+    // and a backreference to the name uses the lowest-numbered set one.
+    // Results are PCRE2 10.47's, with (?J) for the duplicate names.
+    const allocator = std.testing.allocator;
+    const Group = ?[2]usize;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, span: ?[2]usize, groups: []const Group = &.{} }{
+        .{ .pattern = "((a)|(b))*", .input = "ab", .span = .{ 0, 2 }, .groups = &.{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 2 } } },
+        .{ .pattern = "(?:(?<x>a)|(?<x>b))\\k<x>", .input = "bb", .span = .{ 0, 2 }, .groups = &.{ null, .{ 0, 1 } } },
+        .{ .pattern = "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}", .input = "aabb", .span = null },
+        .{ .pattern = "(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}", .input = "bbaa", .span = .{ 0, 4 }, .groups = &.{ .{ 2, 3 }, .{ 0, 1 } } },
+        .{ .pattern = "(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}", .input = "aac", .span = null },
+        .{ .pattern = "(?:(?:(?<x>a)|(?<x>b)|c)\\k<x>){2}", .input = "aaca", .span = .{ 0, 4 }, .groups = &.{ .{ 0, 1 }, null } },
+        .{ .pattern = "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$", .input = "xz", .span = null },
+        .{ .pattern = "^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$", .input = "yzy", .span = .{ 0, 3 }, .groups = &.{ null, .{ 0, 1 } } },
+        .{ .pattern = "(?:(?:(?<a>x)|(?<a>y))\\k<a>){2}", .input = "xxyy", .span = null },
+        .{ .pattern = "(?:(?:(?<a>x)|(?<a>y))\\k<a>){2}", .input = "yyxx", .span = .{ 0, 4 }, .groups = &.{ .{ 2, 3 }, .{ 0, 1 } } },
+        // Lookbehinds and negative lookaheads holding loops.
+        .{ .pattern = "(?<=x(a|aa)?)c", .input = "xaac", .span = .{ 3, 4 }, .groups = &.{.{ 1, 3 }} },
+        .{ .pattern = "(?<=a(.b?)?)c", .input = "abc", .span = .{ 2, 3 }, .groups = &.{.{ 1, 2 }} },
+        .{ .pattern = "(?<!x(a|aa)?)c", .input = "xaac", .span = null },
+        .{ .pattern = "(?<=(a)\\1)a", .input = "aa", .span = null },
+        .{ .pattern = "(?<=(a)?\\1)c", .input = "bc", .span = null },
+        .{ .pattern = "(?<!(a)?c|\\1|(a))", .input = "b", .span = .{ 0, 0 }, .groups = &.{ null, null } },
+        .{ .pattern = "(?<=[ab](b){0,3})", .input = "baabba", .span = .{ 1, 1 }, .groups = &.{null} },
+        .{ .pattern = "b(?<=.(b){0,3})", .input = "b", .span = .{ 0, 1 }, .groups = &.{null} },
+        // A failed loop leaves nothing behind in a negative lookahead.
+        .{ .pattern = "(?!(a){2})", .input = "a", .span = .{ 0, 0 }, .groups = &.{null} },
+        .{ .pattern = "(?!([ab]){3})", .input = "b-baaa", .span = .{ 0, 0 }, .groups = &.{null} },
+    };
+    for (cases) |c| {
+        var re = try Regex.compile(allocator, c.pattern);
+        defer re.deinit();
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        errdefer std.debug.print("{s} on \"{s}\"\n", .{ c.pattern, c.input });
+        const span = c.span orelse {
+            try std.testing.expect(found == null);
+            continue;
+        };
+        const m = found orelse return error.TestExpectedMatch;
+        try std.testing.expectEqual(span[0], m.start);
+        try std.testing.expectEqual(span[1], m.end);
+        for (c.groups, 0..) |want, i| {
+            if (want) |g| {
+                try std.testing.expect(m.captures_present[i]);
+                try std.testing.expectEqual(g[0], m.capture_spans[i][0]);
+                try std.testing.expectEqual(g[1], m.capture_spans[i][1]);
+            } else try std.testing.expect(!m.captures_present[i]);
+        }
     }
 }

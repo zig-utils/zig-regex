@@ -1219,7 +1219,7 @@ pub const BacktrackEngine = struct {
                 return false;
             };
 
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             const end = self.matchNode(child, current) orelse {
                 @memcpy(self.captures, saved);
                 return false;
@@ -1263,14 +1263,14 @@ pub const BacktrackEngine = struct {
         for (ends.items) |end| {
             if (end <= pos or end > target_end) continue;
             @memcpy(self.captures, saved);
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             if (!self.matchNodeConstrained(child, pos, end)) continue;
             if (self.matchRepeatedChildConstrained(child, end, target_end, count + 1, min, max)) return true;
         }
 
         if (self.hasAlternation(child) and self.hasCapturingGroup(child)) {
             @memcpy(self.captures, saved);
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             if (self.matchNodeConstrained(child, pos, target_end)) {
                 if (self.matchRepeatedChildConstrained(child, target_end, target_end, count + 1, min, max)) return true;
             }
@@ -1614,6 +1614,67 @@ pub const BacktrackEngine = struct {
         return self.anyNodeMatches(node, walkWith(groupVerdict));
     }
 
+    /// Reset a loop body's captures before an iteration, in ECMAScript mode
+    /// only: its RepeatMatcher clears them, so a group the iteration does not
+    /// set reads as unset. PCRE keeps a group's value from an earlier
+    /// iteration instead (`(?:b|(a))*` on `ab` captures `a`). Without the
+    /// clear, a capture left by an attempt that failed or was only enumerated
+    /// would survive, so each path restores the captures it saved before the
+    /// attempt, and bounded and counted repeats rebuild every iteration of the
+    /// path they settle on (rebuildIterationCaptures).
+    fn clearIterationCaptures(self: *BacktrackEngine, node: *ast.Node) void {
+        if (self.flags.ecmascript) self.clearCapturesIn(node);
+    }
+
+    /// A copy of the captures that stays on the stack for up to 16 groups, so
+    /// a path that saves them on every call does not allocate each time.
+    const CaptureSnapshot = struct {
+        small: [16]CaptureGroup,
+        heap: ?[]CaptureGroup,
+
+        fn take(snapshot: *CaptureSnapshot, engine: *BacktrackEngine) ?[]CaptureGroup {
+            snapshot.heap = null;
+            if (engine.captures.len <= snapshot.small.len) {
+                const caps = snapshot.small[0..engine.captures.len];
+                @memcpy(caps, engine.captures);
+                return caps;
+            }
+            snapshot.heap = engine.allocator.dupe(CaptureGroup, engine.captures) catch |err| return engine.failWith(err, @as(?[]CaptureGroup, null));
+            return snapshot.heap;
+        }
+
+        fn release(snapshot: *CaptureSnapshot, engine: *BacktrackEngine) void {
+            if (snapshot.heap) |caps| engine.allocator.free(caps);
+        }
+    };
+
+    /// One iteration of a repeat: the child matched from `start` to `end`
+    /// (`start` is the right end when matching in reverse).
+    const IterationSpan = struct { start: usize, end: usize };
+
+    /// Set the captures a PCRE repeat leaves after the iterations in `spans`,
+    /// listed in the order the engine matched them. It starts from `entry`, the
+    /// captures before the repeat, so nothing an enumeration or an abandoned
+    /// iteration set survives, and it replays each iteration so a group keeps
+    /// the value from the last iteration that set it. A lookbehind is matched
+    /// right to left here but forwards by PCRE2, so in reverse the leftmost
+    /// iteration is replayed first and the rightmost one wins.
+    fn rebuildIterationCaptures(self: *BacktrackEngine, child: *ast.Node, entry: []const CaptureGroup, spans: []const IterationSpan, comptime reverse: bool) bool {
+        @memcpy(self.captures, entry);
+        for (0..spans.len) |i| {
+            const span = if (reverse) spans[spans.len - 1 - i] else spans[i];
+            const matched = if (reverse)
+                self.matchReverseNodeConstrained(child, span.start, span.end)
+            else
+                self.matchNodeConstrained(child, span.start, span.end);
+            if (!matched or self.match_error != null) {
+                @memcpy(self.captures, entry);
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// Reset every capture declared inside `node`. Walked with an explicit
     /// stack for the reason `anyNodeMatches` documents (#23).
     fn clearCapturesIn(self: *BacktrackEngine, node: *ast.Node) void {
@@ -1654,7 +1715,7 @@ pub const BacktrackEngine = struct {
             .plus => {
                 const quant = node.data.plus;
                 // Must match at least once
-                self.clearCapturesIn(quant.child);
+                self.clearIterationCaptures(quant.child);
                 const first_match = self.matchNode(quant.child, pos) orelse return;
 
                 if (quant.greedy) {
@@ -1691,7 +1752,7 @@ pub const BacktrackEngine = struct {
                 } else if (self.fixedRepeatHasChoices(repeat)) {
                     try self.collectFixedRepeatMatches(repeat, pos, positions, false);
                 } else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
-                    self.clearCapturesIn(repeat.child);
+                    self.clearIterationCaptures(repeat.child);
                     try self.collectAllMatches(repeat.child, pos, positions);
                 } else if (repeat.greedy) {
                     try self.collectGreedyRepeatMatches(repeat, pos, positions);
@@ -1727,6 +1788,10 @@ pub const BacktrackEngine = struct {
                     // For each left ending, set captures and try right side
                     const left_has_groups = self.hasCapturingGroup(c.left);
                     for (left_positions.items) |left_end| {
+                        // Enumerating the left side ran its loop bodies, and PCRE
+                        // does not clear them per iteration, so start each end
+                        // from the captures before the enumeration.
+                        if (!self.flags.ecmascript) @memcpy(self.captures, clean_captures);
                         // Save captures, set them for this left position, try right
                         const saved = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWithError(err);
                         defer self.allocator.free(saved);
@@ -1816,7 +1881,7 @@ pub const BacktrackEngine = struct {
 
         var current_pos = pos;
         while (true) {
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             const next_pos = self.matchNodeProgress(child, current_pos) orelse break;
             current_pos = next_pos;
             try all_positions.append(self.allocator, current_pos);
@@ -1836,7 +1901,7 @@ pub const BacktrackEngine = struct {
 
         var current_pos = pos;
         while (true) {
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             const next_pos = self.matchNodeProgress(child, current_pos) orelse break;
             current_pos = next_pos;
             try positions.append(self.allocator, current_pos);
@@ -1860,7 +1925,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn collectBoundedRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), comptime reverse: bool, comptime first_only: bool) anyerror!void {
-        _ = self.collectBoundedRepeatMatchesInner(repeat, pos, positions, null, reverse, first_only) catch |err| {
+        _ = self.collectBoundedRepeatMatchesInner(repeat, pos, positions, null, null, reverse, first_only) catch |err| {
             self.match_error = err;
             return err;
         };
@@ -1874,7 +1939,7 @@ pub const BacktrackEngine = struct {
         defer self.allocator.free(saved);
         var unused: std.ArrayList(usize) = .empty;
         defer unused.deinit(self.allocator);
-        const matched = self.collectBoundedRepeatMatchesInner(repeat, pos, &unused, target, reverse, false) catch |err| {
+        const matched = self.collectBoundedRepeatMatchesInner(repeat, pos, &unused, target, saved, reverse, false) catch |err| {
             self.match_error = err;
             @memcpy(self.captures, saved);
             return false;
@@ -1883,11 +1948,37 @@ pub const BacktrackEngine = struct {
         return matched;
     }
 
-    fn recordBoundedRepeatMatch(self: *BacktrackEngine, repeat: ast.Node.Repeat, count: usize, pos: usize, last_start: usize, has_captures: bool, positions: *std.ArrayList(usize), target: ?usize, comptime reverse: bool, comptime first_only: bool) anyerror!bool {
+    const BoundedRepeatState = struct { count: usize, pos: usize };
+    const BoundedRepeatFrame = struct {
+        state: BoundedRepeatState,
+        last_start: usize,
+        phase: enum { enter, expand, leave } = .enter,
+        ends: std.ArrayList(usize) = .empty,
+        next: usize = 0,
+    };
+
+    /// `path` is the search stack, the repeat's start first and the candidate
+    /// last; `entry` holds the captures from before the repeat whenever a
+    /// target is given.
+    fn recordBoundedRepeatMatch(self: *BacktrackEngine, repeat: ast.Node.Repeat, path: []const BoundedRepeatFrame, has_captures: bool, positions: *std.ArrayList(usize), target: ?usize, entry: ?[]const CaptureGroup, comptime reverse: bool, comptime first_only: bool) anyerror!bool {
+        const top = path[path.len - 1];
+        const count = top.state.count;
+        const pos = top.state.pos;
+        const last_start = top.last_start;
         if (count < repeat.bounds.min) return false;
         if (target) |end| {
             if (pos != end) return false;
             if (!has_captures) return true;
+            if (!self.flags.ecmascript) {
+                // PCRE keeps what earlier iterations captured, so replay the
+                // whole path rather than its last iteration.
+                var spans: std.ArrayList(IterationSpan) = .empty;
+                defer spans.deinit(self.allocator);
+                for (path[1..]) |frame| try spans.append(self.allocator, .{ .start = frame.last_start, .end = frame.state.pos });
+                const matched = self.rebuildIterationCaptures(repeat.child, entry.?, spans.items, reverse);
+                if (self.match_error) |err| return err;
+                return matched;
+            }
             self.clearCapturesIn(repeat.child);
             if (self.match_error) |err| return err;
             if (count == 0) return true;
@@ -1902,15 +1993,9 @@ pub const BacktrackEngine = struct {
         return first_only;
     }
 
-    fn collectBoundedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), target: ?usize, comptime reverse: bool, comptime first_only: bool) anyerror!bool {
-        const State = struct { count: usize, pos: usize };
-        const Frame = struct {
-            state: State,
-            last_start: usize,
-            phase: enum { enter, expand, leave } = .enter,
-            ends: std.ArrayList(usize) = .empty,
-            next: usize = 0,
-        };
+    fn collectBoundedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), target: ?usize, entry: ?[]const CaptureGroup, comptime reverse: bool, comptime first_only: bool) anyerror!bool {
+        const State = BoundedRepeatState;
+        const Frame = BoundedRepeatFrame;
         const has_captures = self.hasCapturingGroup(repeat.child);
         if (self.match_error) |err| return err;
         const saved: ?[]CaptureGroup = if (has_captures and target == null) try self.allocator.dupe(CaptureGroup, self.captures) else null;
@@ -1945,16 +2030,16 @@ pub const BacktrackEngine = struct {
                     // by revisiting equivalent decompositions at lower counts.
                     if (key.count >= repeat.bounds.min and repeat.bounds.max.? - key.count >= remaining)
                         key.count = repeat.bounds.min;
-                    const entry = try seen.getOrPut(key);
-                    if (entry.found_existing) {
+                    const seen_key = try seen.getOrPut(key);
+                    if (seen_key.found_existing) {
                         var discarded = stack.pop().?;
                         discarded.ends.deinit(self.allocator);
                         continue;
                     }
-                    if (!repeat.greedy and try self.recordBoundedRepeatMatch(repeat, frame.state.count, frame.state.pos, frame.last_start, has_captures, positions, target, reverse, first_only)) return true;
+                    if (!repeat.greedy and try self.recordBoundedRepeatMatch(repeat, stack.items, has_captures, positions, target, entry, reverse, first_only)) return true;
                     frame.phase = .expand;
                     if (frame.state.count < repeat.bounds.max.?) {
-                        if (has_captures) self.clearCapturesIn(repeat.child);
+                        if (has_captures) self.clearIterationCaptures(repeat.child);
                         if (self.match_error) |err| return err;
                         if (reverse) {
                             try self.collectAllReverseMatches(repeat.child, frame.state.pos, &frame.ends);
@@ -1978,13 +2063,14 @@ pub const BacktrackEngine = struct {
                     if (end == frame.state.pos and frame.state.count >= repeat.bounds.min) continue;
                     const state = State{ .count = frame.state.count + 1, .pos = end };
                     const start = frame.state.pos;
-                    // Captures are cleared before the next iteration. Without
-                    // capture-sensitive backreferences, equal count/position
-                    // states have equal continuations; retain the first path.
+                    // Without capture-sensitive backreferences, equal
+                    // count/position states have equal continuations; retain
+                    // the first path. A target rebuilds the captures of the
+                    // path it settles on.
                     try stack.append(self.allocator, .{ .state = state, .last_start = start });
                 },
                 .leave => {
-                    if (repeat.greedy and try self.recordBoundedRepeatMatch(repeat, frame.state.count, frame.state.pos, frame.last_start, has_captures, positions, target, reverse, first_only)) return true;
+                    if (repeat.greedy and try self.recordBoundedRepeatMatch(repeat, stack.items, has_captures, positions, target, entry, reverse, first_only)) return true;
                     var finished = stack.pop().?;
                     finished.ends.deinit(self.allocator);
                 },
@@ -1994,7 +2080,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn collectFixedRepeatMatches(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), comptime reverse: bool) anyerror!void {
-        _ = self.collectFixedRepeatMatchesInner(repeat, pos, positions, null, reverse) catch |err| {
+        _ = self.collectFixedRepeatMatchesInner(repeat, pos, positions, null, null, reverse) catch |err| {
             self.match_error = err;
             return err;
         };
@@ -2008,7 +2094,7 @@ pub const BacktrackEngine = struct {
         defer self.allocator.free(saved);
         var unused: std.ArrayList(usize) = .empty;
         defer unused.deinit(self.allocator);
-        const matched = self.collectFixedRepeatMatchesInner(repeat, pos, &unused, target, reverse) catch |err| {
+        const matched = self.collectFixedRepeatMatchesInner(repeat, pos, &unused, target, saved, reverse) catch |err| {
             self.match_error = err;
             @memcpy(self.captures, saved);
             return false;
@@ -2017,9 +2103,26 @@ pub const BacktrackEngine = struct {
         return matched;
     }
 
-    fn collectFixedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), target: ?usize, comptime reverse: bool) anyerror!bool {
+    fn collectFixedRepeatMatchesInner(self: *BacktrackEngine, repeat: ast.Node.Repeat, pos: usize, positions: *std.ArrayList(usize), target: ?usize, entry: ?[]const CaptureGroup, comptime reverse: bool) anyerror!bool {
         const has_captures = self.hasCapturingGroup(repeat.child);
         if (self.match_error) |err| return err;
+        // PCRE keeps what earlier iterations captured, so a target replays the
+        // whole path it settles on. Each frontier entry then remembers the
+        // entry of the previous iteration it was first reached from.
+        const PathNode = struct { pos: usize, parent: usize };
+        const track = has_captures and target != null and !self.flags.ecmascript;
+        var nodes: std.ArrayList(PathNode) = .empty;
+        defer nodes.deinit(self.allocator);
+        var frontier_ids: std.ArrayList(usize) = .empty;
+        defer frontier_ids.deinit(self.allocator);
+        var next_ids: std.ArrayList(usize) = .empty;
+        defer next_ids.deinit(self.allocator);
+        var spans: std.ArrayList(IterationSpan) = .empty;
+        defer spans.deinit(self.allocator);
+        if (track) {
+            try nodes.append(self.allocator, .{ .pos = pos, .parent = std.math.maxInt(usize) });
+            try frontier_ids.append(self.allocator, 0);
+        }
         const saved: ?[]CaptureGroup = if (has_captures and target == null) try self.allocator.dupe(CaptureGroup, self.captures) else null;
         defer if (saved) |caps| {
             @memcpy(self.captures, caps);
@@ -2042,10 +2145,11 @@ pub const BacktrackEngine = struct {
             self.step_count += 1;
             if (self.step_count > self.max_steps) return error.Timeout;
             next.clearRetainingCapacity();
+            next_ids.clearRetainingCapacity();
             seen.clearRetainingCapacity();
-            for (frontier.items) |start| {
+            for (frontier.items, 0..) |start, k| {
                 ends.clearRetainingCapacity();
-                if (has_captures) self.clearCapturesIn(repeat.child);
+                if (has_captures) self.clearIterationCaptures(repeat.child);
                 if (self.match_error) |err| return err;
                 if (reverse) {
                     try self.collectAllReverseMatches(repeat.child, start, &ends);
@@ -2058,6 +2162,20 @@ pub const BacktrackEngine = struct {
                     if (target != null and count + 1 == repeat.bounds.min) {
                         if (end != target.?) continue;
                         if (!has_captures) return true;
+                        if (track) {
+                            spans.clearRetainingCapacity();
+                            try spans.append(self.allocator, .{ .start = start, .end = end });
+                            var id = frontier_ids.items[k];
+                            while (id != 0) : (id = nodes.items[id].parent) {
+                                const node = nodes.items[id];
+                                try spans.append(self.allocator, .{ .start = nodes.items[node.parent].pos, .end = node.pos });
+                            }
+                            std.mem.reverse(IterationSpan, spans.items);
+                            const rebuilt = self.rebuildIterationCaptures(repeat.child, entry.?, spans.items, reverse);
+                            if (self.match_error) |err| return err;
+                            if (rebuilt) return true;
+                            continue;
+                        }
                         self.clearCapturesIn(repeat.child);
                         const matched = if (reverse)
                             self.matchReverseNodeConstrained(repeat.child, start, end)
@@ -2067,16 +2185,23 @@ pub const BacktrackEngine = struct {
                         if (matched) return true;
                         continue;
                     }
-                    // ECMA-262 22.2.2.3.1 steps 3-4 clear captures before
-                    // each next iteration. Equal iteration/position states thus
-                    // have equal continuations; preserve the earliest path.
-                    // Targeted reconstruction above retains the final captures.
-                    const entry = try seen.getOrPut(end);
-                    if (!entry.found_existing) try next.append(self.allocator, end);
+                    // Without capture-sensitive backreferences, equal
+                    // iteration/position states have equal continuations;
+                    // preserve the earliest path. Targeted reconstruction above
+                    // sets the captures of the path it settles on.
+                    const seen_end = try seen.getOrPut(end);
+                    if (!seen_end.found_existing) {
+                        try next.append(self.allocator, end);
+                        if (track) {
+                            try next_ids.append(self.allocator, nodes.items.len);
+                            try nodes.append(self.allocator, .{ .pos = end, .parent = frontier_ids.items[k] });
+                        }
+                    }
                 }
             }
             if (next.items.len == 0) return false;
             std.mem.swap(std.ArrayList(usize), &frontier, &next);
+            std.mem.swap(std.ArrayList(usize), &frontier_ids, &next_ids);
         }
         try positions.appendSlice(self.allocator, frontier.items);
         return frontier.items.len != 0;
@@ -2090,7 +2215,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         var i: usize = 0;
         while (i < min) : (i += 1) {
-            self.clearCapturesIn(repeat.child);
+            self.clearIterationCaptures(repeat.child);
             current_pos = self.matchNode(repeat.child, current_pos) orelse return;
         }
 
@@ -2102,7 +2227,7 @@ pub const BacktrackEngine = struct {
 
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
-                self.clearCapturesIn(repeat.child);
+                self.clearIterationCaptures(repeat.child);
                 if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                     try all_positions.append(self.allocator, current_pos);
@@ -2111,7 +2236,7 @@ pub const BacktrackEngine = struct {
         } else {
             // Unbounded: keep matching until we can't
             while (true) {
-                self.clearCapturesIn(repeat.child);
+                self.clearIterationCaptures(repeat.child);
                 const next_pos = self.matchNodeProgress(repeat.child, current_pos) orelse break;
                 current_pos = next_pos;
                 try all_positions.append(self.allocator, current_pos);
@@ -2134,7 +2259,7 @@ pub const BacktrackEngine = struct {
         var current_pos = pos;
         var i: usize = 0;
         while (i < min) : (i += 1) {
-            self.clearCapturesIn(repeat.child);
+            self.clearIterationCaptures(repeat.child);
             current_pos = self.matchNode(repeat.child, current_pos) orelse return;
         }
 
@@ -2143,7 +2268,7 @@ pub const BacktrackEngine = struct {
 
         if (max) |max_count| {
             while (i < max_count) : (i += 1) {
-                self.clearCapturesIn(repeat.child);
+                self.clearIterationCaptures(repeat.child);
                 if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                     try positions.append(self.allocator, current_pos);
@@ -2152,7 +2277,7 @@ pub const BacktrackEngine = struct {
         } else {
             // Unbounded: keep matching until we can't
             while (true) {
-                self.clearCapturesIn(repeat.child);
+                self.clearIterationCaptures(repeat.child);
                 const next_pos = self.matchNodeProgress(repeat.child, current_pos) orelse break;
                 current_pos = next_pos;
                 try positions.append(self.allocator, current_pos);
@@ -2201,7 +2326,7 @@ pub const BacktrackEngine = struct {
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             const next_pos = self.matchNodeProgress(child, current_pos) orelse {
                 @memcpy(self.captures, saved);
                 break;
@@ -2229,7 +2354,7 @@ pub const BacktrackEngine = struct {
 
     fn matchPlus(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
         // Must match at least once
-        self.clearCapturesIn(quant.child);
+        self.clearIterationCaptures(quant.child);
         const first_match = self.matchNode(quant.child, pos) orelse return null;
 
         if (quant.greedy) {
@@ -2275,11 +2400,18 @@ pub const BacktrackEngine = struct {
         const max = repeat.bounds.max;
 
         // Match minimum required times
+        // A failed required iteration fails the repeat; PCRE did not clear the
+        // earlier ones, so put back the captures from before them.
         var current_pos = pos;
         var i: usize = 0;
+        const entry: ?[]CaptureGroup = if (min > 1 and !self.flags.ecmascript and self.hasCapturingGroup(repeat.child)) self.allocator.dupe(CaptureGroup, self.captures) catch |err| return self.failWith(err, @as(?usize, null)) else null;
+        defer if (entry) |caps| self.allocator.free(caps);
         while (i < min) : (i += 1) {
-            self.clearCapturesIn(repeat.child);
-            current_pos = self.matchNode(repeat.child, current_pos) orelse return null;
+            self.clearIterationCaptures(repeat.child);
+            current_pos = self.matchNode(repeat.child, current_pos) orelse {
+                if (entry) |caps| @memcpy(self.captures, caps);
+                return null;
+            };
         }
 
         // If no max, behave like star after minimum
@@ -2303,7 +2435,7 @@ pub const BacktrackEngine = struct {
                 // Clearing the trial's captures must not erase the last accepted
                 // iteration, just as in matchStarGreedy and matchReverseRepeat.
                 @memcpy(saved, self.captures);
-                self.clearCapturesIn(repeat.child);
+                self.clearIterationCaptures(repeat.child);
                 if (self.matchNodeProgress(repeat.child, current_pos)) |next_pos| {
                     current_pos = next_pos;
                 } else {
@@ -2443,6 +2575,13 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchLookahead(self: *BacktrackEngine, assertion: ast.Node.Assertion, pos: usize) ?usize {
+        // A negative lookahead leaves no captures behind in PCRE. Without the
+        // per-iteration clears, a loop in its body could leave some.
+        const saved: ?[]CaptureGroup = if (assertion.positive or self.flags.ecmascript) null else self.allocator.dupe(CaptureGroup, self.captures) catch |err| return self.failWith(err, @as(?usize, null));
+        defer if (saved) |caps| {
+            @memcpy(self.captures, caps);
+            self.allocator.free(caps);
+        };
         // Lookahead: test if pattern matches at current position without consuming input
         const matches = if (self.hybrid and assertion.child.facts.choice_loop)
             self.continuationAssertion(assertion.child, pos, false)
@@ -2667,7 +2806,7 @@ pub const BacktrackEngine = struct {
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
-            self.clearCapturesIn(quant.child);
+            self.clearIterationCaptures(quant.child);
             const next = self.matchReverseNode(quant.child, current) orelse {
                 @memcpy(self.captures, saved);
                 break;
@@ -2682,7 +2821,7 @@ pub const BacktrackEngine = struct {
     }
 
     fn matchReversePlus(self: *BacktrackEngine, quant: ast.Node.Quantifier, pos: usize) ?usize {
-        self.clearCapturesIn(quant.child);
+        self.clearIterationCaptures(quant.child);
         var current = self.matchReverseNode(quant.child, pos) orelse return null;
         if (!quant.greedy) return current;
 
@@ -2691,7 +2830,7 @@ pub const BacktrackEngine = struct {
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
-            self.clearCapturesIn(quant.child);
+            self.clearIterationCaptures(quant.child);
             const next = self.matchReverseNode(quant.child, current) orelse {
                 @memcpy(self.captures, saved);
                 break;
@@ -2734,10 +2873,18 @@ pub const BacktrackEngine = struct {
 
         var current = pos;
         var count: usize = 0;
+        const entry: ?[]CaptureGroup = if (min > 1 and !self.flags.ecmascript and self.hasCapturingGroup(repeat.child)) self.allocator.dupe(CaptureGroup, self.captures) catch |err| return self.failWith(err, @as(?usize, null)) else null;
+        defer if (entry) |caps| self.allocator.free(caps);
         while (count < min) : (count += 1) {
-            self.clearCapturesIn(repeat.child);
-            const next = self.matchReverseNode(repeat.child, current) orelse return null;
-            if (next > current) return null;
+            self.clearIterationCaptures(repeat.child);
+            const next = self.matchReverseNode(repeat.child, current) orelse {
+                if (entry) |caps| @memcpy(self.captures, caps);
+                return null;
+            };
+            if (next > current) {
+                if (entry) |caps| @memcpy(self.captures, caps);
+                return null;
+            }
             current = next;
         }
 
@@ -2748,7 +2895,7 @@ pub const BacktrackEngine = struct {
             defer self.allocator.free(saved);
             @memcpy(saved, self.captures);
 
-            self.clearCapturesIn(repeat.child);
+            self.clearIterationCaptures(repeat.child);
             const next = self.matchReverseNode(repeat.child, current) orelse {
                 @memcpy(self.captures, saved);
                 break;
@@ -2772,7 +2919,7 @@ pub const BacktrackEngine = struct {
         if (node.node_type == .repeat) {
             const repeat = node.data.repeat;
             if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
-                self.clearCapturesIn(repeat.child);
+                self.clearIterationCaptures(repeat.child);
                 return self.matchReverseNodeConstrained(repeat.child, pos, target_start);
             }
         }
@@ -2822,13 +2969,21 @@ pub const BacktrackEngine = struct {
                 return false;
             },
             .star, .plus, .optional, .repeat => {
+                // PCRE: enumerating the loop's starts would leave the captures
+                // of iterations it does not keep, and nothing clears them, so
+                // match the iterations that reach the target instead.
+                if (!self.flags.ecmascript and self.hasCapturingGroup(node)) {
+                    var saved: CaptureSnapshot = undefined;
+                    const caps = saved.take(self) orelse return false;
+                    defer saved.release(self);
+                    if (self.replayReverseLoop(node, pos, target_start)) return true;
+                    @memcpy(self.captures, caps);
+                    return false;
+                }
                 var starts = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, false);
                 defer starts.deinit(self.allocator);
                 self.collectAllReverseMatches(node, pos, &starts) catch |err| return self.failWith(err, false);
-                for (starts.items) |start| {
-                    if (start == target_start) return true;
-                }
-                return false;
+                return std.mem.indexOfScalar(usize, starts.items, target_start) != null;
             },
             .alternation => {
                 const saved = self.allocator.dupe(CaptureGroup, self.captures) catch |err| {
@@ -2850,6 +3005,48 @@ pub const BacktrackEngine = struct {
         }
     }
 
+    /// Match a loop right to left from `pos` to exactly `target_start`, along
+    /// the starts collectAllReverseMatches lists for it: an optional's body
+    /// may end at any of its starts; a star, plus or plain repeat follows the
+    /// chain where each iteration takes the body's first match.
+    fn replayReverseLoop(self: *BacktrackEngine, node: *ast.Node, pos: usize, target_start: usize) bool {
+        if (node.node_type == .optional) {
+            const quant = node.data.optional;
+            if (target_start != pos) return self.matchReverseNodeConstrained(quant.child, pos, target_start);
+            if (quant.greedy) self.keepEmptyReverseIteration(quant.child, pos);
+            return true;
+        }
+        const child, const min: usize, const max: ?usize, const greedy = switch (node.node_type) {
+            .star => .{ node.data.star.child, 0, null, node.data.star.greedy },
+            .plus => .{ node.data.plus.child, 1, null, node.data.plus.greedy },
+            .repeat => .{ node.data.repeat.child, node.data.repeat.bounds.min, node.data.repeat.bounds.max, node.data.repeat.greedy },
+            else => unreachable,
+        };
+        var current = pos;
+        var count: usize = 0;
+        while (true) {
+            if (current == target_start and count >= min) {
+                // A greedy PCRE loop tries one more iteration at its end; one
+                // that matches empty is kept, captures and all, and ends it.
+                if (greedy and (max == null or count < max.?)) self.keepEmptyReverseIteration(child, current);
+                return true;
+            }
+            if (current < target_start) return false;
+            if (max) |m| if (count >= m) return false;
+            const next = self.matchReverseNode(child, current) orelse return false;
+            if (next > current or (next == current and count >= min)) return false;
+            current = next;
+            count += 1;
+        }
+    }
+
+    fn keepEmptyReverseIteration(self: *BacktrackEngine, child: *ast.Node, pos: usize) void {
+        var saved: CaptureSnapshot = undefined;
+        const caps = saved.take(self) orelse return;
+        defer saved.release(self);
+        if (!self.matchReverseNodeConstrained(child, pos, pos)) @memcpy(self.captures, caps);
+    }
+
     fn collectAllReverseMatches(self: *BacktrackEngine, node: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
         switch (node.node_type) {
             .star => {
@@ -2862,7 +3059,7 @@ pub const BacktrackEngine = struct {
 
                 var current = pos;
                 while (true) {
-                    self.clearCapturesIn(quant.child);
+                    self.clearIterationCaptures(quant.child);
                     const next = self.matchReverseNode(quant.child, current) orelse break;
                     if (next >= current) break;
                     current = next;
@@ -2881,7 +3078,7 @@ pub const BacktrackEngine = struct {
             },
             .plus => {
                 const quant = node.data.plus;
-                self.clearCapturesIn(quant.child);
+                self.clearIterationCaptures(quant.child);
                 const first = self.matchReverseNode(quant.child, pos) orelse return;
                 try self.collectReverseQuantifierTail(quant.child, first, quant.greedy, positions);
             },
@@ -2902,7 +3099,7 @@ pub const BacktrackEngine = struct {
                 } else if (self.fixedRepeatHasChoices(repeat)) {
                     try self.collectFixedRepeatMatches(repeat, pos, positions, true);
                 } else if (repeat.bounds.min == 1 and repeat.bounds.max != null and repeat.bounds.max.? == 1) {
-                    self.clearCapturesIn(repeat.child);
+                    self.clearIterationCaptures(repeat.child);
                     try self.collectAllReverseMatches(repeat.child, pos, positions);
                 } else try self.collectReverseRepeatMatches(repeat, pos, positions);
             },
@@ -2910,11 +3107,13 @@ pub const BacktrackEngine = struct {
                 const c = node.data.concat;
                 var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWithError(err);
                 defer right_positions.deinit(self.allocator);
-                try self.collectAllReverseMatches(c.right, pos, &right_positions);
-
                 const base_captures = self.allocator.alloc(CaptureGroup, self.captures.len) catch |err| return self.failWithError(err);
                 defer self.allocator.free(base_captures);
+                // PCRE does not clear loop bodies per iteration, so what the
+                // enumeration ran stays set; take the captures from before it.
                 @memcpy(base_captures, self.captures);
+                try self.collectAllReverseMatches(c.right, pos, &right_positions);
+                if (self.flags.ecmascript) @memcpy(base_captures, self.captures);
 
                 for (right_positions.items) |split| {
                     @memcpy(self.captures, base_captures);
@@ -2950,7 +3149,7 @@ pub const BacktrackEngine = struct {
 
         var current = pos;
         while (true) {
-            self.clearCapturesIn(child);
+            self.clearIterationCaptures(child);
             const next = self.matchReverseNode(child, current) orelse break;
             if (next >= current) break;
             current = next;
@@ -2972,7 +3171,7 @@ pub const BacktrackEngine = struct {
         var current = pos;
         var count: usize = 0;
         while (count < repeat.bounds.min) : (count += 1) {
-            self.clearCapturesIn(repeat.child);
+            self.clearIterationCaptures(repeat.child);
             const next = self.matchReverseNode(repeat.child, current) orelse return;
             if (next > current) return;
             current = next;
@@ -2983,7 +3182,7 @@ pub const BacktrackEngine = struct {
         try all.append(self.allocator, current);
 
         while (repeat.bounds.max == null or count < repeat.bounds.max.?) : (count += 1) {
-            self.clearCapturesIn(repeat.child);
+            self.clearIterationCaptures(repeat.child);
             const next = self.matchReverseNode(repeat.child, current) orelse break;
             if (next >= current) break;
             current = next;
@@ -3206,7 +3405,7 @@ pub const BacktrackEngine = struct {
     fn matchCaptureBackreferenceReverse(self: *BacktrackEngine, capture_index: usize, pos: usize) ?usize {
         if (capture_index == 0 or capture_index > self.captures.len) return null;
         const capture = self.captures[capture_index - 1];
-        if (!capture.matched) return pos;
+        if (!capture.matched) return self.unsetBackreference(pos);
         return self.matchCaptureTextReverse(capture, pos);
     }
 
@@ -3238,10 +3437,15 @@ pub const BacktrackEngine = struct {
         var found_name = false;
         var found_participating = false;
         if (self.matchNamedBackreferenceParticipatingReverse(node, name, pos, &found_name, &found_participating)) |start| return start;
-        return if (found_name and !found_participating) pos else null;
+        return if (found_name and !found_participating) self.unsetBackreference(pos) else null;
     }
 
     fn matchNamedBackreferenceParticipatingReverse(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize, found_name: *bool, found_participating: *bool) ?usize {
+        // PCRE keeps captures across iterations, so several groups sharing the
+        // name can be set at once; PCRE2 refers to the lowest-numbered set one.
+        // Groups are numbered in this walk's pre-order. In ECMAScript at most
+        // one of them participates.
+        if (!self.flags.ecmascript and found_participating.*) return null;
         switch (node.node_type) {
             .group => {
                 const group = node.data.group;
@@ -3292,6 +3496,13 @@ pub const BacktrackEngine = struct {
         return self.matchCaptureBackreference(capture_index, pos);
     }
 
+    /// A backreference to a group that has not participated matches the empty
+    /// string in ECMAScript and fails in PCRE (without
+    /// PCRE2_MATCH_UNSET_BACKREF): `(a)?b\1` matches `b` only in ECMAScript.
+    fn unsetBackreference(self: *const BacktrackEngine, pos: usize) ?usize {
+        return if (self.flags.ecmascript) pos else null;
+    }
+
     fn matchCaptureBackreference(self: *BacktrackEngine, capture_index: usize, pos: usize) ?usize {
         // Validate capture index (1-based)
         if (capture_index == 0 or capture_index > self.captures.len) {
@@ -3300,11 +3511,7 @@ pub const BacktrackEngine = struct {
 
         const capture = self.captures[capture_index - 1];
 
-        // ECMAScript: a backreference to a group that has not participated
-        // matches the empty string.
-        if (!capture.matched) {
-            return pos;
-        }
+        if (!capture.matched) return self.unsetBackreference(pos);
 
         return self.matchCaptureText(capture, pos);
     }
@@ -3349,10 +3556,15 @@ pub const BacktrackEngine = struct {
         var found_name = false;
         var found_participating = false;
         if (self.matchNamedBackreferenceParticipating(node, name, pos, &found_name, &found_participating)) |end| return end;
-        return if (found_name and !found_participating) pos else null;
+        return if (found_name and !found_participating) self.unsetBackreference(pos) else null;
     }
 
     fn matchNamedBackreferenceParticipating(self: *BacktrackEngine, node: *ast.Node, name: []const u8, pos: usize, found_name: *bool, found_participating: *bool) ?usize {
+        // PCRE keeps captures across iterations, so several groups sharing the
+        // name can be set at once; PCRE2 refers to the lowest-numbered set one.
+        // Groups are numbered in this walk's pre-order. In ECMAScript at most
+        // one of them participates.
+        if (!self.flags.ecmascript and found_participating.*) return null;
         switch (node.node_type) {
             .group => {
                 const group = node.data.group;
