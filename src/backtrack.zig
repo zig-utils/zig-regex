@@ -50,8 +50,8 @@ pub const BacktrackEngine = struct {
     /// the pattern's own dialect (`pcreLoops`); a pattern the continuation
     /// matcher runs whole keeps its rules as they were.
     hybrid: bool = false,
-    /// Whether the pattern holds a repeat `repeatNeedsContinuations` names
-    /// for its backreference (`memoApplies`), found by `init`.
+    /// Whether the pattern holds a loop `loopNeedsContinuations` names
+    /// (`memoApplies`), found by `init`.
     bounded_choice_repeat: ?bool = null,
     /// The groups a backreference in the pattern can read (`referencedGroups`),
     /// found by `init` and shared by the copies `forSearch` makes.
@@ -96,12 +96,10 @@ pub const BacktrackEngine = struct {
         if (engine.hasBackreference(root)) {
             engine.referenced = try engine.referencedGroups();
             engine.owns_referenced = true;
-            engine.bounded_choice_repeat = engine.anyNodeMatches(root, boundedChoiceRepeatVerdict);
-            if (engine.match_error) |err| {
-                allocator.free(engine.referenced);
-                return err;
-            }
-        } else engine.bounded_choice_repeat = false;
+        }
+        errdefer if (engine.owns_referenced) allocator.free(engine.referenced);
+        engine.bounded_choice_repeat = engine.anyNodeMatches(root, boundedChoiceRepeatVerdict);
+        if (engine.match_error) |err| return err;
         return engine;
     }
 
@@ -186,17 +184,17 @@ pub const BacktrackEngine = struct {
     fn memoApplies(self: *BacktrackEngine) bool {
         if (self.hasAtomicGroup(self.ast_root)) return false;
         if (self.ast_root.facts.choice_loop) return true;
-        // A bounded repeat this engine leaves to its first ends in a pattern
-        // with a backreference (`repeatNeedsContinuations`) needs the
-        // continuation matcher too, which needs the memo.
-        if (!self.hasBackreference(self.ast_root)) return false;
+        // A loop this engine leaves to its first ends in a pattern with a
+        // backreference, or whose empty iterations it takes differently from
+        // PCRE (`loopNeedsContinuations`), needs the continuation matcher
+        // too, which needs the memo.
         if (self.bounded_choice_repeat == null)
             self.bounded_choice_repeat = self.anyNodeMatches(self.ast_root, boundedChoiceRepeatVerdict);
         return self.bounded_choice_repeat.?;
     }
 
     fn boundedChoiceRepeatVerdict(self: *BacktrackEngine, n: *ast.Node) NodeVerdict {
-        if (n.node_type == .repeat and self.repeatNeedsContinuations(n)) return .matched;
+        if (self.loopNeedsContinuations(n)) return .matched;
         return switch (n.node_type) {
             .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead, .lookbehind => .descend,
             else => .skip,
@@ -312,7 +310,9 @@ pub const BacktrackEngine = struct {
             if (end) |end_pos| {
                 // The continuation matcher has already validated every node,
                 // including an unmatched backreference that consumes nothing.
-                if (end_pos > pos or (end_pos == pos and (capture_continuations or self.canMatchEmpty(self.ast_root)))) {
+                // A backreference to an empty or (in ECMAScript) unset group
+                // matches empty, which canMatchEmpty does not count.
+                if (end_pos > pos or (end_pos == pos and (capture_continuations or self.canMatchEmpty(self.ast_root) or self.hasBackreference(self.ast_root)))) {
                     // Found a match
                     const captures = self.allocator.alloc(BacktrackMatch.CaptureGroup, self.captures.len) catch |err| {
                         self.match_error = err;
@@ -1018,10 +1018,16 @@ pub const BacktrackEngine = struct {
             else
                 self.matchConcat(node.data.concat, pos),
             .alternation => self.matchAlternation(node.data.alternation, pos),
-            .star => self.matchStar(node.data.star, pos),
-            .plus => self.matchPlus(node.data.plus, pos),
+            .star => if (self.hybrid and self.loopNeedsContinuations(node))
+                self.continuationFirst(node, pos)
+            else
+                self.matchStar(node.data.star, pos),
+            .plus => if (self.hybrid and self.loopNeedsContinuations(node))
+                self.continuationFirst(node, pos)
+            else
+                self.matchPlus(node.data.plus, pos),
             .optional => self.matchOptional(node.data.optional, pos),
-            .repeat => if (self.hybrid and self.repeatNeedsContinuations(node))
+            .repeat => if (self.hybrid and self.loopNeedsContinuations(node))
                 self.continuationFirst(node, pos)
             else
                 self.matchRepeat(node.data.repeat, pos),
@@ -1129,7 +1135,12 @@ pub const BacktrackEngine = struct {
                 defer self.allocator.free(saved_captures);
                 @memcpy(saved_captures, self.captures);
 
-                if (right_has_choices) {
+                if (right_has_choices and self.hybrid and self.tailLoopNeedsContinuations(concat.right)) {
+                    // Only the right side's first end matters here, and the
+                    // continuation matcher finds it without collecting the
+                    // others (`continuationFirst`).
+                    if (self.matchNode(concat.right, left_end)) |result| return result;
+                } else if (right_has_choices) {
                     // Right side also has choices - collect all right positions
                     var right_positions = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, @as(?usize, null));
                     defer right_positions.deinit(self.allocator);
@@ -1271,7 +1282,7 @@ pub const BacktrackEngine = struct {
                 }
             },
             .star, .plus, .optional, .repeat => {
-                if (self.hybrid and self.repeatNeedsContinuations(node)) return self.continuationTarget(node, pos, target_end);
+                if (self.hybrid and self.loopNeedsContinuations(node)) return self.continuationTarget(node, pos, target_end);
                 return self.matchQuantifierConstrained(node, pos, target_end);
             },
             .alternation => {
@@ -1836,6 +1847,8 @@ pub const BacktrackEngine = struct {
     /// For lazy quantifiers, this returns positions in order: minimal first
     /// For greedy quantifiers, this returns positions in order: maximal first
     fn collectAllMatches(self: *BacktrackEngine, node: *ast.Node, pos: usize, positions: *std.ArrayList(usize)) !void {
+        if ((node.node_type == .star or node.node_type == .plus) and self.hybrid and self.loopNeedsContinuations(node))
+            return self.continuationEnds(node, pos, positions);
         switch (node.node_type) {
             .star => {
                 const quant = node.data.star;
@@ -1877,7 +1890,7 @@ pub const BacktrackEngine = struct {
                 }
             },
             .repeat => {
-                if (self.hybrid and self.repeatNeedsContinuations(node)) return self.continuationEnds(node, pos, positions);
+                if (self.hybrid and self.loopNeedsContinuations(node)) return self.continuationEnds(node, pos, positions);
                 const repeat = node.data.repeat;
                 // ECMA-262 RepeatMatcher with min=max=1 still permits the
                 // continuation to backtrack inside its one required child.
@@ -2087,6 +2100,9 @@ pub const BacktrackEngine = struct {
     const BoundedRepeatFrame = struct {
         state: BoundedRepeatState,
         last_start: usize,
+        /// Reached by an empty iteration after the minimum, which only PCRE
+        /// takes: its count is kept as it is in the seen set.
+        empty: bool = false,
         phase: enum { enter, expand, leave } = .enter,
         ends: std.ArrayList(usize) = .empty,
         next: usize = 0,
@@ -2163,7 +2179,10 @@ pub const BacktrackEngine = struct {
                     // no longer distinguishes future choices. This also keeps
                     // a long ordinary match from exhausting its old budget just
                     // by revisiting equivalent decompositions at lower counts.
-                    if (key.count >= repeat.bounds.min and repeat.bounds.max.? - key.count >= remaining)
+                    // An empty iteration (PCRE) does not advance, so it is
+                    // kept apart: folded, it would be its own parent state and
+                    // lose its place in the order of ends.
+                    if (!frame.empty and key.count >= repeat.bounds.min and repeat.bounds.max.? - key.count >= remaining)
                         key.count = repeat.bounds.min;
                     const seen_key = try seen.getOrPut(key);
                     if (seen_key.found_existing) {
@@ -2195,14 +2214,19 @@ pub const BacktrackEngine = struct {
                     } else if (end < frame.state.pos) continue;
                     // RepeatMatcher's continuation rejects empty optional
                     // iterations after the required minimum has been met.
-                    if (end == frame.state.pos and frame.state.count >= repeat.bounds.min) continue;
+                    // PCRE takes one where it comes and goes on to the next
+                    // copy, up to max (`(?:.{0,2}?){1,3}` matches empty). A
+                    // lookbehind, matched right to left here, keeps the
+                    // RepeatMatcher rule until it is matched forwards as PCRE2
+                    // does (zig-utils/zig-regex#63).
+                    if (end == frame.state.pos and frame.state.count >= repeat.bounds.min and (self.flags.ecmascript or reverse)) continue;
                     const state = State{ .count = frame.state.count + 1, .pos = end };
                     const start = frame.state.pos;
                     // Without capture-sensitive backreferences, equal
                     // count/position states have equal continuations; retain
                     // the first path. A target rebuilds the captures of the
                     // path it settles on.
-                    try stack.append(self.allocator, .{ .state = state, .last_start = start });
+                    try stack.append(self.allocator, .{ .state = state, .last_start = start, .empty = end == start and frame.state.count >= repeat.bounds.min });
                 },
                 .leave => {
                     if (repeat.greedy and try self.recordBoundedRepeatMatch(repeat, stack.items, has_captures, positions, target, entry, reverse, first_only)) return true;
@@ -2807,6 +2831,37 @@ pub const BacktrackEngine = struct {
     /// keeping the first path to each count and position, but a backreference
     /// can need a later path's captures there (`(?:b+|(a)|\1){2}` on `bbb`),
     /// so it leaves such a repeat to its first ends (`boundedRepeatHasChoices`).
+    /// Whether a loop goes to the continuation matcher in the pieces this
+    /// engine hands it: one `repeatNeedsContinuations` names, or in PCRE mode
+    /// an unbounded one whose body can match empty. PCRE takes an empty
+    /// iteration where it comes in the body's order and ends the loop there
+    /// (`(a??)+` on `aa` matches empty); this engine follows ECMAScript's
+    /// RepeatMatcher, which rejects it and makes the body consume. The
+    /// continuation matcher's PCRE pieces take it (`pcreLoops`). A bounded
+    /// repeat's own enumeration takes it in PCRE mode instead
+    /// (`collectBoundedRepeatMatchesInner`).
+    fn loopNeedsContinuations(self: *BacktrackEngine, node: *ast.Node) bool {
+        if (self.repeatNeedsContinuations(node)) return true;
+        if (self.flags.ecmascript) return false;
+        return switch (node.node_type) {
+            .star => node.data.star.child.facts.nullable,
+            .plus => node.data.plus.child.facts.nullable,
+            .repeat => node.data.repeat.child.facts.nullable and node.data.repeat.bounds.max == null,
+            else => false,
+        };
+    }
+
+    /// `loopNeedsContinuations` for the loop `node` ends in: the node itself,
+    /// through groups around it and the right sides of concatenations.
+    fn tailLoopNeedsContinuations(self: *BacktrackEngine, node: *ast.Node) bool {
+        var current = node;
+        while (true) switch (current.node_type) {
+            .group => current = current.data.group.child,
+            .concat => current = current.data.concat.right,
+            else => return self.loopNeedsContinuations(current),
+        };
+    }
+
     fn repeatNeedsContinuations(self: *BacktrackEngine, node: *ast.Node) bool {
         if (requiredChoiceIterations(node)) return true;
         if (node.node_type != .repeat) return false;

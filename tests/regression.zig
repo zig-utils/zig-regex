@@ -110,7 +110,8 @@ test "regression: ambiguous adjacent quantified captures use ECMAScript partitio
 test "regression: nullable quantified iteration can continue with progress" {
     const allocator = std.testing.allocator;
 
-    var regex = try Regex.compile(allocator, "(a?b??)*");
+    // ECMAScript rejects the empty second iteration and makes `b??` consume.
+    var regex = try Regex.compileWithFlags(allocator, "(a?b??)*", .{ .ecmascript = true });
     defer regex.deinit();
 
     if (try regex.find("ab")) |match| {
@@ -121,6 +122,16 @@ test "regression: nullable quantified iteration can continue with progress" {
     } else {
         return error.TestExpectedMatch;
     }
+
+    // PCRE takes the empty second iteration and stops there, as PCRE2 does.
+    var pcre = try Regex.compile(allocator, "(a?b??)*");
+    defer pcre.deinit();
+    if (try pcre.find("ab")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("a", match.slice);
+        try std.testing.expectEqualStrings("", match.captures[0]);
+    } else return error.TestExpectedMatch;
 }
 
 test "regression: required zero-width quantified lookahead preserves captures" {

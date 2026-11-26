@@ -5512,3 +5512,46 @@ test "patterns with a backreference try every end of a loop body with choices" {
         }
     }
 }
+
+test "PCRE mode takes an empty loop iteration where PCRE2 does" {
+    // PCRE takes an iteration that matches empty where it comes in the body's
+    // order: it ends an unbounded loop and lets a bounded one go on to its
+    // next copy. ECMAScript's RepeatMatcher rejects it and makes the body
+    // consume. PCRE-mode results are PCRE2 10.47's, ECMAScript ones node 24's.
+    const allocator = std.testing.allocator;
+    const Group = ?[2]usize;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, ecmascript: bool = false, span: ?[2]usize, groups: []const Group = &.{} }{
+        .{ .pattern = "(?:.{0,2}?){1,3}c?", .input = "1_aB1bBaa", .span = .{ 0, 0 } },
+        .{ .pattern = "(.{0,2}?b{0,2}?){0,2}", .input = "B111ab", .span = .{ 0, 0 }, .groups = &.{.{ 0, 0 }} },
+        .{ .pattern = "(?:(?:a|ab)*?){1,3}", .input = "abcbc", .span = .{ 0, 0 } },
+        .{ .pattern = "a(a??){0,2}", .input = "baa", .span = .{ 1, 2 }, .groups = &.{.{ 2, 2 }} },
+        .{ .pattern = "(a??)+", .input = "aa", .span = .{ 0, 0 }, .groups = &.{.{ 0, 0 }} },
+        .{ .pattern = "(?:(?:(b)|b*b*|.){0,3}|c){1,2}$", .input = "aabbbabb", .span = .{ 0, 8 }, .groups = &.{null} },
+        .{ .pattern = "(?:.{0,2}?){1,3}c?", .input = "1_aB1bBaa", .ecmascript = true, .span = .{ 0, 2 } },
+        .{ .pattern = "(.{0,2}?b{0,2}?){0,2}", .input = "B111ab", .ecmascript = true, .span = .{ 0, 2 }, .groups = &.{.{ 1, 2 }} },
+        .{ .pattern = "(?:(?:a|ab)*?){1,3}", .input = "abcbc", .ecmascript = true, .span = .{ 0, 1 } },
+        .{ .pattern = "a(a??){0,2}", .input = "baa", .ecmascript = true, .span = .{ 1, 3 }, .groups = &.{.{ 2, 3 }} },
+        .{ .pattern = "(a??)+", .input = "aa", .ecmascript = true, .span = .{ 0, 2 }, .groups = &.{.{ 1, 2 }} },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = c.ecmascript });
+        defer re.deinit();
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        errdefer std.debug.print("{s} on \"{s}\" (ecmascript={})\n", .{ c.pattern, c.input, c.ecmascript });
+        const span = c.span orelse {
+            try std.testing.expect(found == null);
+            continue;
+        };
+        const m = found orelse return error.TestExpectedMatch;
+        try std.testing.expectEqual(span[0], m.start);
+        try std.testing.expectEqual(span[1], m.end);
+        for (c.groups, 0..) |want, i| {
+            if (want) |g| {
+                try std.testing.expect(m.captures_present[i]);
+                try std.testing.expectEqual(g[0], m.capture_spans[i][0]);
+                try std.testing.expectEqual(g[1], m.capture_spans[i][1]);
+            } else try std.testing.expect(!m.captures_present[i]);
+        }
+    }
+}

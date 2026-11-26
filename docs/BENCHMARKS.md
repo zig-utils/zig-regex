@@ -413,13 +413,14 @@ runs the same generated cases through `Regex.compileWithFlags` (captures on)
 and compares each case's first match with PCRE2's, on the cases that compile
 to the backtracking engine (about two thirds; the Thompson engines there are
 leftmost-longest by design, so the rest are not compared). Three seeds of
-50,000 cases, before and after zig-utils/zig-regex#57, measured 2026-11-25:
+50,000 cases, on 0.5.2, after zig-utils/zig-regex#57 (2026-11-25) and after
+zig-utils/zig-regex#60 (2026-11-26):
 
-| Seed | Compared | Differ, 0.5.2 | Differ, now | Fixed | New |
+| Seed | Compared | Differ, 0.5.2 | After #57 | Now | New |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 33,371 | 48 | 21 | 27 | 0 |
-| 2 | 33,191 | 44 | 14 | 30 | 0 |
-| 3 | 33,131 | 36 | 17 | 19 | 0 |
+| 1 | 33,371 | 48 | 21 | 0 | 0 |
+| 2 | 33,191 | 44 | 14 | 0 | 0 |
+| 3 | 33,131 | 36 | 18 | 0 | 0 |
 
 0.5.2 repeated the body of `*`, `+` and `{n,}` at its first end only, so a
 body ending in a lazy quantifier never grew and `^(?:'b*?)*c` missed `'bc`
@@ -475,15 +476,26 @@ search against 24 us. The memo's budget caps the memory, the cost stays
 linear in the input, and a search the memo outgrows gives the old engine's
 answer. CRS has no backreferences.
 
-Every one of the 52
-remaining differences starts where PCRE2's match starts and is longer, and all
-but one repeat a group that can match empty (`(?:.{0,2}?){1,3}`,
-`(?s:.*?){2,}`): those loops stay on the old engine, which follows ECMAScript's
-RepeatMatcher and keeps iterating where PCRE2 stops after an empty iteration.
-Node 24's `RegExp` gives zig-regex's span on 12 of the 13 it can parse; the
-other 39 use `{,n}`, `\A`, `\z` or standalone modifiers, which JavaScript does
-not have. The exception, `(?i:\ba{0,2}b{0,2}?|b)*|b{2,}?`, is also wrong in
-0.5.2.
+The 53 differences left after #57 started where PCRE2's match starts and were
+longer, and all but one repeated a group that can match empty
+(`(?:.{0,2}?){1,3}`, `(?s:.*?){2,}`). PCRE takes an iteration that matches empty
+where it comes in the body's order, ending an unbounded loop there and going on
+to a bounded one's next copy; the old engine follows ECMAScript's
+RepeatMatcher, which rejects it and makes the body consume. In PCRE mode such
+loops (other than a counted `{n}`) now go to the continuation matcher, whose
+PCRE pieces take the empty iteration; ECMAScript mode keeps the RepeatMatcher
+rule, so its results are unchanged. The one exception,
+`(?i:\ba{0,2}b{0,2}?|b)*|b{2,}?`, which 0.5.2 also got wrong, went with them.
+
+Unbounded loops (`*`, `+`, `{n,}`) over a body that can match empty go to the
+continuation matcher in PCRE mode; a bounded repeat's own enumeration takes the
+empty iteration instead, and a loop the match ends in is asked for its first
+end only. Such a loop costs what it did up to 16 KB of input
+(`(?=l)(?:\s*\w*)*` 98,556 steps against 101,088 at 16 KB, `(?=a)(a?)*` 2.5
+times), with a few MB of memo. Past that the memo outgrows its budget: the
+search costs about 1.7 times 0.5.2's steps, holds 15 to 18 MB, and gives the old
+engine's answer, whose capture can differ from PCRE2's. A lookbehind keeps the
+RepeatMatcher rule until it is matched forwards (zig-utils/zig-regex#63).
 
 ## Backtracking programs (`regex.bt`) against PCRE2
 
