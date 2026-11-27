@@ -149,7 +149,9 @@ test "regression: required zero-width quantified lookahead preserves captures" {
         return error.TestExpectedMatch;
     }
 
-    var optional = try Regex.compile(allocator, "(?:(?=(abc)))?a");
+    // ECMAScript rejects the optional's empty iteration; PCRE takes it,
+    // lookahead captures and all, as PCRE2 does.
+    var optional = try Regex.compileWithFlags(allocator, "(?:(?=(abc)))?a", .{ .ecmascript = true });
     defer optional.deinit();
     if (try optional.find("abc")) |match| {
         var mut_match = match;
@@ -159,6 +161,14 @@ test "regression: required zero-width quantified lookahead preserves captures" {
     } else {
         return error.TestExpectedMatch;
     }
+    var pcre = try Regex.compile(allocator, "(?:(?=(abc)))?a");
+    defer pcre.deinit();
+    if (try pcre.find("abc")) |match| {
+        var mut_match = match;
+        defer mut_match.deinit(allocator);
+        try std.testing.expectEqualStrings("a", match.slice);
+        try std.testing.expectEqualStrings("abc", match.captures[0]);
+    } else return error.TestExpectedMatch;
 }
 
 // --- min > max quantifier rejection ---
@@ -850,7 +860,9 @@ test "regression: duplicate named captures backtrack alternatives before named b
 test "regression: lookbehind evaluates captures in reverse direction" {
     const allocator = std.testing.allocator;
 
-    var fixed = try Regex.compile(allocator, "(?<=(\\w){3})f");
+    // ECMAScript only: PCRE matches a bounded lookbehind forwards, so its
+    // last iteration is the rightmost (`e`).
+    var fixed = try Regex.compileWithFlags(allocator, "(?<=(\\w){3})f", .{ .ecmascript = true });
     defer fixed.deinit();
     if (try fixed.find("abcdef")) |match| {
         var mut_match = match;
@@ -860,6 +872,8 @@ test "regression: lookbehind evaluates captures in reverse direction" {
         try std.testing.expectEqualStrings("c", match.captures[0]);
     } else return error.TestExpectedMatch;
 
+    // An unbounded lookbehind, which PCRE2 rejects, runs right to left in
+    // either mode.
     var greedy = try Regex.compile(allocator, "(?<=(?<a>\\w)+)f");
     defer greedy.deinit();
     if (try greedy.find("abcdef")) |match| {

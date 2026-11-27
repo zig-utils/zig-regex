@@ -5555,3 +5555,50 @@ test "PCRE mode takes an empty loop iteration where PCRE2 does" {
         }
     }
 }
+
+test "PCRE mode matches a lookbehind forwards, as PCRE2 does" {
+    // PCRE2 tries a lookbehind's top-level branches in order and, for each,
+    // the starts it can begin at from the furthest back, matching forwards to
+    // end where the assertion stands. ECMAScript runs the body right to left.
+    // PCRE-mode results are PCRE2 10.47's, ECMAScript ones node 24's.
+    const allocator = std.testing.allocator;
+    const Group = ?[2]usize;
+    const cases = [_]struct { pattern: []const u8, input: []const u8, ecmascript: bool = false, span: ?[2]usize, groups: []const Group = &.{} }{
+        .{ .pattern = "(?<=(a)\\1)c", .input = "aac", .span = .{ 2, 3 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "(?<=\\1(a))c", .input = "aac", .span = null },
+        .{ .pattern = "(?<=(\\w){3})f", .input = "abcdef", .span = .{ 5, 6 }, .groups = &.{.{ 4, 5 }} },
+        .{ .pattern = "(?<=(a)(?<=\\1)b)c", .input = "abc", .span = .{ 2, 3 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "(?<=(a|aa))b", .input = "aab", .span = .{ 2, 3 }, .groups = &.{.{ 0, 2 }} },
+        .{ .pattern = "(?<=(\\w{1,3}?))x", .input = "abcx", .span = .{ 3, 4 }, .groups = &.{.{ 0, 3 }} },
+        .{ .pattern = "(?<=a|(ba))c", .input = "bac", .span = .{ 2, 3 }, .groups = &.{null} },
+        .{ .pattern = "(?<=(?:(a)|(ba)))c", .input = "bac", .span = .{ 2, 3 }, .groups = &.{ null, .{ 0, 2 } } },
+        .{ .pattern = "(?<=(.)\\1??)x", .input = "aax", .span = .{ 2, 3 }, .groups = &.{.{ 0, 1 }} },
+        .{ .pattern = "(?<=(?:(a)|(b)){1,2}?)c", .input = "bac", .span = .{ 2, 3 }, .groups = &.{ .{ 1, 2 }, .{ 0, 1 } } },
+        .{ .pattern = "(?<=(a)?\\1)b", .input = "b", .span = null },
+        .{ .pattern = "(?<=(a|aa))b", .input = "aab", .ecmascript = true, .span = .{ 2, 3 }, .groups = &.{.{ 1, 2 }} },
+        .{ .pattern = "(?<=(\\w){3})f", .input = "abcdef", .ecmascript = true, .span = .{ 5, 6 }, .groups = &.{.{ 2, 3 }} },
+        .{ .pattern = "(?<=(a)\\1)c", .input = "aac", .ecmascript = true, .span = .{ 2, 3 }, .groups = &.{.{ 1, 2 }} },
+        .{ .pattern = "(?<=\\1(a))c", .input = "aac", .ecmascript = true, .span = .{ 2, 3 }, .groups = &.{.{ 1, 2 }} },
+    };
+    for (cases) |c| {
+        var re = try Regex.compileWithFlags(allocator, c.pattern, .{ .ecmascript = c.ecmascript });
+        defer re.deinit();
+        var found = try re.find(c.input);
+        defer if (found) |*m| m.deinit(allocator);
+        errdefer std.debug.print("{s} on \"{s}\" (ecmascript={})\n", .{ c.pattern, c.input, c.ecmascript });
+        const span = c.span orelse {
+            try std.testing.expect(found == null);
+            continue;
+        };
+        const m = found orelse return error.TestExpectedMatch;
+        try std.testing.expectEqual(span[0], m.start);
+        try std.testing.expectEqual(span[1], m.end);
+        for (c.groups, 0..) |want, i| {
+            if (want) |g| {
+                try std.testing.expect(m.captures_present[i]);
+                try std.testing.expectEqual(g[0], m.capture_spans[i][0]);
+                try std.testing.expectEqual(g[1], m.capture_spans[i][1]);
+            } else try std.testing.expect(!m.captures_present[i]);
+        }
+    }
+}

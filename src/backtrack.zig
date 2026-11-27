@@ -57,6 +57,14 @@ pub const BacktrackEngine = struct {
     /// found by `init` and shared by the copies `forSearch` makes.
     referenced: []usize = &.{},
     owns_referenced: bool = false,
+    /// Each capture index's group node (index 0 unused), found by `init`
+    /// for a pattern with a backreference and shared like `referenced`.
+    group_nodes: []?*ast.Node = &.{},
+    /// Each lookbehind body `forwardLookbehind` matches forwards, keyed by
+    /// its address, with its branches; found by `init` in PCRE mode and
+    /// shared like `referenced`.
+    lookbehind_plans: std.AutoHashMapUnmanaged(usize, []LookbehindBranch) = .empty,
+    owns_plans: bool = false,
     /// Whether the last search was answered by the attempt with the loop
     /// memo, which ran on half the step budget (see `findFromWithPrefix`).
     answered_with_memo: bool = false,
@@ -96,16 +104,41 @@ pub const BacktrackEngine = struct {
         if (engine.hasBackreference(root)) {
             engine.referenced = try engine.referencedGroups();
             engine.owns_referenced = true;
+            errdefer allocator.free(engine.referenced);
+            engine.group_nodes = try allocator.alloc(?*ast.Node, capture_count + 1);
+            errdefer allocator.free(engine.group_nodes);
+            @memset(engine.group_nodes, null);
+            var pending: std.ArrayList(*ast.Node) = .empty;
+            defer pending.deinit(allocator);
+            var current: ?*ast.Node = root;
+            while (current) |n| : (current = pending.pop()) {
+                if (n.node_type == .group) if (n.data.group.capture_index) |index| {
+                    if (index <= capture_count) engine.group_nodes[index] = n;
+                };
+                try engine.pushNodeChildren(&pending, n);
+            }
         }
-        errdefer if (engine.owns_referenced) allocator.free(engine.referenced);
+        errdefer if (engine.owns_referenced) {
+            allocator.free(engine.referenced);
+            allocator.free(engine.group_nodes);
+        };
         engine.bounded_choice_repeat = engine.anyNodeMatches(root, boundedChoiceRepeatVerdict);
         if (engine.match_error) |err| return err;
+        if (!flags.ecmascript and engine.hasLookbehind(root)) {
+            engine.owns_plans = true;
+            errdefer engine.freeLookbehindPlans();
+            try engine.buildLookbehindPlans();
+        }
         return engine;
     }
 
     pub fn deinit(self: *BacktrackEngine) void {
         self.allocator.free(self.captures);
-        if (self.owns_referenced) self.allocator.free(self.referenced);
+        if (self.owns_referenced) {
+            self.allocator.free(self.referenced);
+            self.allocator.free(self.group_nodes);
+        }
+        if (self.owns_plans) self.freeLookbehindPlans();
     }
 
     /// A copy of this engine for one search, with its own captures, input, step
@@ -115,6 +148,7 @@ pub const BacktrackEngine = struct {
     pub fn forSearch(self: *const BacktrackEngine) std.mem.Allocator.Error!BacktrackEngine {
         var copy = self.*;
         copy.owns_referenced = false;
+        copy.owns_plans = false;
         copy.captures = try self.allocator.alloc(CaptureGroup, self.captures.len);
         for (copy.captures) |*cap| cap.* = .{ .start = 0, .end = 0, .matched = false };
         copy.input = &[_]u8{};
@@ -833,7 +867,7 @@ pub const BacktrackEngine = struct {
                             // Assertions are atomic: later failure cannot resume an
                             // alternative inside an already successful assertion.
                             const matched = if (node.node_type == .lookbehind)
-                                (try self.matchWithContinuations(assertion.child, position, true, .{ .assertion = !assertion.child.facts.capturing_group })) != null
+                                (if (try self.forwardLookbehind(assertion.child, position)) |forward| forward else (try self.matchWithContinuations(assertion.child, position, true, .{ .assertion = !assertion.child.facts.capturing_group })) != null)
                             else
                                 (try self.matchWithContinuations(assertion.child, position, false, .{ .assertion = !assertion.child.facts.capturing_group })) != null;
                             if (saved) |caps| @memcpy(self.captures, caps);
@@ -1335,7 +1369,14 @@ pub const BacktrackEngine = struct {
                 };
 
                 if (node.node_type == .optional) {
-                    if (pos == target_end) return true;
+                    if (pos == target_end) {
+                        // A greedy PCRE `?` tries its body first, and takes it
+                        // when it matches empty, captures and all (`(b?)?`
+                        // sets group 1 to an empty span). ECMAScript rejects
+                        // that empty iteration.
+                        if (!self.flags.ecmascript and node.data.optional.greedy) self.keepEmptyIteration(child, pos);
+                        return true;
+                    }
                     return self.matchNodeConstrained(child, pos, target_end);
                 }
 
@@ -1346,7 +1387,13 @@ pub const BacktrackEngine = struct {
                 };
                 if (!self.canMatchEmpty(child) and !self.hasQuantifiers(child) and !self.hasAlternation(child) and !self.hasBackreference(child))
                     return self.matchRepeatedChildConstrainedLinear(child, pos, target_end, min, max);
-                return self.matchRepeatedChildConstrained(child, pos, target_end, 0, min, max);
+                const greedy = switch (node.node_type) {
+                    .star => node.data.star.greedy,
+                    .plus => node.data.plus.greedy,
+                    .repeat => node.data.repeat.greedy,
+                    else => unreachable,
+                };
+                return self.matchRepeatedChildConstrained(child, pos, target_end, 0, min, max, greedy);
             },
             else => return false,
         }
@@ -1386,7 +1433,42 @@ pub const BacktrackEngine = struct {
         return current == target_end;
     }
 
-    fn matchRepeatedChildConstrained(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, count: usize, min: usize, max: ?usize) bool {
+    /// `matchRepeatedChildConstrained` in PCRE mode, which takes an empty
+    /// iteration where it comes in the body's order, a required one included:
+    /// a bounded loop goes on to its next copy, an unbounded one ends there
+    /// once no iteration is still required (`(a??){2}b` on `ab` makes the
+    /// first copy empty and captures `a`). A greedy loop tries one more
+    /// iteration before stopping, a lazy one stops first.
+    fn matchRepeatedChildConstrainedPcre(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, count: usize, min: usize, max: ?usize, greedy: bool) bool {
+        if (pos > target_end) return false;
+        const can_stop = count >= min and pos == target_end;
+        if (can_stop and !greedy) return true;
+        if (max == null or count < max.?) {
+            var saved: CaptureSnapshot = undefined;
+            const caps = saved.take(self) orelse return false;
+            defer saved.release(self);
+            var ends = std.ArrayList(usize).initCapacity(self.allocator, 0) catch |err| return self.failWith(err, false);
+            defer ends.deinit(self.allocator);
+            self.collectAllMatches(child, pos, &ends) catch |err| return self.failWith(err, false);
+            for (ends.items) |end| {
+                if (end < pos or end > target_end) continue;
+                @memcpy(self.captures, caps);
+                if (!self.matchNodeConstrained(child, pos, end)) continue;
+                if (end == pos and max == null and count + 1 >= min) {
+                    // An unbounded loop ends at an empty iteration.
+                    if (pos == target_end) return true;
+                    continue;
+                }
+                if (self.matchRepeatedChildConstrainedPcre(child, end, target_end, count + 1, min, max, greedy)) return true;
+                if (self.match_error != null) return false;
+            }
+            @memcpy(self.captures, caps);
+        }
+        return can_stop;
+    }
+
+    fn matchRepeatedChildConstrained(self: *BacktrackEngine, child: *ast.Node, pos: usize, target_end: usize, count: usize, min: usize, max: ?usize, greedy: bool) bool {
+        if (!self.flags.ecmascript) return self.matchRepeatedChildConstrainedPcre(child, pos, target_end, count, min, max, greedy);
         if (count >= min and pos == target_end) return true;
         if (pos == target_end) {
             var n = count;
@@ -1411,14 +1493,14 @@ pub const BacktrackEngine = struct {
             @memcpy(self.captures, saved);
             self.clearIterationCaptures(child);
             if (!self.matchNodeConstrained(child, pos, end)) continue;
-            if (self.matchRepeatedChildConstrained(child, end, target_end, count + 1, min, max)) return true;
+            if (self.matchRepeatedChildConstrained(child, end, target_end, count + 1, min, max, greedy)) return true;
         }
 
         if (self.hasAlternation(child) and self.hasCapturingGroup(child)) {
             @memcpy(self.captures, saved);
             self.clearIterationCaptures(child);
             if (self.matchNodeConstrained(child, pos, target_end)) {
-                if (self.matchRepeatedChildConstrained(child, target_end, target_end, count + 1, min, max)) return true;
+                if (self.matchRepeatedChildConstrained(child, target_end, target_end, count + 1, min, max, greedy)) return true;
             }
         }
 
@@ -1708,6 +1790,18 @@ pub const BacktrackEngine = struct {
     fn hasBackreference(self: *BacktrackEngine, node: *ast.Node) bool {
         if (node.facts.known) return node.facts.backreference;
         return self.anyNodeMatches(node, walkWith(backreferenceVerdict));
+    }
+
+    fn hasLookbehind(self: *BacktrackEngine, node: *ast.Node) bool {
+        return self.anyNodeMatches(node, walkWith(lookbehindVerdict));
+    }
+
+    fn lookbehindVerdict(n: *ast.Node) NodeVerdict {
+        return switch (n.node_type) {
+            .lookbehind => .matched,
+            .concat, .alternation, .group, .star, .plus, .optional, .repeat, .lookahead => .descend,
+            else => .skip,
+        };
     }
 
     fn hasAtomicGroup(self: *BacktrackEngine, node: *ast.Node) bool {
@@ -2771,8 +2865,268 @@ pub const BacktrackEngine = struct {
     }
 
     fn lookbehindBody(self: *BacktrackEngine, child: *ast.Node, pos: usize) bool {
+        if (self.forwardLookbehind(child, pos) catch |err| return self.failWith(err, false)) |matched| return matched;
         if (self.hybrid and child.facts.choice_loop) return self.continuationAssertion(child, pos, true);
         return self.matchReverseNode(child, pos) != null;
+    }
+
+    /// The most bytes a lookbehind branch may span to be matched forwards:
+    /// PCRE2's default limit of 255 characters, at up to four bytes each.
+    const max_forward_lookbehind = 255 * 4;
+    /// A branch with one length has one start, tried directly; a wider one
+    /// asks `reachingStarts` for the few that can match. Trying every start
+    /// of even a narrow range costs a forward match each.
+    const narrow_lookbehind = 1;
+    /// How many backreferences deep `lookbehindLength` follows a group.
+    const max_lookbehind_reference_depth = 8;
+
+    const LengthRange = struct { min: usize, max: usize };
+
+    /// One top-level branch of a lookbehind body, as `forwardLookbehind`
+    /// matches it.
+    const LookbehindBranch = struct {
+        node: *ast.Node,
+        range: LengthRange,
+        /// A backreference reads captures that matching right to left would
+        /// set in the wrong order, so its starts cannot come from there.
+        backref: bool,
+    };
+
+    /// Match a lookbehind body as PCRE2 does, in PCRE mode: each top-level
+    /// branch in order, and for each the starts it can begin at from the
+    /// furthest back, matching forwards to end exactly at `pos`. A group in
+    /// the body is then set before a reference to its right, and a loop's last
+    /// iteration is its rightmost (`(?<=(a)\1)c` matches `aac` with 0:1).
+    /// The starts come from this engine's right-to-left enumeration, which
+    /// finds where the branch can begin as cheaply as before; a branch with a
+    /// backreference tries every start its length allows instead. Null when
+    /// this does not apply (`lookbehind_plans`): ECMAScript mode, whose
+    /// lookbehinds run backwards by the spec, a branch with no bounded length,
+    /// which PCRE2 rejects, or an atomic group; the body then runs right to
+    /// left as before.
+    fn forwardLookbehind(self: *BacktrackEngine, child: *ast.Node, pos: usize) !?bool {
+        if (self.flags.ecmascript) return null;
+        const branches = self.lookbehind_plans.get(@intFromPtr(child)) orelse return null;
+        var saved: CaptureSnapshot = undefined;
+        const entry = saved.take(self) orelse return error.OutOfMemory;
+        defer saved.release(self);
+        for (branches) |branch| {
+            if (branch.range.min > pos) continue;
+            const furthest = pos - @min(branch.range.max, pos);
+            const nearest = pos - branch.range.min;
+            if (nearest - furthest < narrow_lookbehind) {
+                // A narrow range is cheaper to try start by start.
+                var start = furthest;
+                while (start <= nearest) : (start += 1) {
+                    @memcpy(self.captures, entry);
+                    if (self.matchNodeConstrained(branch.node, start, pos)) return true;
+                    if (self.match_error) |err| return err;
+                }
+                continue;
+            }
+            // Where the branch can begin, found right to left over the
+            // positions in reach; the forward match below decides.
+            const size = pos - furthest + 1;
+            var ends = LookbehindWindow.empty;
+            ends.set(pos - furthest);
+            const reach = self.reachingStarts(branch.node, ends, furthest, size);
+            if (self.match_error) |err| return err;
+            var bits = reach.iterator(.{});
+            while (bits.next()) |bit| {
+                const start = furthest + bit;
+                if (start > nearest) break;
+                @memcpy(self.captures, entry);
+                if (self.matchNodeConstrained(branch.node, start, pos)) return true;
+                if (self.match_error) |err| return err;
+            }
+        }
+        @memcpy(self.captures, entry);
+        return false;
+    }
+
+    /// The positions a lookbehind branch can span, one bit each: at most
+    /// `max_forward_lookbehind + 1`, so a set lives on the stack.
+    const LookbehindWindow = std.StaticBitSet(max_forward_lookbehind + 1);
+
+    /// The positions in a window of `size` starting at `lo` where `node` can
+    /// begin and end at one of `ends`, found right to left. A lookaround
+    /// passes every position through and a backreference every length its
+    /// group allows, so the set can hold starts that do not match, never miss
+    /// one that does: `forwardLookbehind` checks each forwards.
+    fn reachingStarts(self: *BacktrackEngine, node: *ast.Node, ends: LookbehindWindow, lo: usize, size: usize) LookbehindWindow {
+        var out = LookbehindWindow.empty;
+        if (self.match_error != null) return out;
+        switch (node.node_type) {
+            .literal, .any, .char_class, .unicode_property, .class_set => {
+                const widest: usize = if (node.node_type == .literal or self.flags.bytes) 1 else 4;
+                var it = ends.iterator(.{});
+                while (it.next()) |bit| {
+                    const end = lo + bit;
+                    var width: usize = 1;
+                    while (width <= widest and width <= bit) : (width += 1) {
+                        if (self.matchNode(node, end - width) == end) out.set(bit - width);
+                    }
+                }
+            },
+            .anchor => {
+                var it = ends.iterator(.{});
+                while (it.next()) |bit| if (self.matchAnchor(node.data.anchor, lo + bit) != null) out.set(bit);
+            },
+            .empty, .lookahead, .lookbehind => out = ends,
+            .backref => {
+                const range = self.lookbehindLength(node, 0) orelse LengthRange{ .min = 0, .max = size };
+                var it = ends.iterator(.{});
+                while (it.next()) |bit| {
+                    var width = range.min;
+                    while (width <= range.max and width <= bit) : (width += 1) out.set(bit - width);
+                }
+            },
+            .group => return self.reachingStarts(node.data.group.child, ends, lo, size),
+            .concat => return self.reachingStarts(node.data.concat.left, self.reachingStarts(node.data.concat.right, ends, lo, size), lo, size),
+            .alternation => {
+                out = self.reachingStarts(node.data.alternation.left, ends, lo, size);
+                out.setUnion(self.reachingStarts(node.data.alternation.right, ends, lo, size));
+            },
+            .star, .plus, .optional, .repeat => {
+                const child, const min: usize, const max: ?usize = switch (node.node_type) {
+                    .star => .{ node.data.star.child, 0, null },
+                    .plus => .{ node.data.plus.child, 1, null },
+                    .optional => .{ node.data.optional.child, 0, 1 },
+                    .repeat => .{ node.data.repeat.child, node.data.repeat.bounds.min, node.data.repeat.bounds.max },
+                    else => unreachable,
+                };
+                if (min == 0) out = ends;
+                var current = ends;
+                var count: usize = 0;
+                while (max == null or count < max.?) {
+                    if (self.match_error != null) break;
+                    current = self.reachingStarts(child, current, lo, size);
+                    count += 1;
+                    if (current.count() == 0) break;
+                    if (count >= min) {
+                        // Past the minimum, a pass that adds nothing new
+                        // cannot add anything later either.
+                        const before = out.count();
+                        out.setUnion(current);
+                        if (out.count() == before) break;
+                    }
+                }
+            },
+        }
+        return out;
+    }
+
+    /// The plan `forwardLookbehind` follows for each lookbehind body it can
+    /// match forwards, found once by `init` in PCRE mode.
+    fn buildLookbehindPlans(self: *BacktrackEngine) !void {
+        var pending: std.ArrayList(*ast.Node) = .empty;
+        defer pending.deinit(self.allocator);
+        var nodes: std.ArrayList(*ast.Node) = .empty;
+        defer nodes.deinit(self.allocator);
+        var current: ?*ast.Node = self.ast_root;
+        while (current) |n| : (current = pending.pop()) {
+            if (n.node_type == .lookbehind) blk: {
+                const child = n.data.lookbehind.child;
+                if (child.facts.atomic_group) break :blk;
+                nodes.clearRetainingCapacity();
+                try self.lookbehindBranches(child, &nodes);
+                const branches = try self.allocator.alloc(LookbehindBranch, nodes.items.len);
+                var usable = true;
+                for (nodes.items, branches) |node, *branch| {
+                    const range = self.lookbehindLength(node, 0) orelse {
+                        usable = false;
+                        break;
+                    };
+                    if (range.max > max_forward_lookbehind) {
+                        usable = false;
+                        break;
+                    }
+                    branch.* = .{ .node = node, .range = range, .backref = self.hasBackreference(node) };
+                }
+                if (!usable) {
+                    self.allocator.free(branches);
+                    break :blk;
+                }
+                const entry = self.lookbehind_plans.getOrPut(self.allocator, @intFromPtr(child)) catch |err| {
+                    self.allocator.free(branches);
+                    return err;
+                };
+                if (entry.found_existing) self.allocator.free(entry.value_ptr.*);
+                entry.value_ptr.* = branches;
+            }
+            try self.pushNodeChildren(&pending, n);
+        }
+    }
+
+    fn freeLookbehindPlans(self: *BacktrackEngine) void {
+        var plans = self.lookbehind_plans.valueIterator();
+        while (plans.next()) |branches| self.allocator.free(branches.*);
+        self.lookbehind_plans.deinit(self.allocator);
+    }
+
+    /// A lookbehind body's top-level branches, in order.
+    fn lookbehindBranches(self: *BacktrackEngine, node: *ast.Node, out: *std.ArrayList(*ast.Node)) !void {
+        if (node.node_type == .alternation) {
+            try self.lookbehindBranches(node.data.alternation.left, out);
+            try self.lookbehindBranches(node.data.alternation.right, out);
+        } else try out.append(self.allocator, node);
+    }
+
+    /// The fewest and most bytes `node` can match, or null when that is not
+    /// bounded. A backreference spans what its group does.
+    fn lookbehindLength(self: *BacktrackEngine, node: *ast.Node, depth: usize) ?LengthRange {
+        if (depth > max_lookbehind_reference_depth) return null;
+        const cap = max_forward_lookbehind + 1;
+        // Outside bytes mode `.` and a class match one character, of up to
+        // four bytes.
+        const char_max: usize = if (self.flags.bytes) 1 else 4;
+        return switch (node.node_type) {
+            .literal => .{ .min = 1, .max = 1 },
+            .any, .char_class, .unicode_property => .{ .min = 1, .max = char_max },
+            // A set may hold `\q{...}` strings of any length.
+            .class_set => null,
+            .anchor, .empty, .lookahead, .lookbehind => .{ .min = 0, .max = 0 },
+            .group => self.lookbehindLength(node.data.group.child, depth),
+            .concat => blk: {
+                const left = self.lookbehindLength(node.data.concat.left, depth) orelse break :blk null;
+                const right = self.lookbehindLength(node.data.concat.right, depth) orelse break :blk null;
+                break :blk .{ .min = @min(left.min + right.min, cap), .max = @min(left.max + right.max, cap) };
+            },
+            .alternation => blk: {
+                const left = self.lookbehindLength(node.data.alternation.left, depth) orelse break :blk null;
+                const right = self.lookbehindLength(node.data.alternation.right, depth) orelse break :blk null;
+                break :blk .{ .min = @min(left.min, right.min), .max = @max(left.max, right.max) };
+            },
+            .star, .plus, .optional, .repeat => blk: {
+                const child, const min: usize, const max: ?usize = switch (node.node_type) {
+                    .star => .{ node.data.star.child, 0, null },
+                    .plus => .{ node.data.plus.child, 1, null },
+                    .optional => .{ node.data.optional.child, 0, 1 },
+                    .repeat => .{ node.data.repeat.child, node.data.repeat.bounds.min, node.data.repeat.bounds.max },
+                    else => unreachable,
+                };
+                const range = self.lookbehindLength(child, depth) orelse break :blk null;
+                const hi = max orelse break :blk if (range.max == 0) LengthRange{ .min = 0, .max = 0 } else null;
+                break :blk .{ .min = @min(range.min *| min, cap), .max = @min(range.max *| hi, cap) };
+            },
+            .backref => blk: {
+                const backref = node.data.backref;
+                var out: ?LengthRange = null;
+                for (self.group_nodes, 0..) |maybe, i| {
+                    const group_node = maybe orelse continue;
+                    const group = group_node.data.group;
+                    const wanted = if (backref.name) |name|
+                        (if (group.name) |group_name| std.mem.eql(u8, name, group_name) else false)
+                    else
+                        i == backref.index;
+                    if (!wanted) continue;
+                    const range = self.lookbehindLength(group.child, depth + 1) orelse break :blk null;
+                    // An unset group fails the reference, an empty one spans 0.
+                    out = if (out) |o| .{ .min = @min(o.min, range.min), .max = @max(o.max, range.max) } else range;
+                }
+                break :blk out;
+            },
+        };
     }
 
     // A loop whose body has choices (`(?:'b*?)*`, `(?:a|ab)*`) cannot be
@@ -3244,6 +3598,15 @@ pub const BacktrackEngine = struct {
             current = next;
             count += 1;
         }
+    }
+
+    /// Take one iteration of `child` that matches empty at `pos` if there is
+    /// one, keeping its captures (PCRE's last iteration of a greedy loop).
+    fn keepEmptyIteration(self: *BacktrackEngine, child: *ast.Node, pos: usize) void {
+        var saved: CaptureSnapshot = undefined;
+        const caps = saved.take(self) orelse return;
+        defer saved.release(self);
+        if (!self.matchNodeConstrained(child, pos, pos)) @memcpy(self.captures, caps);
     }
 
     fn keepEmptyReverseIteration(self: *BacktrackEngine, child: *ast.Node, pos: usize) void {

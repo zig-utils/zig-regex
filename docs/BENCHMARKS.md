@@ -494,8 +494,25 @@ end only. Such a loop costs what it did up to 16 KB of input
 (`(?=l)(?:\s*\w*)*` 98,556 steps against 101,088 at 16 KB, `(?=a)(a?)*` 2.5
 times), with a few MB of memo. Past that the memo outgrows its budget: the
 search costs about 1.7 times 0.5.2's steps, holds 15 to 18 MB, and gives the old
-engine's answer, whose capture can differ from PCRE2's. A lookbehind keeps the
-RepeatMatcher rule until it is matched forwards (zig-utils/zig-regex#63).
+engine's answer, whose capture can differ from PCRE2's.
+
+In PCRE mode a lookbehind is matched as PCRE2 matches it: each top-level
+branch in order, and for each the starts it can begin at from the furthest
+back, running forwards to end where the assertion stands
+(zig-utils/zig-regex#63). A group in the body is then set before a reference to
+its right (`(?<=(a)\1)c` matches `aac`, `(?<=\1(a))c` does not), and a loop's
+last iteration is its rightmost (`(?<=(\w){3})f` captures `e`). A backreference
+spans what its group does. A branch with no bounded length, which PCRE2
+rejects, an atomic group, and every lookbehind in ECMAScript mode still run
+right to left, the last by the spec. The starts to try come from a pass over the
+branch right to left that keeps every position it can begin at; each is then
+matched forwards. Over 27,245 random lookaround cases this agrees with PCRE2 on
+247 more and on none fewer; CRS, whose rules hold no lookbehind, takes the same
+time. A pattern that is mostly a lookbehind costs 1.4 to 3 times the time on
+256 KB, at about the same steps (`(?<=a)b` 5.8 ms against 4.2 ms). Outside the
+`u` flag a class matches one byte where PCRE2 in UTF mode matches one
+character, so after a multi-byte character the two can pick different starts
+(`a?(?<=[^a](.{0,2}bb{0,2}))` on `ba€aécba`).
 
 ## Backtracking programs (`regex.bt`) against PCRE2
 
